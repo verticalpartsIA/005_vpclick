@@ -1,0 +1,15 @@
+<ul>
+  <li>O problema de 'Verificando sessão...' ocorre quando o Auth do Supabase tenta revalidar um token que expirou de forma anômala neste navegador (isso fica salvo no Local Storage). Como adicionei tratamento de erro no seu <code>App.tsx</code>, a tela pelo menos não deve mais ficar totalmente travada.</li>
+  <li>O usuário administrador <b>geovane.silva@verticalparts.com.br</b> já estava criado no painel do Supabase com a mesma senha (AuthApiError: A user with this email address has already been registered).</li>
+</ul>
+
+<h3>Como resolver a tela branca / travada agora:</h3>
+<ol>
+  <li>Abra a página do sistema no seu navegador (localhost:5173).</li>
+  <li>Aperte <b>F12</b> para abrir as Ferramentas de Desenvolvedor (DevTools).</li>
+  <li>Vá na aba <b>Application</b> (ou <i>Aplicativo</i>).</li>
+  <li>No menu esquerdo, expanda <b>Local Storage</b> e clique em <code>http://localhost:5173</code>.</li>
+  <li>Apague a chave que começa com <code>sb-...-auth-token</code> (ou simplesmente clique no ícone de "proibido/limpar tudo" para limpar todo o Local Storage dessa página).</li>
+  <li>Recarregue a página (F5). A tela de Login deve aparecer normalmente.</li>
+  <li>Faça o login com o seu usuário: <code>geovane.silva@verticalparts.com.br</code> e a senha <code>Geovane@12</code></li>
+</ol>
