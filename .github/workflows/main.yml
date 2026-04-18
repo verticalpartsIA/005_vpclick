@@ -1,0 +1,54 @@
+name: CI - Testes
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+    jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm ci
+              - name: Rodar linter (ESLint)
+        run: npm run lint
+
+      - name: Build do projeto
+        run: npm run build
+
+      - name: Rodar testes
+        run: npm test
+              - name: Instalar dependências de teste E2E
+        run: |
+          npm install -D cypress @cypress/browserify-preprocessor || true
+          npm install -D @playwright/test || true
+
+      - name: Instalar dependências do sistema para Cypress
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk2.0-0 libgtk-3-0 libgbm-dev libnotify-dev libgconf-2-4 libnss3 libxss1 libasound2 libxtst6 xauth xvfb
+
+      - name: Rodar testes E2E com Cypress
+        uses: cypress-io/github-action@v6
+        with:
+          browser: chrome
+          record: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rodar testes E2E com Playwright
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test
+        continue-on-error: true
