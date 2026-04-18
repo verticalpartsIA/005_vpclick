@@ -26,12 +26,6 @@ jobs:
       - name: Build do projeto
         run: npm run build
 
-      - name: Iniciar servidor em background
-        run: |
-          npm run dev &
-          sleep 10
-          echo "Servidor iniciado"
-
       - name: Instalar Cypress
         run: npm install -D cypress
 
