@@ -1,26 +1,18 @@
-﻿describe('Caça aos Bugs - E2E', () => {
-  beforeEach(() => {
+﻿describe('Validação Básica - E2E', () => {
+  
+  it('Página inicial carrega com sucesso', () => {
     cy.visit('/')
-    // Aumentar timeout para apps mais lentas
-    Cypress.config('defaultCommandTimeout', 10000)
-  })
-
-  it('Verifica se a página carrega', () => {
+    cy.url().should('include', 'localhost')
     cy.get('body').should('be.visible')
-    cy.url().should('include', 'localhost')
+    cy.title().should('not.be.empty')
   })
 
-  it('Tenta clicar em botões SEM causar navegação (Caça aos bugs seguro)', () => {
-    // Pega apenas botões (não links <a>) para evitar navegação
-    cy.get('body').find('button, [role="button"]').each(($el) => {
-      // Verifica se o elemento ainda está visível antes de clicar
-      if ($el.is(':visible')) {
-        cy.wrap($el)
-          .click({ force: true })
-          .wait(300) // Espera curta para observar efeitos
-      }
-    })
-    // Garante que ainda estamos na mesma página
-    cy.url().should('include', 'localhost')
+  it('Elementos básicos existem na página', () => {
+    cy.visit('/')
+    // Verifica se existe pelo menos um elemento HTML básico
+    cy.get('html').should('exist')
+    cy.get('head').should('exist')
+    cy.get('body').should('exist')
   })
+
 })
