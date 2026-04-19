@@ -1,0 +1,10 @@
+{
+  "admin": {
+    "role": "ADMIN",
+    "note": "Credenciais via secrets: CYPRESS_ADMIN_EMAIL / CYPRESS_ADMIN_PASSWORD"
+  },
+  "collaborator": {
+    "role": "COLABORADOR",
+    "note": "Credenciais via secrets: CYPRESS_COLLAB_EMAIL / CYPRESS_COLLAB_PASSWORD"
+  }
+}
