@@ -1,41 +1,83 @@
-name: CI - Testes E2E
+name: Quality Gate + E2E Bug Hunters
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
 
 jobs:
-  test:
+  quality:
+    name: TypeScript + Lint + Unit Tests
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout do código
-        uses: actions/checkout@v4
-
-      - name: Configurar Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           cache: 'npm'
+      - run: npm ci
+      - run: npx tsc --noEmit
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
+      - run: npm run lint
+      - run: npm test
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: Instalar dependências
-        run: npm ci
-
-      - name: Build do projeto
-        run: npm run build
-
-      - name: Instalar Cypress
-        run: npm install -D cypress
-
-      - name: Rodar testes E2E com Cypress
+  e2e:
+    name: E2E (${{ matrix.group }})
+    runs-on: ubuntu-latest
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: smoke-auth
+            specs: 'cypress/e2e/01-smoke.cy.ts,cypress/e2e/02-auth.cy.ts'
+          - group: task-creation-access
+            specs: 'cypress/e2e/03-task-creation.cy.ts,cypress/e2e/04-collaborator-access.cy.ts'
+          - group: visibility-realtime-admin
+            specs: 'cypress/e2e/05-task-visibility.cy.ts,cypress/e2e/06-realtime.cy.ts,cypress/e2e/07-admin-panel.cy.ts'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Cypress run - ${{ matrix.group }}
         uses: cypress-io/github-action@v6
         with:
-          start: npm run dev
-          wait-on: 'http://localhost:8080'
-          wait-on-timeout: 120
+          install: false
+          spec: ${{ matrix.specs }}
+          config: baseUrl=https://vpclick.vpsistema.com
           browser: chrome
-          record: false
+          headed: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CYPRESS_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          CYPRESS_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          CYPRESS_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
+          CYPRESS_ADMIN_EMAIL: ${{ secrets.TEST_ADMIN_EMAIL }}
+          CYPRESS_ADMIN_PASSWORD: ${{ secrets.TEST_ADMIN_PASSWORD }}
+          CYPRESS_COLLAB_EMAIL: ${{ secrets.TEST_COLLAB_EMAIL }}
+          CYPRESS_COLLAB_PASSWORD: ${{ secrets.TEST_COLLAB_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: screenshots-${{ matrix.group }}
+          path: cypress/screenshots
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: videos-${{ matrix.group }}
+          path: cypress/videos
+          if-no-files-found: ignore
