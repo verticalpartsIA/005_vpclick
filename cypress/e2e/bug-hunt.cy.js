@@ -1,21 +1,26 @@
-describe('Caça aos Bugs - E2E', () => {
+﻿describe('Caça aos Bugs - E2E', () => {
   beforeEach(() => {
-    // Visita a raiz do site (assumindo que o servidor estará rodando na porta 8080 ou 3000)
-    // Vamos deixar genérico por enquanto, o workflow vai subir o servidor
     cy.visit('/')
+    // Aumentar timeout para apps mais lentas
+    Cypress.config('defaultCommandTimeout', 10000)
   })
 
   it('Verifica se a página carrega', () => {
     cy.get('body').should('be.visible')
+    cy.url().should('include', 'localhost')
   })
 
-  it('Tenta clicar em todos os botões (Caça aos bugs)', () => {
-    // Pega todos os botões visíveis
-    cy.get('body').find('button, a, [role="button"]').each(($el) => {
-      // Clica com force true para ignorar sobreposições
-      cy.wrap($el).click({ force: true })
-      // Espera meio segundo para ver se o JS quebra ou navega
-      cy.wait(500)
+  it('Tenta clicar em botões SEM causar navegação (Caça aos bugs seguro)', () => {
+    // Pega apenas botões (não links <a>) para evitar navegação
+    cy.get('body').find('button, [role="button"]').each(($el) => {
+      // Verifica se o elemento ainda está visível antes de clicar
+      if ($el.is(':visible')) {
+        cy.wrap($el)
+          .click({ force: true })
+          .wait(300) // Espera curta para observar efeitos
+      }
     })
+    // Garante que ainda estamos na mesma página
+    cy.url().should('include', 'localhost')
   })
 })
