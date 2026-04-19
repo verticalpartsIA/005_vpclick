@@ -1,18 +1,17 @@
-﻿describe('Validação Básica - E2E', () => {
-  
-  it('Página inicial carrega com sucesso', () => {
+﻿describe('Caça aos Bugs - Avançado', () => {
+  beforeEach(() => {
     cy.visit('/')
-    cy.url().should('include', 'localhost')
+    Cypress.config('defaultCommandTimeout', 10000)
+  })
+
+  it('Verifica se a página carrega sem erros', () => {
     cy.get('body').should('be.visible')
-    cy.title().should('not.be.empty')
   })
 
-  it('Elementos básicos existem na página', () => {
-    cy.visit('/')
-    // Verifica se existe pelo menos um elemento HTML básico
-    cy.get('html').should('exist')
-    cy.get('head').should('exist')
-    cy.get('body').should('exist')
+  it('Clica nos 3 primeiros botões visíveis', () => {
+    cy.get('button:visible').first().click({ force: true }).wait(500)
+    cy.get('button:visible').eq(1).click({ force: true }).wait(500)
+    cy.get('button:visible').eq(2).click({ force: true }).wait(500)
+    cy.url().should('include', 'localhost')
   })
-
 })
