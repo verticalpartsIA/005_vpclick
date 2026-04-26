@@ -4349,9 +4349,17 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const todayLabel = new Date().toLocaleDateString('pt-BR');
 
   const handleStartOrDurationChange = (newStart: string, newDuration: string) => {
-    if (newStart && newDuration && Number(newDuration) > 0) {
-      const d = new Date(newStart);
-      d.setDate(d.getDate() + Number(newDuration));
+    if (!newStart || !newDuration.trim()) return;
+    const isHours = /^\d+(\.\d+)?\s*h$/i.test(newDuration.trim());
+    const numericValue = parseFloat(newDuration);
+    if (isNaN(numericValue) || numericValue <= 0) return;
+    const d = new Date(newStart);
+    if (isHours) {
+      // Horas: mantém o mesmo dia da data de início
+      setDueDate(newStart);
+    } else {
+      // Dias: soma à data de início
+      d.setDate(d.getDate() + Math.round(numericValue));
       setDueDate(d.toISOString().split('T')[0]);
     }
   };
@@ -4632,11 +4640,10 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-bold text-gray-400 uppercase">Duração (dias)</label>
+                  <label className="text-xs font-bold text-gray-400 uppercase">Duração (dias ou horas)</label>
                   <input
-                    type="number"
-                    min="1"
-                    placeholder="Ex: 11"
+                    type="text"
+                    placeholder="Ex: 5 ou 3h"
                     className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
                     value={duration}
                     onChange={(e) => {
@@ -4650,11 +4657,11 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                 <label className="text-xs font-bold text-gray-400 uppercase">Data Limite</label>
                 <input
                   type="date"
-                  className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+                  className="w-full p-2 border rounded mt-1 text-sm bg-gray-50 text-gray-500 cursor-not-allowed outline-none"
                   value={dueDate}
-                  onChange={(e) => setDueDate(e.target.value)}
+                  readOnly
                 />
-                <p className="text-[10px] text-gray-400 mt-1">Calculada automaticamente ou edite manualmente</p>
+                <p className="text-[10px] text-gray-400 mt-1">Calculada automaticamente a partir da data de início + duração</p>
               </div>
               <div>
                 <label className="text-xs font-bold text-gray-400 uppercase">Criada em</label>
