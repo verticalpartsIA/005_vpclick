@@ -25,9 +25,11 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
     // Carousel state
     const [bgIndex, setBgIndex] = useState(0);
 
-    // Force redirect to central portal to ensure SSO usage
+    // Force redirect to central portal to ensure SSO usage (só em produção)
     useEffect(() => {
-        window.location.replace("https://vpsistema.com");
+        if (window.location.hostname === 'vpclick.vpsistema.com') {
+            window.location.replace("https://vpsistema.com");
+        }
     }, []);
 
     useEffect(() => {
