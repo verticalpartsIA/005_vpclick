@@ -4406,21 +4406,21 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const availableFolders = useMemo(() => folders.filter((f: Folder) => f.spaceId === selectedSpaceId), [folders, selectedSpaceId]);
   const availableLists = useMemo(() => lists.filter((l: List) => l.folderId === selectedFolderId), [lists, selectedFolderId]);
 
-  // Auto-select space when there's only one option and nothing is selected yet
+  // Auto-select primeiro espaço disponível quando nenhum está selecionado
   useEffect(() => {
-    if (spaces.length === 1 && !selectedSpaceId) {
+    if (spaces.length > 0 && !selectedSpaceId) {
       setSelectedSpaceId(spaces[0].id);
     }
   }, [spaces, selectedSpaceId]);
 
-  // Auto-select folder when there's only one option in the chosen space
+  // Auto-select primeira pasta disponível quando nenhuma está selecionada
   useEffect(() => {
-    if (availableFolders.length === 1 && !selectedFolderId) {
+    if (availableFolders.length > 0 && !selectedFolderId) {
       setSelectedFolderId(availableFolders[0].id);
     }
   }, [availableFolders, selectedFolderId]);
 
-  // Auto-select list if only one exists or if user just selected a folder
+  // Auto-select primeira lista disponível quando nenhuma está selecionada
   useEffect(() => {
     if (availableLists.length > 0 && !selectedListId) {
       setSelectedListId(availableLists[0].id);
