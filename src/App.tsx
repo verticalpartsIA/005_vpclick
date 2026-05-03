@@ -888,7 +888,7 @@ export default function App() {
   const loadTasks = useCallback(async () => {
     if (!session) return;
 
-    let query = supabase.from('tasks').select('*');
+    let query = supabaseAdmin.from('tasks').select('*');
 
     if (activeListId) {
       query = query.eq('list_id', activeListId);
@@ -910,11 +910,11 @@ export default function App() {
 
       // Fetch sub-entities in parallel
       const results = await Promise.all([
-        supabase.from('task_attachments').select('*').in('task_id', taskIds),
-        supabase.from('task_comments').select('*').in('task_id', taskIds),
-        supabase.from('task_extension_logs').select('*').in('task_id', taskIds),
-        supabase.from('task_checklists').select('*').in('task_id', taskIds),
-        supabase.from('task_activities').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_attachments').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_comments').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_extension_logs').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_checklists').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_activities').select('*').in('task_id', taskIds),
       ]);
       const attData = results[0].data;
       const commData = results[1].data;
@@ -1736,11 +1736,23 @@ export default function App() {
     let baseTasks = tasks;
 
     // Se não for ADMIN, filtramos as tarefas globais pelas pastas permitidas
+    // SEMPRE incluímos tarefas onde o usuário é assignee direto (ex: tarefas do VPRequisições)
     if (currentUser.role !== UserRole.ADMIN) {
       const access = userAccess[currentUser.id];
       const allowedFolderIds = access?.folderIds || [];
       const allowedListIds = lists.filter(l => allowedFolderIds.includes(l.folderId)).map(l => l.id);
-      baseTasks = tasks.filter(t => allowedListIds.includes(t.listId));
+      const accessibleTasks = tasks.filter(t => allowedListIds.includes(t.listId));
+      const assignedTasks = tasks.filter(t =>
+        t.mainAssigneeId === currentUser.id ||
+        (t.secondaryAssigneeIds ?? []).includes(currentUser.id)
+      );
+      // União sem duplicatas
+      const seen = new Set<string>();
+      baseTasks = [...accessibleTasks, ...assignedTasks].filter(t => {
+        if (seen.has(t.id)) return false;
+        seen.add(t.id);
+        return true;
+      });
     }
 
     let result = baseTasks;
