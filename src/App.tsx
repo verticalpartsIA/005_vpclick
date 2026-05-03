@@ -1493,7 +1493,7 @@ export default function App() {
 
   // Creation Handlers
   const handleCreateSpace = async (name: string, color: string, icon: string = 'Layout') => {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('spaces')
       .insert({
         name,
@@ -1532,7 +1532,7 @@ export default function App() {
     if (!targetSpaceId) return;
 
     // 1. Criar Folder
-    const { data: folderData, error: folderError } = await supabase
+    const { data: folderData, error: folderError } = await supabaseAdmin
       .from('folders')
       .insert({ name, space_id: targetSpaceId })
       .select()
@@ -1548,7 +1548,7 @@ export default function App() {
       // 2. Criar lista padrão 'Geral' com o primeiro grupo de status (Padrão)
       const defaultStatusGroupId = statusGroups.find(g => g.name === 'Padrão')?.id || statusGroups[0]?.id;
 
-      const { data: listData, error: listError } = await supabase
+      const { data: listData, error: listError } = await supabaseAdmin
         .from('lists')
         .insert({
           name: 'Geral',
@@ -1600,7 +1600,7 @@ export default function App() {
   const handleConfirmCreateList = async (folderId: string, name: string, statusGroupId: string) => {
     const folder = folders.find((f) => f.id === folderId);
 
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('lists')
       .insert({
         name: name.trim(),
@@ -1649,7 +1649,7 @@ export default function App() {
         return;
       }
 
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .from('tasks')
         .insert({
           title: newTaskPartial.title || 'Nova Tarefa',
