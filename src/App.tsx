@@ -2084,6 +2084,10 @@ export default function App() {
                 onSelectTask={setSelectedTaskId}
                 onStatusChange={handleStatusChange}
                 onDeleteTask={handleDeleteTask}
+                onQuickCreate={(prefill?: any) => {
+                  setPrefilledTaskData(prefill || null);
+                  setIsTaskModalOpen(true);
+                }}
                 users={adminUsers}
                 statusGroups={statusGroups}
                 lists={lists}
@@ -3949,7 +3953,7 @@ function ListView({
   );
 }
 
-function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, lists, statusGroups, activeListId }: any) {
+function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onQuickCreate, users, lists, statusGroups, activeListId }: any) {
   // Refs para não causar re-render durante drag (re-renders destroem o HTML5 DnD)
   const draggingTaskIdRef = useRef<string | null>(null);
   const currentDragOverColRef = useRef<HTMLElement | null>(null);
@@ -3975,7 +3979,6 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
         return a.localeCompare(b);
       });
     }
-    // Deduplicate case-insensitive — evita "Concluído" e "CONCLUÍDO" como duas colunas
     const seen = new Set<string>();
     return labels.filter(label => {
       const key = label.toLowerCase();
@@ -3989,17 +3992,20 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
     const sLower = (statusLabel || '').toLowerCase();
     const opt = activeStatusOptions.find((o: any) => o.label?.toLowerCase() === sLower) ||
       statusGroups?.flatMap((g: any) => g.options).find((o: any) => o.label?.toLowerCase() === sLower);
-    if (opt?.color) return opt.color;
-    return '#94a3b8';
+    return opt?.color || '#94a3b8';
   };
 
-  // Manipula highlight da coluna diretamente no DOM — sem setState (re-render quebra DnD)
+  // Highlight via DOM — zero re-renders durante drag
   const highlightColumn = (el: HTMLElement | null) => {
     if (currentDragOverColRef.current && currentDragOverColRef.current !== el) {
-      currentDragOverColRef.current.classList.remove('!bg-yellow-50', '!border-yellow-400', 'shadow-lg');
+      currentDragOverColRef.current.style.backgroundColor = '';
+      currentDragOverColRef.current.style.borderColor = '';
+      currentDragOverColRef.current.style.boxShadow = '';
     }
     if (el && el !== currentDragOverColRef.current) {
-      el.classList.add('!bg-yellow-50', '!border-yellow-400', 'shadow-lg');
+      el.style.backgroundColor = '#fefce8';
+      el.style.borderColor = '#facc15';
+      el.style.boxShadow = '0 4px 16px rgba(250,204,21,0.25)';
     }
     currentDragOverColRef.current = el;
   };
@@ -4020,15 +4026,13 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
   const handleColumnDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    // Sobe até o elemento de coluna (data-kanban-col)
     let el = e.target as HTMLElement;
     while (el && !el.dataset.kanbanCol) el = el.parentElement as HTMLElement;
     if (el) highlightColumn(el);
   };
 
   const handleColumnDragLeave = (e: React.DragEvent) => {
-    const col = e.currentTarget as HTMLElement;
-    if (!col.contains(e.relatedTarget as Node)) {
+    if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
       highlightColumn(null);
     }
   };
@@ -4037,42 +4041,75 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
     e.preventDefault();
     highlightColumn(null);
     const taskId = draggingTaskIdRef.current || e.dataTransfer.getData('text/plain');
-    if (taskId) {
-      onStatusChange(taskId, status);
-    }
+    if (taskId) onStatusChange(taskId, status);
     draggingTaskIdRef.current = null;
     setDraggingTaskId(null);
   };
 
+  const PRIORITY_FLAG: Record<string, { color: string; label: string }> = {
+    Urgente: { color: '#ef4444', label: 'Urgente' },
+    Alta:    { color: '#f97316', label: 'Alta' },
+    Média:   { color: '#3b82f6', label: 'Média' },
+    Media:   { color: '#3b82f6', label: 'Média' },
+    Baixa:   { color: '#94a3b8', label: 'Baixa' },
+  };
+
   return (
-    <div className="flex gap-4 h-full overflow-x-auto pb-4 custom-scrollbar items-start" onClick={(e) => e.stopPropagation()}>
+    <div className="flex gap-5 h-full overflow-x-auto pb-6 px-2 custom-scrollbar items-start" onClick={(e) => e.stopPropagation()}>
       {columns.map(status => {
         const statusColor = getStatusColor(status);
-        // Filtra ignorando case para agrupar "Concluído" e "CONCLUÍDO" juntos
         const columnTasks = tasks.filter((t: Task) => t.status?.toLowerCase() === status.toLowerCase());
 
         return (
           <div
             key={status}
             data-kanban-col={status}
-            className="w-80 shrink-0 flex flex-col max-h-full rounded-xl border border-gray-200 bg-gray-50 p-3 transition-colors"
+            className="w-72 shrink-0 flex flex-col max-h-full rounded-xl border border-gray-200 bg-[#f8f9fa] transition-all"
             onDragOver={handleColumnDragOver}
             onDragLeave={handleColumnDragLeave}
             onDrop={(e) => handleDrop(e, status)}
           >
-            <div className="flex items-center justify-between mb-3 px-1">
-              <h3 className="font-bold text-gray-600 text-sm flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: statusColor }} />
-                {status}
-                <span className="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full">
-                  {columnTasks.length}
+            {/* ── Cabeçalho da Coluna ── */}
+            <div className="flex items-center justify-between px-3 pt-3 pb-2">
+              <div className="flex items-center gap-2">
+                <span
+                  className="px-2 py-0.5 rounded text-[11px] font-extrabold uppercase text-white tracking-wide"
+                  style={{ backgroundColor: statusColor }}
+                >
+                  {status}
                 </span>
-              </h3>
-              <button className="text-gray-400 hover:text-gray-600"><Icons.Plus /></button>
+                <span className="text-xs font-semibold text-gray-400">{columnTasks.length}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => onQuickCreate?.({ status })}
+                  className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors"
+                  title="Adicionar tarefa"
+                >
+                  <Icons.Plus />
+                </button>
+                <button className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors">
+                  <MoreHorizontal className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
-            <div className="space-y-3 overflow-y-auto flex-1 custom-scrollbar min-h-[60px]">
+
+            {/* ── Cards ── */}
+            <div className="flex flex-col gap-2 overflow-y-auto flex-1 custom-scrollbar px-2 pb-2 min-h-[60px]">
               {columnTasks.map((task: Task) => {
                 const isDragging = draggingTaskId === task.id;
+                const listName = lists?.find((l: any) => l.id === task.listId)?.name;
+                const subtaskCount = tasks.filter((t: Task) => t.parentId === task.id).length;
+                const assignee = users?.find((u: User) => u.id === task.mainAssigneeId);
+                const secondaryAssignees = (task.secondaryAssigneeIds || [])
+                  .map((id: string) => users?.find((u: User) => u.id === id))
+                  .filter(Boolean);
+                const allAssignees = [assignee, ...secondaryAssignees].filter(Boolean);
+                const hasDueDate = task.dueDate && !isNaN(new Date(task.dueDate).getTime());
+                const isOverdue = hasDueDate && new Date(task.dueDate) < new Date();
+                const priorityFlag = PRIORITY_FLAG[task.priority];
+                const h = getTaskHealth(task);
+
                 return (
                   <div
                     key={task.id}
@@ -4080,71 +4117,135 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
                     onDragStart={(e) => handleDragStart(e, task.id)}
                     onDragEnd={handleDragEnd}
                     onClick={() => onSelectTask(task.id)}
-                    className={`bg-white p-3 rounded-lg shadow-sm border-l-4 border border-gray-200 hover:shadow-md cursor-grab active:cursor-grabbing transition-all group relative select-none ${
-                      isDragging ? 'opacity-30' : 'opacity-100'
+                    className={`bg-white rounded-lg border border-gray-200 hover:border-gray-300 hover:shadow-sm cursor-grab active:cursor-grabbing transition-all group relative select-none ${
+                      isDragging ? 'opacity-30' : ''
                     }`}
-                    style={{ borderLeftColor: statusColor }}
+                    style={{ borderLeftWidth: 3, borderLeftColor: statusColor }}
                   >
-                    {/* Delete Button */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
-                      className="absolute top-2 right-2 p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 z-10"
-                      title="Excluir Tarefa"
-                    >
-                      <Icons.Trash />
-                    </button>
+                    {/* Hover actions */}
+                    <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onStatusChange(task.id, columns[columns.length - 1]); }}
+                        className="p-1 rounded text-gray-400 hover:text-green-600 hover:bg-green-50 transition-colors"
+                        title="Marcar como concluída"
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M3 8l3.5 3.5L13 4.5"/>
+                        </svg>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
+                        className="p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                        title="Excluir"
+                      >
+                        <Icons.Trash />
+                      </button>
+                    </div>
 
-                    <div className="flex justify-between items-start mb-2">
-                      <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${PRIORITY_COLORS[task.priority]}`}>
-                        {task.priority}
-                      </span>
+                    {/* Card body */}
+                    <div className="px-3 pt-3 pb-2">
+                      {/* Extension count badge */}
                       {task.extensionCount > 0 && (
-                        <span className="text-[10px] text-red-500 font-bold bg-red-50 px-1 rounded flex items-center gap-0.5 mr-6">
-                          <Icons.Clock /> {task.extensionCount}
-                        </span>
+                        <div className="flex items-center gap-1 text-[10px] text-red-500 font-bold mb-1">
+                          <Icons.Clock /> {task.extensionCount}x prorrogado
+                        </div>
                       )}
+
+                      {/* Title */}
+                      <p className="text-sm font-semibold text-gray-800 leading-snug line-clamp-2 pr-8 mb-1">
+                        {task.title}
+                      </p>
+
+                      {/* Context */}
+                      {listName && (
+                        <p className="text-[11px] text-gray-400 mb-2">Em {listName}</p>
+                      )}
+
+                      {/* Health indicator */}
+                      {h && (
+                        <div className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border mb-2 ${h.bg} ${h.text} ${h.border}`}>
+                          <span>{h.emoji}</span><span>{h.label}</span>
+                        </div>
+                      )}
+
+                      {/* Fields row */}
+                      <div className="flex items-center gap-3 mt-2">
+                        {/* Assignees */}
+                        <div className="flex -space-x-1.5 items-center" title={allAssignees.map((u: any) => u.name).join(', ') || 'Sem responsável'}>
+                          {allAssignees.length > 0 ? allAssignees.slice(0, 3).map((u: any) => (
+                            <img
+                              key={u.id}
+                              src={u.avatar || `https://picsum.photos/seed/${u.id}/100`}
+                              className="w-5 h-5 rounded-full border-2 border-white shadow-sm"
+                              alt={u.name}
+                            />
+                          )) : (
+                            <span className="text-gray-300 text-xs" title="Sem responsável">
+                              <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-4 6s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H4z"/></svg>
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Due date */}
+                        <div className={`flex items-center gap-0.5 text-[11px] font-medium ${isOverdue ? 'text-red-500' : 'text-gray-400'}`}>
+                          <Icons.Calendar />
+                          <span>{hasDueDate ? (() => { const [y,m,d] = (task.dueDate as string).split('-'); return `${d}/${m}/${y.slice(2)}`; })() : '—'}</span>
+                        </div>
+
+                        {/* Priority flag */}
+                        <div className="flex items-center gap-0.5 text-[11px] font-medium" style={{ color: priorityFlag?.color || '#94a3b8' }} title={priorityFlag?.label || 'Sem prioridade'}>
+                          <svg className="w-3 h-3" viewBox="0 0 12 12" fill="currentColor"><path d="M1 1h10l-3 5 3 5H1V1z"/></svg>
+                          <span>{priorityFlag?.label || '—'}</span>
+                        </div>
+                      </div>
                     </div>
-                    <h4 className="text-sm font-semibold text-gray-800 mb-2 leading-tight line-clamp-2 pr-4">{task.title}</h4>
-                    {(() => { const h = getTaskHealth(task); return h ? (
-                      <div className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border mb-2 ${h.bg} ${h.text} ${h.border}`}>
-                        <span>{h.emoji}</span><span>{h.label}</span>
+
+                    {/* Card footer — subtasks */}
+                    {subtaskCount > 0 && (
+                      <div className="px-3 py-1.5 border-t border-gray-100 flex items-center gap-1 text-[11px] text-gray-400">
+                        <svg className="w-3 h-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <path d="M2 3h8M2 6h6M2 9h4"/>
+                        </svg>
+                        {subtaskCount} subtarefa{subtaskCount !== 1 ? 's' : ''}
                       </div>
-                    ) : null; })()}
-                    <div className="flex items-center justify-between mt-2">
-                      <div className="flex items-center gap-1.5 text-xs text-gray-400">
-                        <Icons.Calendar />
-                        {new Date(task.dueDate).toLocaleDateString()}
-                      </div>
-                      <div className="flex -space-x-2">
-                        <img
-                          src={users?.find((u: User) => u.id === task.mainAssigneeId)?.avatar || `https://picsum.photos/seed/${task.mainAssigneeId}/100`}
-                          className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
-                          alt="User"
-                          title={users?.find((u: User) => u.id === task.mainAssigneeId)?.name}
-                        />
-                        {(task.secondaryAssigneeIds || []).map((id: string) => (
-                          <img
-                            key={id}
-                            src={users?.find((u: User) => u.id === id)?.avatar || `https://picsum.photos/seed/${id}/100`}
-                            className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
-                            alt="User"
-                            title={users?.find((u: User) => u.id === id)?.name}
-                          />
-                        ))}
-                      </div>
-                    </div>
+                    )}
                   </div>
                 );
               })}
+
+              {/* Empty column placeholder */}
               {columnTasks.length === 0 && (
-                <div className="h-12 rounded-lg border-2 border-dashed border-gray-200 flex items-center justify-center text-xs text-gray-400">
-                  Vazio
+                <div className="h-16 rounded-lg border-2 border-dashed border-gray-200 flex items-center justify-center text-xs text-gray-400">
+                  Sem tarefas
                 </div>
               )}
             </div>
+
+            {/* ── Footer — Adicionar Tarefa ── */}
+            <button
+              onClick={() => onQuickCreate?.({ status })}
+              className="flex items-center gap-2 w-full px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-b-xl transition-colors border-t border-gray-100"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M7 2v10M2 7h10"/>
+              </svg>
+              Adicionar Tarefa
+            </button>
           </div>
         );
       })}
+
+      {/* ── Botão Adicionar Grupo ── */}
+      <div className="shrink-0 w-64">
+        <button
+          className="flex items-center gap-2 w-full px-4 py-3 rounded-xl border-2 border-dashed border-gray-200 text-sm text-gray-400 hover:border-gray-300 hover:text-gray-600 hover:bg-white transition-all"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M7 2v10M2 7h10"/>
+          </svg>
+          Adicionar grupo
+        </button>
+      </div>
     </div>
   );
 }
