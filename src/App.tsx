@@ -2721,9 +2721,12 @@ function Sidebar({
 
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
+  const [secInicioOpen, setSecInicioOpen] = useState(true);
+  const [secMinhasTarefasOpen, setSecMinhasTarefasOpen] = useState(false);
+  const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
+  const [secEspacosOpen, setSecEspacosOpen] = useState(true);
 
   useEffect(() => {
-    // Expand the space if we navigate to it or one of its folders
     if (activeScope.type === 'space' && activeScope.id) {
       setExpandedSpaces(prev => prev.includes(activeScope.id!) ? prev : [...prev, activeScope.id!]);
     } else if (activeScope.type === 'folder' && activeScope.id) {
@@ -2737,381 +2740,382 @@ function Sidebar({
     }
   }, [activeScope, folders]);
 
-  const toggleSpace = (spaceId: string) => {
-    setExpandedSpaces(prev =>
-      prev.includes(spaceId) ? prev.filter(id => id !== spaceId) : [...prev, spaceId]
-    );
-  };
+  const toggleSpace = (spaceId: string) => setExpandedSpaces(prev => prev.includes(spaceId) ? prev.filter(id => id !== spaceId) : [...prev, spaceId]);
+  const toggleFolder = (folderId: string) => setExpandedFolders(prev => prev.includes(folderId) ? prev.filter(id => id !== folderId) : [...prev, folderId]);
 
-  const toggleFolder = (folderId: string) => {
-    setExpandedFolders(prev =>
-      prev.includes(folderId) ? prev.filter(id => id !== folderId) : [...prev, folderId]
-    );
-  };
+  /* ── Icon Nav Bar items ── */
+  const navItems = [
+    { id: 'home', label: 'Início', icon: <Icons.Home />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }, active: activeView === 'Dashboard' && activeScope.type === 'global' },
+    { id: 'tasks', label: 'Minhas Tarefas', icon: <Icons.Check />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }, active: activeView === 'List' && activeScope.type === 'global' },
+    { id: 'calendar', label: 'Calendário', icon: <Icons.Calendar />, action: () => { if (isCollapsed) onToggle(); onViewChange('Calendar'); }, active: activeView === 'Calendar' },
+    { id: 'gantt', label: 'Gantt', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="3" width="8" height="2" rx="1"/><rect x="1" y="7" width="6" height="2" rx="1"/><rect x="4" y="11" width="10" height="2" rx="1"/></svg>, action: () => { if (isCollapsed) onToggle(); onViewChange('Gantt'); }, active: activeView === 'Gantt' },
+    { id: 'dashboard', label: 'Dashboards', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="8" width="4" height="6" rx="0.5"/><rect x="6" y="4" width="4" height="10" rx="0.5"/><rect x="11" y="2" width="4" height="12" rx="0.5"/></svg>, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }, active: false },
+  ];
 
   return (
-    <div className={`flex flex-col border-r bg-sidebar text-sidebar-foreground h-full shrink-0 transition-all duration-300 ${isCollapsed ? 'w-20' : 'w-64'}`} onClick={(e) => e.stopPropagation()}>
-      <div className={`p-4 flex items-center border-b mb-2 transition-all duration-300 ${isCollapsed ? 'flex-col gap-4' : 'justify-between'}`}>
-        {!isCollapsed ? (
-          <div className="flex items-center gap-2 overflow-hidden">
-            <img
-              src={logoSrc}
-              alt="Logo Verticalparts"
-              className="w-8 h-8 object-contain shrink-0"
-              style={logoStyle}
-            />
-            <span className="font-bold text-lg tracking-tight whitespace-nowrap text-sidebar-foreground">VERTICALPARTS</span>
-          </div>
-        ) : (
-          <img
-            src={logoSrc}
-            alt="Logo Verticalparts"
-            className="w-10 h-10 object-contain"
-            style={logoStyle}
-          />
+    <div className="flex h-full shrink-0" onClick={(e) => e.stopPropagation()}>
+
+      {/* ══ ICON NAV BAR (sempre visível, 48px) ══ */}
+      <div className="w-12 flex flex-col items-center bg-sidebar border-r border-sidebar-border shrink-0 py-2 gap-0.5">
+        {/* Logo */}
+        <div className="mb-2 mt-1">
+          <img src={logoSrc} alt="VP" className="w-7 h-7 object-contain" style={logoStyle} />
+        </div>
+
+        {/* Nav icons */}
+        {navItems.map(item => (
+          <button
+            key={item.id}
+            onClick={item.action}
+            title={item.label}
+            className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
+              item.active
+                ? 'bg-sidebar-accent text-primary'
+                : 'text-sidebar-foreground/50 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground'
+            }`}
+          >
+            {item.icon}
+          </button>
+        ))}
+
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Space quick-access avatars */}
+        {spaces.slice(0, 6).map((space: Space) => (
+          <button
+            key={space.id}
+            title={space.name}
+            onClick={() => { if (isCollapsed) onToggle(); onNavigate('space', space.id, space.name); }}
+            className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-[10px] text-white mb-0.5 transition-all ${
+              activeScope.type === 'space' && activeScope.id === space.id ? 'ring-2 ring-primary ring-offset-1' : 'opacity-80 hover:opacity-100'
+            }`}
+            style={{ backgroundColor: space.color || '#6366f1' }}
+          >
+            {space.name.charAt(0).toUpperCase()}
+          </button>
+        ))}
+
+        {/* Fields / Settings */}
+        {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
+          <button
+            onClick={onOpenFields}
+            title="Campos Personalizados"
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-sidebar-foreground/40 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors mt-1 mb-1"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.22 3.22l1.42 1.42M11.36 11.36l1.42 1.42M3.22 12.78l1.42-1.42M11.36 4.64l1.42-1.42"/><circle cx="8" cy="8" r="3"/></svg>
+          </button>
         )}
+
+        {/* Collapse toggle */}
         <button
           onClick={onToggle}
-          className="p-1.5 rounded-lg hover:bg-sidebar-accent text-sidebar-foreground/60 transition-transform"
+          title={isCollapsed ? 'Expandir sidebar' : 'Recolher sidebar'}
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-sidebar-foreground/40 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors mb-1"
         >
           {isCollapsed ? (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg>
           ) : (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" /></svg>
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><path d="M10 4l-4 4 4 4"/></svg>
           )}
         </button>
       </div>
 
-      <nav className="flex-1 overflow-y-auto px-3 py-2 space-y-1 custom-scrollbar overflow-x-hidden">
-        <SidebarItem
-          icon={<Icons.Home />}
-          label="Início"
-          isCollapsed={isCollapsed}
-          active={activeScope.type === 'global'}
-          onClick={() => onNavigate('global', null, 'Dashboard')}
-        />
-        <SidebarItem
-          icon={<Icons.Check />}
-          label="Minhas Tarefas"
-          isCollapsed={isCollapsed}
-          active={activeView === 'List' && activeScope.type === 'global'}
-          onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
-        />
-        {/* <SidebarItem icon={<Icons.Folder />} label="Projetos" isCollapsed={isCollapsed} /> */}
+      {/* ══ EXPANDED PANEL (colapsável) ══ */}
+      {!isCollapsed && (
+        <div className="w-60 flex flex-col bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
 
-        {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
-          <SidebarItem icon={<Icons.Plus />} label="Campos Pers." isCollapsed={isCollapsed} onClick={onOpenFields} />
-        )}
+          {/* Header */}
+          <div className="flex items-center gap-1 px-2 py-2 border-b border-sidebar-border">
+            <span className="text-sm font-semibold text-sidebar-foreground flex-1 truncate px-1">Início</span>
+            <button title="Pesquisar" className="p-1.5 rounded hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M11 11l3 3"/></svg>
+            </button>
+            <button title="Criar tarefa" onClick={() => { }} className="p-1.5 rounded hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors">
+              <Icons.Plus />
+            </button>
+            <button onClick={onToggle} title="Fechar barra lateral" className="p-1.5 rounded hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors">
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><path d="M10 4l-4 4 4 4"/></svg>
+            </button>
+          </div>
 
-        <div className="pt-4 pb-2">
-          {!isCollapsed && (
-            <div className="flex items-center justify-between px-3 mb-2 group">
-              <p className="text-[10px] font-bold text-sidebar-foreground/40 uppercase tracking-widest transition-opacity duration-200">Espaços</p>
+          {/* Scrollable content */}
+          <nav className="flex-1 overflow-y-auto custom-scrollbar overflow-x-hidden">
+
+            {/* ── Seção Início ── */}
+            <div>
               <button
-                onClick={(e) => { e.stopPropagation(); onOpenCreateSpace(); }}
-                className="text-sidebar-foreground/40 hover:text-primary transition-colors p-1 rounded hover:bg-sidebar-accent"
-                title="Criar Espaço"
+                className="w-full flex items-center gap-1 px-3 py-2 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors group"
+                onClick={() => setSecInicioOpen(v => !v)}
               >
-                <Icons.Plus />
+                <svg className={`w-3 h-3 transition-transform shrink-0 ${secInicioOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                Início
               </button>
-            </div>
-          )}
-          {spaces.map((space: Space) => {
-            const isExpanded = expandedSpaces.includes(space.id);
-            return (
-              <div key={space.id} className="mb-1">
-                <div
-                  className={`flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer group transition-all relative ${isCollapsed ? 'justify-center' : ''} ${activeScope.type === 'space' && activeScope.id === space.id ? 'bg-sidebar-accent' : 'hover:bg-sidebar-accent/50'
-                    }`}
-                  title={isCollapsed ? space.name : ''}
-                  onClick={() => {
-                    const isActiveSpace = activeScope.type === 'space' && activeScope.id === space.id;
-                    toggleSpace(space.id);
-                    // Se já estiver no mesmo espaço, o clique serve só para recolher/expandir as pastas
-                    if (!isActiveSpace) {
-                      onNavigate('space', space.id, space.name);
-                    }
-                  }}
-                >
-                  {/* Chevron for collapse */}
-                  {!isCollapsed && (
-                    <div className={`text-sidebar-foreground/40 transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`}>
-                      <Icons.ChevronRight />
+              {secInicioOpen && (
+                <div className="pb-1">
+                  {/* Minhas Tarefas (expandível) */}
+                  <div>
+                    <div
+                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'List' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                      onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
+                    >
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setSecMinhasTarefasOpen(v => !v); }}
+                        className="text-sidebar-foreground/40 hover:text-sidebar-foreground shrink-0"
+                      >
+                        <svg className={`w-3 h-3 transition-transform ${secMinhasTarefasOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                      </button>
+                      <Icons.Check />
+                      <span className="flex-1 truncate">Minhas Tarefas</span>
                     </div>
-                  )}
-
-                  {space.icon ? (
-                    (() => {
-                      const IconComponent = (Icons as any)[space.icon] || Icons.Layout;
-                      return <IconComponent className="w-5 h-5 shrink-0" color={space.color} />;
-                    })()
-                  ) : (
-                    <div className="w-5 h-5 rounded-lg flex items-center justify-center shrink-0 font-bold text-[10px]" style={{ backgroundColor: space.color, color: 'white' }}>
-                      {space.name.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  {!isCollapsed && (
-                    <>
-                      <span className={`text-sm font-medium whitespace-nowrap overflow-hidden text-ellipsis flex-1 ${activeScope.type === 'space' && activeScope.id === space.id ? 'text-sidebar-foreground font-bold' : 'text-sidebar-foreground/80'}`}>
-                        {space.name}
-                      </span>
-
-                      {/* Space Actions (Hover) */}
-                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity absolute right-2 bg-white/80 rounded shadow-sm z-10 px-1">
+                    {secMinhasTarefasOpen && (
+                      <div className="ml-7 border-l border-sidebar-border pl-2 mt-0.5 space-y-0.5">
                         <button
-                          onClick={(e) => { e.stopPropagation(); onRenameSpace(space.id, space.name); }}
-                          className="p-1.5 text-sidebar-foreground/40 hover:text-blue-500 rounded"
-                          title="Renomear"
+                          onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
+                          className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors"
                         >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                          <svg className="w-3.5 h-3.5 shrink-0 text-sidebar-foreground/40" fill="currentColor" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/></svg>
+                          Atribuídas a mim
                         </button>
                         <button
-                          onClick={(e) => { e.stopPropagation(); onDeleteSpace(space.id); }}
-                          className="p-1.5 text-sidebar-foreground/40 hover:text-red-500 rounded"
-                          title="Excluir"
+                          onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
+                          className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors"
                         >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                          <Icons.Calendar />
+                          Hoje e atrasadas
                         </button>
                       </div>
-                    </>
-                  )}
+                    )}
+                  </div>
+
+                  {/* Ir para Dashboard */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'Dashboard' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.Home />
+                    <span className="flex-1 truncate">Dashboard</span>
+                  </div>
                 </div>
+              )}
+            </div>
 
-                {/* Accordion Content */}
-                {!isCollapsed && isExpanded && (
-                  <div className="ml-5 space-y-0.5 mt-1 border-l pl-2 animate-in slide-in-from-top-2 duration-200">
-                    {folders.filter((f: Folder) => f.spaceId === space.id).map((folder: Folder) => {
-                      const isFolderExpanded = expandedFolders.includes(folder.id);
-                      return (
-                        <div key={folder.id} className="space-y-0.5">
-                          <div
-                            className={`text-[11px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${activeScope.type === 'folder' && activeScope.id === folder.id
-                              ? 'bg-sidebar-accent text-sidebar-accent-foreground font-bold'
-                              : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'
-                              }`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const isActiveFolder = activeScope.type === 'folder' && activeScope.id === folder.id;
-                              toggleFolder(folder.id);
-                              // Se já estiver na mesma pasta, o clique serve só para recolher/expandir as listas
-                              if (!isActiveFolder) {
-                                onNavigate('folder', folder.id, folder.name);
-                              }
-                            }}
-                          >
-                            <div className={`text-sidebar-foreground/40 transition-transform duration-200 ${isFolderExpanded ? 'rotate-90' : ''}`}
-                              aria-hidden
-                            >
-                              <Icons.ChevronRight />
-                            </div>
-                            <Icons.Folder />
-                            <span className="truncate flex-1">{folder.name}</span>
+            {/* ── Seção Favoritos ── */}
+            <div>
+              <button
+                className="w-full flex items-center gap-1 px-3 py-2 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors group"
+                onClick={() => setSecFavoritosOpen(v => !v)}
+              >
+                <svg className={`w-3 h-3 transition-transform shrink-0 ${secFavoritosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                Favoritos
+              </button>
+              {secFavoritosOpen && (
+                <div className="px-3 py-2 mb-1">
+                  <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                    Adicione à sua barra lateral
+                  </p>
+                </div>
+              )}
+            </div>
 
-                            {/* Folder Actions (Hover) */}
-                            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 rounded backdrop-blur-sm shadow-sm absolute right-1 z-10 px-1">
-                              <DropdownMenu>
-                                <DropdownMenuTrigger asChild>
-                                  <button
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground"
-                                    title="Ações"
-                                    aria-label={`Ações da pasta ${folder.name}`}
-                                  >
-                                    <MoreHorizontal className="h-3.5 w-3.5" />
-                                  </button>
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end" sideOffset={6}>
-                                  <DropdownMenuSub>
-                                    <DropdownMenuSubTrigger className="text-xs">
-                                      Criar novo
-                                    </DropdownMenuSubTrigger>
-                                    <DropdownMenuSubContent>
-                                      <DropdownMenuItem
-                                        className="text-xs"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          onCreateList?.(folder.id);
-                                        }}
-                                      >
-                                        <ListPlus className="mr-2 h-3.5 w-3.5" />
-                                        Criar lista
-                                      </DropdownMenuItem>
-                                      <DropdownMenuItem
-                                        className="text-xs"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          onCreateDoc(folder.id);
-                                        }}
-                                      >
-                                        <FileText className="mr-2 h-3.5 w-3.5" />
-                                        Novo documento
-                                      </DropdownMenuItem>
-                                    </DropdownMenuSubContent>
-                                  </DropdownMenuSub>
-                                  <DropdownMenuSeparator />
-                                  <DropdownMenuItem
-                                    className="text-xs"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      onRenameFolder(folder.id, folder.name);
-                                    }}
-                                  >
-                                    Renomear pasta
-                                  </DropdownMenuItem>
-                                  <DropdownMenuItem
-                                    className="text-xs"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      onDeleteFolder(folder.id);
-                                    }}
-                                  >
-                                    Excluir pasta
-                                  </DropdownMenuItem>
-                                </DropdownMenuContent>
-                              </DropdownMenu>
-                            </div>
+            {/* ── Seção Espaços ── */}
+            <div>
+              <div className="flex items-center px-3 py-2 group">
+                <button
+                  className="flex items-center gap-1 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors flex-1 text-left"
+                  onClick={() => setSecEspacosOpen(v => !v)}
+                >
+                  <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                  Espaços
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onOpenCreateSpace(); }}
+                  className="opacity-0 group-hover:opacity-100 text-sidebar-foreground/40 hover:text-primary transition-all p-1 rounded hover:bg-sidebar-accent"
+                  title="Criar Espaço"
+                >
+                  <Icons.Plus />
+                </button>
+              </div>
+
+              {secEspacosOpen && (
+                <div className="pb-2">
+                  {spaces.map((space: Space) => {
+                    const isExpanded = expandedSpaces.includes(space.id);
+                    return (
+                      <div key={space.id} className="mb-0.5">
+                        <div
+                          className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer group transition-colors relative rounded-lg mx-1 ${activeScope.type === 'space' && activeScope.id === space.id ? 'bg-sidebar-accent' : 'hover:bg-sidebar-accent/50'}`}
+                          onClick={() => {
+                            const isActiveSpace = activeScope.type === 'space' && activeScope.id === space.id;
+                            toggleSpace(space.id);
+                            if (!isActiveSpace) onNavigate('space', space.id, space.name);
+                          }}
+                        >
+                          <div className={`text-sidebar-foreground/40 transition-transform duration-200 shrink-0 ${isExpanded ? 'rotate-90' : ''}`}>
+                            <Icons.ChevronRight />
                           </div>
-
-                          {/* Lists inside folder */}
-                          {isFolderExpanded && (
-                            <div className="ml-5 mt-0.5 space-y-0.5 border-l pl-2">
-                              {(lists as List[])
-                                .filter((l) => l.folderId === folder.id)
-                                .map((list: List) => {
-                                  const isActive = activeListId === list.id;
-                                  return (
-                                    <div
-                                      key={list.id}
-                                      className={
-                                        "text-[11px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative " +
-                                        (isActive
-                                          ? "bg-sidebar-accent text-sidebar-accent-foreground font-bold"
-                                          : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50")
-                                      }
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        onSetActiveListId?.(list.id);
-                                        setTimeout(() => {
-                                          onViewChange?.('List');
-                                        }, 0);
-                                      }}
-                                      title={list.name}
-                                    >
-                                      <Icons.List />
-                                      <span className="truncate flex-1">{list.name}</span>
-
-                                      {/* List Actions (Hover) */}
-                                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 rounded backdrop-blur-sm shadow-sm absolute right-1 z-10 px-1">
-                                        <DropdownMenu>
-                                          <DropdownMenuTrigger asChild>
-                                            <button
-                                              onClick={(e) => e.stopPropagation()}
-                                              className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground"
-                                              title="Ações"
-                                              aria-label={`Ações da lista ${list.name}`}
-                                            >
-                                              <MoreHorizontal className="h-3.5 w-3.5" />
-                                            </button>
-                                          </DropdownMenuTrigger>
-                                          <DropdownMenuContent align="end" sideOffset={6}>
-                                            <DropdownMenuItem
-                                              className="text-xs"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                onRenameList(list.id, list.name);
-                                              }}
-                                            >
-                                              Renomear lista
-                                            </DropdownMenuItem>
-                                            <DropdownMenuItem
-                                              className="text-xs text-red-600 focus:text-red-600"
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                onDeleteList(list.id);
-                                              }}
-                                            >
-                                              Excluir lista
-                                            </DropdownMenuItem>
-                                          </DropdownMenuContent>
-                                        </DropdownMenu>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-
-                              {/* Documents inside folder */}
-                              {docs
-                                .filter((d) => d.folderId === folder.id)
-                                .map((doc: Doc) => {
-                                  const isActive = activeDocId === doc.id;
-                                  return (
-                                    <div
-                                      key={doc.id}
-                                      className={`ml-5 flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${isActive ? 'bg-orange-500/10 text-orange-500 font-bold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        onSetActiveDocId(doc.id);
-                                        onViewChange('Doc');
-                                        onNavigate('folder', folder.id, doc.title);
-                                      }}
-                                    >
-                                      <FileText className="h-3 w-3 text-sidebar-foreground/40" />
-                                      <span className="truncate flex-1 text-xs">{doc.title}</span>
-
-                                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity absolute right-1">
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            onDeleteDoc(doc.id);
-                                          }}
-                                          className="p-1 text-sidebar-foreground/40 hover:text-red-500"
-                                          title="Excluir documento"
-                                        >
-                                          <Icons.Trash />
-                                        </button>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onCreateList?.(folder.id);
-                                }}
-                                className="w-full text-left text-[11px] text-sidebar-foreground/50 hover:text-primary flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded hover:bg-sidebar-accent/50 transition-colors"
-                                title="Criar Lista"
-                              >
-                                <Icons.Plus /> <span>Nova Lista</span>
-                              </button>
+                          {space.icon ? (
+                            (() => { const IconComponent = (Icons as any)[space.icon] || Icons.Layout; return <IconComponent className="w-4 h-4 shrink-0" color={space.color} />; })()
+                          ) : (
+                            <div className="w-4 h-4 rounded flex items-center justify-center shrink-0 font-bold text-[9px] text-white" style={{ backgroundColor: space.color }}>
+                              {space.name.charAt(0).toUpperCase()}
                             </div>
                           )}
-                        </div>
-                      );
-                    })}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); onOpenCreateFolder(space.id); }}
-                      className="w-full text-left text-[11px] text-sidebar-foreground/50 hover:text-primary flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded hover:bg-sidebar-accent/50 transition-colors"
-                    >
-                      <Icons.Plus /> <span>Nova Pasta</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </nav>
+                          <span className={`text-[13px] font-medium whitespace-nowrap overflow-hidden text-ellipsis flex-1 ${activeScope.type === 'space' && activeScope.id === space.id ? 'text-sidebar-foreground font-semibold' : 'text-sidebar-foreground/80'}`}>
+                            {space.name}
+                          </span>
 
-      <div className={`p-4 border-t transition-all duration-300 ${isCollapsed ? 'text-center' : ''}`}>
-        {!isCollapsed ? (
-          <div className="text-[10px] text-sidebar-foreground/40 text-center uppercase tracking-widest">
-            v2.0.0 Gold
+                          {/* Space hover actions */}
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity absolute right-2 bg-sidebar/90 rounded px-0.5">
+                            <button onClick={(e) => { e.stopPropagation(); onOpenCreateFolder(space.id); }} className="p-1 text-sidebar-foreground/40 hover:text-primary rounded" title="Criar pasta"><Icons.Plus /></button>
+                            <button onClick={(e) => { e.stopPropagation(); onRenameSpace(space.id, space.name); }} className="p-1 text-sidebar-foreground/40 hover:text-blue-500 rounded" title="Renomear">
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                            </button>
+                            <button onClick={(e) => { e.stopPropagation(); onDeleteSpace(space.id); }} className="p-1 text-sidebar-foreground/40 hover:text-red-500 rounded" title="Excluir">
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                            </button>
+                          </div>
+                        </div>
+
+                        {isExpanded && (
+                          <div className="ml-5 border-l border-sidebar-border pl-2 mt-0.5 space-y-0.5 animate-in slide-in-from-top-1 duration-150">
+                            {folders.filter((f: Folder) => f.spaceId === space.id).map((folder: Folder) => {
+                              const isFolderExpanded = expandedFolders.includes(folder.id);
+                              return (
+                                <div key={folder.id}>
+                                  <div
+                                    className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${activeScope.type === 'folder' && activeScope.id === folder.id ? 'bg-sidebar-accent text-sidebar-accent-foreground font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const isActiveFolder = activeScope.type === 'folder' && activeScope.id === folder.id;
+                                      toggleFolder(folder.id);
+                                      if (!isActiveFolder) onNavigate('folder', folder.id, folder.name);
+                                    }}
+                                  >
+                                    <div className={`text-sidebar-foreground/40 transition-transform duration-200 shrink-0 ${isFolderExpanded ? 'rotate-90' : ''}`} aria-hidden>
+                                      <Icons.ChevronRight />
+                                    </div>
+                                    <Icons.Folder />
+                                    <span className="truncate flex-1">{folder.name}</span>
+                                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-sidebar/90 rounded px-0.5 absolute right-1">
+                                      <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                          <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground" title="Ações">
+                                            <MoreHorizontal className="h-3 w-3" />
+                                          </button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="end" sideOffset={6}>
+                                          <DropdownMenuSub>
+                                            <DropdownMenuSubTrigger className="text-xs">Criar novo</DropdownMenuSubTrigger>
+                                            <DropdownMenuSubContent>
+                                              <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onCreateList?.(folder.id); }}><ListPlus className="mr-2 h-3.5 w-3.5" />Criar lista</DropdownMenuItem>
+                                              <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onCreateDoc(folder.id); }}><FileText className="mr-2 h-3.5 w-3.5" />Novo documento</DropdownMenuItem>
+                                            </DropdownMenuSubContent>
+                                          </DropdownMenuSub>
+                                          <DropdownMenuSeparator />
+                                          <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameFolder(folder.id, folder.name); }}>Renomear pasta</DropdownMenuItem>
+                                          <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onDeleteFolder(folder.id); }}>Excluir pasta</DropdownMenuItem>
+                                        </DropdownMenuContent>
+                                      </DropdownMenu>
+                                    </div>
+                                  </div>
+
+                                  {isFolderExpanded && (
+                                    <div className="ml-5 mt-0.5 space-y-0.5 border-l border-sidebar-border pl-2">
+                                      {(lists as List[]).filter((l) => l.folderId === folder.id).map((list: List) => {
+                                        const isActive = activeListId === list.id;
+                                        return (
+                                          <div
+                                            key={list.id}
+                                            className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${isActive ? 'bg-sidebar-accent text-sidebar-accent-foreground font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                                            onClick={(e) => { e.stopPropagation(); onSetActiveListId?.(list.id); setTimeout(() => onViewChange?.('List'), 0); }}
+                                            title={list.name}
+                                          >
+                                            <Icons.List />
+                                            <span className="truncate flex-1">{list.name}</span>
+                                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-sidebar/90 rounded px-0.5 absolute right-1">
+                                              <DropdownMenu>
+                                                <DropdownMenuTrigger asChild>
+                                                  <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground"><MoreHorizontal className="h-3 w-3" /></button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent align="end" sideOffset={6}>
+                                                  <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
+                                                  <DropdownMenuItem className="text-xs text-red-600 focus:text-red-600" onClick={(e) => { e.stopPropagation(); onDeleteList(list.id); }}>Excluir lista</DropdownMenuItem>
+                                                </DropdownMenuContent>
+                                              </DropdownMenu>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+
+                                      {docs.filter((d: any) => d.folderId === folder.id).map((doc: any) => {
+                                        const isActive = activeDocId === doc.id;
+                                        return (
+                                          <div
+                                            key={doc.id}
+                                            className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${isActive ? 'bg-orange-500/10 text-orange-500 font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                                            onClick={(e) => { e.stopPropagation(); onSetActiveDocId(doc.id); onViewChange('Doc'); onNavigate('folder', folder.id, doc.title); }}
+                                          >
+                                            <FileText className="h-3 w-3 text-sidebar-foreground/40 shrink-0" />
+                                            <span className="truncate flex-1">{doc.title}</span>
+                                            <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute right-1">
+                                              <button onClick={(e) => { e.stopPropagation(); onDeleteDoc(doc.id); }} className="p-1 text-sidebar-foreground/40 hover:text-red-500"><Icons.Trash /></button>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); onCreateList?.(folder.id); }}
+                                        className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-2 py-1 rounded hover:bg-sidebar-accent/50 transition-colors"
+                                      >
+                                        <Icons.Plus /> Nova Lista
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                            <button
+                              onClick={(e) => { e.stopPropagation(); onOpenCreateFolder(space.id); }}
+                              className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-2 py-1 rounded hover:bg-sidebar-accent/50 transition-colors"
+                            >
+                              <Icons.Plus /> Nova Pasta
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onOpenCreateSpace(); }}
+                    className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-4 py-1.5 rounded hover:bg-sidebar-accent/50 transition-colors mt-1"
+                  >
+                    <Icons.Plus /> Novo Espaço
+                  </button>
+                </div>
+              )}
+            </div>
+          </nav>
+
+          {/* Footer */}
+          <div className="border-t border-sidebar-border">
+            {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
+              <button
+                onClick={onOpenFields}
+                className="w-full flex items-center gap-2 px-3 py-2.5 text-[12px] text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-foreground transition-colors"
+              >
+                <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.22 3.22l1.42 1.42M11.36 11.36l1.42 1.42M3.22 12.78l1.42-1.42M11.36 4.64l1.42-1.42"/><circle cx="8" cy="8" r="3"/></svg>
+                Personalizar a barra lateral
+              </button>
+            )}
+            <div className="text-[10px] text-sidebar-foreground/30 text-center py-1.5 uppercase tracking-widest">v2.0.0 Gold</div>
           </div>
-        ) : (
-          <div className="text-[10px] text-[var(--primary-color)] font-bold text-center">v2.0</div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3120,13 +3124,10 @@ function SidebarItem({ icon, label, isCollapsed, active, onClick }: any) {
   return (
     <div
       onClick={onClick}
-      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-all group ${isCollapsed ? 'justify-center' : ''} ${active ? 'bg-sidebar-accent text-primary' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'
-        }`}
+      className={`flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-all group ${isCollapsed ? 'justify-center' : ''} ${active ? 'bg-sidebar-accent text-primary' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
       title={isCollapsed ? label : ''}
     >
-      <div className={`${active ? 'text-primary' : 'text-sidebar-foreground/40'} group-hover:text-primary transition-colors shrink-0`}>
-        {icon}
-      </div>
+      <div className={`${active ? 'text-primary' : 'text-sidebar-foreground/40'} group-hover:text-primary transition-colors shrink-0`}>{icon}</div>
       {!isCollapsed && <span className="text-sm font-medium whitespace-nowrap overflow-hidden text-ellipsis">{label}</span>}
     </div>
   );
