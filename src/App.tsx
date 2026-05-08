@@ -3950,25 +3950,31 @@ function ListView({
 }
 
 function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, lists, statusGroups, activeListId }: any) {
-  // Encontrar o grupo de status para a visualização atual
+  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
+  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+
   const activeList = lists?.find((l: any) => l.id === activeListId);
   const activeStatusGroup = statusGroups?.find((g: any) => g.id === activeList?.statusGroupId) || statusGroups?.[0];
   const activeStatusOptions = activeStatusGroup?.options || [];
 
   const columns = useMemo(() => {
+    let labels: string[];
     if (activeListId && activeStatusOptions.length > 0) {
-      return activeStatusOptions.map((o: any) => o.label);
+      labels = activeStatusOptions.map((o: any) => o.label);
+    } else {
+      const uniqueStatuses = Array.from(new Set(tasks.map((t: Task) => t.status))) as string[];
+      const defaultOrder = statusGroups?.[0]?.options.map((o: any) => o.label) || [];
+      labels = uniqueStatuses.sort((a, b) => {
+        const idxA = defaultOrder.indexOf(a);
+        const idxB = defaultOrder.indexOf(b);
+        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+        if (idxA !== -1) return -1;
+        if (idxB !== -1) return 1;
+        return a.localeCompare(b);
+      });
     }
-    const uniqueStatuses = Array.from(new Set(tasks.map((t: Task) => t.status)));
-    const defaultOrder = statusGroups?.[0]?.options.map((o: any) => o.label) || [];
-    return uniqueStatuses.sort((a: any, b: any) => {
-      const idxA = defaultOrder.indexOf(a);
-      const idxB = defaultOrder.indexOf(b);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return a.localeCompare(b);
-    });
+    // Deduplicate — evita colunas repetidas do banco de dados
+    return Array.from(new Set(labels));
   }, [tasks, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(statusGroups?.[0]?.options)]);
 
   const getStatusColor = (statusLabel: string) => {
@@ -3979,80 +3985,147 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
     return '#94a3b8';
   };
 
+  const handleDragStart = (e: React.DragEvent, taskId: string) => {
+    setDraggingTaskId(taskId);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', taskId);
+  };
+
+  const handleDragEnd = () => {
+    setDraggingTaskId(null);
+    setDragOverColumn(null);
+  };
+
+  const handleDragOver = (e: React.DragEvent, status: string) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverColumn(status);
+  };
+
+  const handleDragLeave = (e: React.DragEvent, status: string) => {
+    if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
+      setDragOverColumn(prev => prev === status ? null : prev);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent, status: string) => {
+    e.preventDefault();
+    const taskId = e.dataTransfer.getData('text/plain') || draggingTaskId;
+    if (taskId) {
+      const task = tasks.find((t: Task) => t.id === taskId);
+      if (task && task.status !== status) {
+        onStatusChange(taskId, status);
+      }
+    }
+    setDraggingTaskId(null);
+    setDragOverColumn(null);
+  };
+
   return (
     <div className="flex gap-4 h-full overflow-x-auto pb-4 custom-scrollbar items-start" onClick={(e) => e.stopPropagation()}>
-      {columns.map(status => (
-        <div key={status} className="w-80 shrink-0 flex flex-col max-h-full bg-gray-50 rounded-xl border border-gray-200 p-3">
-          <div className="flex items-center justify-between mb-3 px-1">
-            <h3 className="font-bold text-gray-600 text-sm flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full" style={{ backgroundColor: getStatusColor(status) }} />
-              {status}
-              <span className="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full">
-                {tasks.filter((t: Task) => t.status === status).length}
-              </span>
-            </h3>
-            <button className="text-gray-400 hover:text-gray-600"><Icons.Plus /></button>
-          </div>
-          <div className="space-y-3 overflow-y-auto flex-1 custom-scrollbar min-h-0">
-            {tasks.filter((t: Task) => t.status === status).map((task: Task) => (
-              <div
-                key={task.id}
-                onClick={() => onSelectTask(task.id)}
-                className="bg-white p-3 rounded-lg shadow-sm border border-gray-200 hover:border-[var(--primary-color)] cursor-pointer transition-all group relative"
-              >
-                {/* Delete Button for Kanban Card */}
-                <button
-                  onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
-                  className="absolute top-2 right-2 p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 z-10"
-                  title="Excluir Tarefa"
-                >
-                  <Icons.Trash />
-                </button>
+      {columns.map(status => {
+        const statusColor = getStatusColor(status);
+        const isDragTarget = dragOverColumn === status;
+        const columnTasks = tasks.filter((t: Task) => t.status === status);
 
-                <div className="flex justify-between items-start mb-2">
-                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${PRIORITY_COLORS[task.priority]}`}>
-                    {task.priority}
-                  </span>
-                  {task.extensionCount > 0 && (
-                    <span className="text-[10px] text-red-500 font-bold bg-red-50 px-1 rounded flex items-center gap-0.5 mr-6">
-                      <Icons.Clock /> {task.extensionCount}
-                    </span>
-                  )}
+        return (
+          <div
+            key={status}
+            className={`w-80 shrink-0 flex flex-col max-h-full rounded-xl border p-3 transition-colors ${
+              isDragTarget
+                ? 'bg-yellow-50 border-yellow-400 shadow-lg'
+                : 'bg-gray-50 border-gray-200'
+            }`}
+            onDragOver={(e) => handleDragOver(e, status)}
+            onDragLeave={(e) => handleDragLeave(e, status)}
+            onDrop={(e) => handleDrop(e, status)}
+          >
+            <div className="flex items-center justify-between mb-3 px-1">
+              <h3 className="font-bold text-gray-600 text-sm flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: statusColor }} />
+                {status}
+                <span className="text-[10px] bg-gray-200 text-gray-500 px-1.5 py-0.5 rounded-full">
+                  {columnTasks.length}
+                </span>
+              </h3>
+              <button className="text-gray-400 hover:text-gray-600"><Icons.Plus /></button>
+            </div>
+            <div className="space-y-3 overflow-y-auto flex-1 custom-scrollbar min-h-[60px]">
+              {columnTasks.map((task: Task) => {
+                const isDragging = draggingTaskId === task.id;
+                return (
+                  <div
+                    key={task.id}
+                    draggable
+                    onDragStart={(e) => handleDragStart(e, task.id)}
+                    onDragEnd={handleDragEnd}
+                    onClick={() => onSelectTask(task.id)}
+                    className={`bg-white p-3 rounded-lg shadow-sm border-l-4 border border-gray-200 hover:border-[var(--primary-color)] cursor-grab active:cursor-grabbing transition-all group relative select-none ${
+                      isDragging ? 'opacity-40 scale-95' : 'opacity-100'
+                    }`}
+                    style={{ borderLeftColor: statusColor }}
+                  >
+                    {/* Delete Button */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
+                      className="absolute top-2 right-2 p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 z-10"
+                      title="Excluir Tarefa"
+                    >
+                      <Icons.Trash />
+                    </button>
+
+                    <div className="flex justify-between items-start mb-2">
+                      <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded ${PRIORITY_COLORS[task.priority]}`}>
+                        {task.priority}
+                      </span>
+                      {task.extensionCount > 0 && (
+                        <span className="text-[10px] text-red-500 font-bold bg-red-50 px-1 rounded flex items-center gap-0.5 mr-6">
+                          <Icons.Clock /> {task.extensionCount}
+                        </span>
+                      )}
+                    </div>
+                    <h4 className="text-sm font-semibold text-gray-800 mb-2 leading-tight line-clamp-2 pr-4">{task.title}</h4>
+                    {(() => { const h = getTaskHealth(task); return h ? (
+                      <div className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border mb-2 ${h.bg} ${h.text} ${h.border}`}>
+                        <span>{h.emoji}</span><span>{h.label}</span>
+                      </div>
+                    ) : null; })()}
+                    <div className="flex items-center justify-between mt-2">
+                      <div className="flex items-center gap-1.5 text-xs text-gray-400">
+                        <Icons.Calendar />
+                        {new Date(task.dueDate).toLocaleDateString()}
+                      </div>
+                      <div className="flex -space-x-2">
+                        <img
+                          src={users?.find((u: User) => u.id === task.mainAssigneeId)?.avatar || `https://picsum.photos/seed/${task.mainAssigneeId}/100`}
+                          className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
+                          alt="User"
+                          title={users?.find((u: User) => u.id === task.mainAssigneeId)?.name}
+                        />
+                        {(task.secondaryAssigneeIds || []).map((id: string) => (
+                          <img
+                            key={id}
+                            src={users?.find((u: User) => u.id === id)?.avatar || `https://picsum.photos/seed/${id}/100`}
+                            className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
+                            alt="User"
+                            title={users?.find((u: User) => u.id === id)?.name}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+              {/* Drop zone placeholder when column is empty or dragging */}
+              {isDragTarget && columnTasks.filter((t: Task) => t.id !== draggingTaskId).length === 0 && (
+                <div className="h-16 rounded-lg border-2 border-dashed border-yellow-400 bg-yellow-50/50 flex items-center justify-center text-xs text-yellow-600 font-medium">
+                  Soltar aqui
                 </div>
-                <h4 className="text-sm font-semibold text-gray-800 mb-2 leading-tight line-clamp-2 pr-4">{task.title}</h4>
-                {(() => { const h = getTaskHealth(task); return h ? (
-                  <div className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border mb-2 ${h.bg} ${h.text} ${h.border}`}>
-                    <span>{h.emoji}</span><span>{h.label}</span>
-                  </div>
-                ) : null; })()}
-                <div className="flex items-center justify-between mt-2">
-                  <div className="flex items-center gap-1.5 text-xs text-gray-400">
-                    <Icons.Calendar />
-                    {new Date(task.dueDate).toLocaleDateString()}
-                  </div>
-                  <div className="flex -space-x-2">
-                    <img
-                      src={users?.find((u: User) => u.id === task.mainAssigneeId)?.avatar || `https://picsum.photos/seed/${task.mainAssigneeId}/100`}
-                      className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
-                      alt="User"
-                      title={users?.find((u: User) => u.id === task.mainAssigneeId)?.name}
-                    />
-                    {(task.secondaryAssigneeIds || []).map((id: string) => (
-                      <img
-                        key={id}
-                        src={users?.find((u: User) => u.id === id)?.avatar || `https://picsum.photos/seed/${id}/100`}
-                        className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
-                        alt="User"
-                        title={users?.find((u: User) => u.id === id)?.name}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))}
+              )}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

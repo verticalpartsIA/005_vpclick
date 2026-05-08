@@ -1,16 +1,16 @@
-import React, { useState, useMemo } from 'react';
-import { 
-  Search, Filter, ArrowUpDown, ChevronDown, CheckCircle2, 
-  Circle, MoreHorizontal, Plus, GripVertical, Settings2
+import React, { useState, useMemo, useRef, useCallback } from 'react';
+import {
+  Filter, ArrowUpDown, CheckCircle2,
+  MoreHorizontal, Plus, GripVertical, Settings2
 } from "lucide-react";
 import { Task, CustomField, CustomFieldValue, Profile } from '../../types';
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { 
-  DropdownMenu, 
-  DropdownMenuContent, 
-  DropdownMenuItem, 
-  DropdownMenuTrigger 
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu";
 import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
@@ -25,6 +25,14 @@ interface TableViewProps {
   onUpdateFieldValue: (taskId: string, fieldId: string, value: any) => void;
 }
 
+const DEFAULT_WIDTHS: Record<string, number> = {
+  title: 320,
+  status: 150,
+  priority: 120,
+  assignee: 180,
+  dueDate: 150,
+};
+
 export const TableView: React.FC<TableViewProps> = ({
   tasks,
   customFields,
@@ -35,20 +43,21 @@ export const TableView: React.FC<TableViewProps> = ({
   onUpdateFieldValue
 }) => {
   const [visibleColumns, setVisibleColumns] = useState<string[]>(['title', 'status', 'priority', 'assignee', 'dueDate']);
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_WIDTHS);
+  const resizingRef = useRef<{ colId: string; startX: number; startWidth: number } | null>(null);
 
   const columns = useMemo(() => {
     const base = [
-      { id: 'title', label: 'Nome da Tarefa', width: 'flex-1 min-w-[300px]' },
-      { id: 'status', label: 'Status', width: 'w-[150px]' },
-      { id: 'priority', label: 'Prioridade', width: 'w-[120px]' },
-      { id: 'assignee', label: 'Responsável', width: 'w-[180px]' },
-      { id: 'dueDate', label: 'Prazo', width: 'w-[150px]' },
+      { id: 'title', label: 'Nome da Tarefa' },
+      { id: 'status', label: 'Status' },
+      { id: 'priority', label: 'Prioridade' },
+      { id: 'assignee', label: 'Responsável' },
+      { id: 'dueDate', label: 'Prazo' },
     ];
 
     const custom = customFields.map(f => ({
       id: `cf_${f.id}`,
       label: f.name,
-      width: 'w-[150px]'
     }));
 
     return [...base, ...custom].filter(c => visibleColumns.includes(c.id) || c.id === 'title');
@@ -57,6 +66,33 @@ export const TableView: React.FC<TableViewProps> = ({
   const getFieldValue = (taskId: string, fieldId: string) => {
     return fieldValues.find(v => v.entityId === taskId && v.fieldId === fieldId)?.value;
   };
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent, colId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startWidth = columnWidths[colId] ?? 150;
+    resizingRef.current = { colId, startX: e.clientX, startWidth };
+
+    const handleMouseMove = (ev: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const delta = ev.clientX - resizingRef.current.startX;
+      const newWidth = Math.max(60, resizingRef.current.startWidth + delta);
+      setColumnWidths(prev => ({ ...prev, [resizingRef.current!.colId]: newWidth }));
+    };
+
+    const handleMouseUp = () => {
+      resizingRef.current = null;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [columnWidths]);
 
   return (
     <div className="flex flex-col h-full bg-background overflow-hidden">
@@ -79,10 +115,10 @@ export const TableView: React.FC<TableViewProps> = ({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-56">
               {['status', 'priority', 'assignee', 'dueDate', ...customFields.map(f => `cf_${f.id}`)].map(colId => (
-                <DropdownMenuItem 
-                  key={colId} 
+                <DropdownMenuItem
+                  key={colId}
                   className="flex items-center justify-between"
-                  onClick={() => setVisibleColumns(prev => 
+                  onClick={() => setVisibleColumns(prev =>
                     prev.includes(colId) ? prev.filter(p => p !== colId) : [...prev, colId]
                   )}
                 >
@@ -97,35 +133,54 @@ export const TableView: React.FC<TableViewProps> = ({
 
       {/* Spreadsheet Grid */}
       <div className="flex-1 overflow-auto">
-        <table className="w-full border-collapse">
-          <thead className="sticky top-0 bg-muted/50 z-10">
+        <table className="border-collapse" style={{ width: 'max-content', minWidth: '100%' }}>
+          <thead className="sticky top-0 bg-muted/80 z-10">
             <tr>
-              <th className="w-10 p-2 border-b border-r bg-muted/30"></th>
-              {columns.map(col => (
-                <th key={col.id} className={`${col.width} p-3 text-left text-xs font-semibold text-muted-foreground uppercase border-b border-r`}>
-                  {col.label}
-                </th>
-              ))}
-              <th className="w-10 p-2 border-b"></th>
+              <th className="p-2 border border-border bg-muted/60" style={{ width: 36 }}></th>
+              {columns.map(col => {
+                const w = columnWidths[col.id] ?? 150;
+                return (
+                  <th
+                    key={col.id}
+                    className="p-0 text-left border border-border bg-muted/60 relative select-none"
+                    style={{ width: w, minWidth: w, maxWidth: w }}
+                  >
+                    <div className="flex items-center px-3 py-2.5 gap-1 overflow-hidden">
+                      <span className="text-xs font-semibold text-muted-foreground uppercase truncate flex-1">
+                        {col.label}
+                      </span>
+                    </div>
+                    {/* Resize handle */}
+                    <div
+                      className="absolute top-0 right-0 h-full w-1.5 cursor-col-resize hover:bg-primary/40 active:bg-primary/60 transition-colors z-20"
+                      onMouseDown={(e) => handleResizeMouseDown(e, col.id)}
+                    />
+                  </th>
+                );
+              })}
+              <th className="p-2 border border-border bg-muted/60" style={{ width: 36 }}></th>
             </tr>
           </thead>
           <tbody>
-            {tasks.map(task => (
-              <tr 
-                key={task.id} 
-                className="group hover:bg-muted/30 transition-colors border-b last:border-0 cursor-pointer"
+            {tasks.map((task, rowIndex) => (
+              <tr
+                key={task.id}
+                className="group hover:bg-muted/30 transition-colors cursor-pointer"
                 onClick={() => onTaskClick(task.id)}
               >
-                <td className="p-2 border-r text-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <td className="p-2 border border-border text-center opacity-0 group-hover:opacity-100 transition-opacity" style={{ width: 36 }}>
                   <GripVertical className="w-4 h-4 text-muted-foreground mx-auto" />
                 </td>
-                
+
                 {/* Title Column */}
                 {columns.find(c => c.id === 'title') && (
-                  <td className="p-3 border-r font-medium border-l-4 border-l-transparent group-hover:border-l-primary transition-all">
+                  <td
+                    className="p-3 border border-border font-medium border-l-4 border-l-transparent group-hover:border-l-primary transition-all overflow-hidden"
+                    style={{ width: columnWidths['title'] ?? 320, maxWidth: columnWidths['title'] ?? 320 }}
+                  >
                     <div className="flex items-center gap-2">
-                      <div 
-                        className="w-4 h-4 rounded-full border border-muted-foreground group-hover:border-primary flex items-center justify-center"
+                      <div
+                        className="w-4 h-4 shrink-0 rounded-full border border-muted-foreground group-hover:border-primary flex items-center justify-center"
                         onClick={(e) => {
                           e.stopPropagation();
                           onUpdateTask(task.id, { status: 'Concluído' });
@@ -140,8 +195,11 @@ export const TableView: React.FC<TableViewProps> = ({
 
                 {/* Status Column */}
                 {columns.find(c => c.id === 'status') && (
-                  <td className="p-3 border-r">
-                    <Badge variant="outline" className="font-normal border-muted-foreground/30">
+                  <td
+                    className="p-3 border border-border overflow-hidden"
+                    style={{ width: columnWidths['status'] ?? 150, maxWidth: columnWidths['status'] ?? 150 }}
+                  >
+                    <Badge variant="outline" className="font-normal border-muted-foreground/30 truncate max-w-full">
                       {task.status}
                     </Badge>
                   </td>
@@ -149,7 +207,10 @@ export const TableView: React.FC<TableViewProps> = ({
 
                 {/* Priority Column */}
                 {columns.find(c => c.id === 'priority') && (
-                  <td className="p-3 border-r">
+                  <td
+                    className="p-3 border border-border overflow-hidden"
+                    style={{ width: columnWidths['priority'] ?? 120, maxWidth: columnWidths['priority'] ?? 120 }}
+                  >
                     <span className={`text-sm font-medium ${
                       task.priority === 'Urgente' ? 'text-destructive' :
                       task.priority === 'Alta' ? 'text-orange-500' :
@@ -162,14 +223,22 @@ export const TableView: React.FC<TableViewProps> = ({
 
                 {/* Assignee Column */}
                 {columns.find(c => c.id === 'assignee') && (
-                  <td className="p-3 border-r text-sm text-muted-foreground">
-                    {users.find(u => u.id === task.mainAssigneeId)?.name || 'Sem responsável'}
+                  <td
+                    className="p-3 border border-border text-sm text-muted-foreground overflow-hidden"
+                    style={{ width: columnWidths['assignee'] ?? 180, maxWidth: columnWidths['assignee'] ?? 180 }}
+                  >
+                    <span className="truncate block">
+                      {users.find(u => u.id === task.mainAssigneeId)?.name || 'Sem responsável'}
+                    </span>
                   </td>
                 )}
 
                 {/* Due Date Column */}
                 {columns.find(c => c.id === 'dueDate') && (
-                  <td className="p-3 border-r text-sm text-muted-foreground">
+                  <td
+                    className="p-3 border border-border text-sm text-muted-foreground overflow-hidden"
+                    style={{ width: columnWidths['dueDate'] ?? 150, maxWidth: columnWidths['dueDate'] ?? 150 }}
+                  >
                     {task.dueDate && !isNaN(new Date(task.dueDate).getTime())
                       ? format(new Date(task.dueDate), 'dd MMM yyyy', { locale: ptBR })
                       : '-'}
@@ -181,30 +250,38 @@ export const TableView: React.FC<TableViewProps> = ({
                   const fieldId = col.id.replace('cf_', '');
                   const field = customFields.find(f => f.id === fieldId);
                   const val = getFieldValue(task.id, fieldId);
-                  
+                  const w = columnWidths[col.id] ?? 150;
+
                   return (
-                    <td key={col.id} className="p-3 border-r text-sm text-muted-foreground">
-                      {field?.type === 'currency' ? `R$ ${val || '0,00'}` :
-                       field?.type === 'progress' ? `${val || 0}%` :
-                       String(val || '-')}
+                    <td
+                      key={col.id}
+                      className="p-3 border border-border text-sm text-muted-foreground overflow-hidden"
+                      style={{ width: w, maxWidth: w }}
+                    >
+                      <span className="truncate block">
+                        {field?.type === 'currency' ? `R$ ${val || '0,00'}` :
+                         field?.type === 'progress' ? `${val || 0}%` :
+                         String(val || '-')}
+                      </span>
                     </td>
                   );
                 })}
 
-                <td className="p-2 text-center opacity-0 group-hover:opacity-100 transition-opacity">
+                <td className="p-2 border border-border text-center opacity-0 group-hover:opacity-100 transition-opacity" style={{ width: 36 }}>
                   <MoreHorizontal className="w-4 h-4 text-muted-foreground mx-auto" />
                 </td>
               </tr>
             ))}
-            
+
             {/* New Task Row */}
-            <tr className="border-b last:border-0">
-               <td className="p-2 border-r"></td>
-               <td className="p-3 border-r" colSpan={columns.length}>
+            <tr>
+               <td className="p-2 border border-border" style={{ width: 36 }}></td>
+               <td className="p-3 border border-border" colSpan={columns.length}>
                   <button className="flex items-center gap-2 text-sm text-muted-foreground hover:text-primary transition-colors">
                     <Plus className="w-4 h-4" /> Adicionar tarefa
                   </button>
                </td>
+               <td className="p-2 border border-border" style={{ width: 36 }}></td>
             </tr>
           </tbody>
         </table>
