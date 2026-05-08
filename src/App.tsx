@@ -3503,9 +3503,9 @@ function ListView({
 
                 {isExpanded && (
                   <table className="w-full text-left border-collapse min-w-[900px]">
-                    <thead className="bg-gray-50 border-b">
+                    <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
-                        <th className="w-10 px-3 py-3">
+                        <th className="w-10 px-3 py-3 border-r border-gray-200">
                           <input
                             type="checkbox"
                             className="rounded border-gray-300 cursor-pointer"
@@ -3519,7 +3519,7 @@ function ListView({
                             }}
                           />
                         </th>
-                        <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase min-w-[300px]">Tarefa</th>
+                        <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase min-w-[300px] border-r border-gray-200">Tarefa</th>
 
                         {orderedColumns.map((col) => (
                           <th
@@ -3530,7 +3530,7 @@ function ListView({
                             onDragEnter={(e) => handleDragEnter(e, col.id)}
                             onDragEnd={handleDragEnd}
                             onDrop={handleDrop}
-                            className={`px-4 py-3 text-xs font-semibold text-gray-500 uppercase whitespace-nowrap cursor-move hover:bg-gray-100 transition-colors ${draggedColumnId === col.id ? 'bg-blue-50 opacity-40' : ''}`}
+                            className={`px-4 py-3 text-xs font-semibold text-gray-500 uppercase whitespace-nowrap cursor-move hover:bg-gray-100 transition-colors border-r border-gray-200 ${draggedColumnId === col.id ? 'bg-blue-50 opacity-40' : ''}`}
                           >
                             <div className="flex items-center gap-2">
                               <span>{col.name}</span>
@@ -3562,7 +3562,7 @@ function ListView({
                           </th>
                         ))}
 
-                        <th className="px-2 py-3 w-10">
+                        <th className="px-2 py-3 w-10 border-r border-gray-200">
                           <button
                             type="button"
                             onClick={(e) => {
@@ -3590,10 +3590,10 @@ function ListView({
                           const currentRow = (
                             <tr
                               key={t.id}
-                              className={`hover:bg-gray-50 cursor-pointer group transition-colors ${depth > 0 ? 'bg-gray-50/30' : ''} ${selectedTaskIds.has(t.id) ? 'bg-blue-50/40' : ''}`}
+                              className={`hover:bg-gray-50 cursor-pointer group transition-colors border-b border-gray-100 ${depth > 0 ? 'bg-gray-50/30' : ''} ${selectedTaskIds.has(t.id) ? 'bg-blue-50/40' : ''}`}
                               onClick={() => onSelectTask(t.id)}
                             >
-                              <td className="w-10 px-3 py-3" onClick={e => e.stopPropagation()}>
+                              <td className="w-10 px-3 py-3 border-r border-gray-200" onClick={e => e.stopPropagation()}>
                                 <input
                                   type="checkbox"
                                   className="rounded border-gray-300 cursor-pointer"
@@ -3601,7 +3601,7 @@ function ListView({
                                   onChange={() => toggleSelection(t.id)}
                                 />
                               </td>
-                              <td className="px-4 py-3">
+                              <td className="px-4 py-3 border-r border-gray-200">
                                 <div className="flex items-center gap-2" style={{ paddingLeft: `${depth * 24}px` }}>
                                   <div
                                     className={`w-1 h-10 rounded-full shrink-0 ${t.priority === TaskPriority.URGENTE ? 'bg-red-500' : 'bg-transparent'}`}
@@ -3655,7 +3655,7 @@ function ListView({
                                   switch (col.id) {
                                     case 'status':
                                       return (
-                                        <td key={col.id} className="px-4 py-3">
+                                        <td key={col.id} className="px-4 py-3 border-r border-gray-200">
                                           <span
                                             className="px-2 py-0.5 rounded text-[10px] font-bold uppercase whitespace-nowrap"
                                             style={getStatusStyle(t.status)}
@@ -3666,7 +3666,7 @@ function ListView({
                                       );
                                     case 'priority':
                                       return (
-                                        <td key={col.id} className="px-4 py-3">
+                                        <td key={col.id} className="px-4 py-3 border-r border-gray-200">
                                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase whitespace-nowrap ${PRIORITY_COLORS[t.priority]}`}>
                                             {t.priority}
                                           </span>
@@ -3674,7 +3674,7 @@ function ListView({
                                       );
                                     case 'assignee':
                                       return (
-                                        <td key={col.id} className="px-4 py-3">
+                                        <td key={col.id} className="px-4 py-3 border-r border-gray-200">
                                           <div className="flex -space-x-2">
                                             {t.mainAssigneeId ? (
                                               <img
@@ -3700,7 +3700,7 @@ function ListView({
                                       );
                                     case 'extensions':
                                       return (
-                                        <td key={col.id} className="px-4 py-3 text-center">
+                                        <td key={col.id} className="px-4 py-3 text-center border-r border-gray-200">
                                           <span className={`text-xs font-bold ${t.extensionCount > 0 ? 'text-red-500' : 'text-gray-400'}`}>
                                             {t.extensionCount}
                                           </span>
@@ -3708,7 +3708,7 @@ function ListView({
                                       );
                                     case 'dueDate':
                                       return (
-                                        <td key={col.id} className="px-4 py-3 text-[10px] text-gray-500 font-medium whitespace-nowrap uppercase">
+                                        <td key={col.id} className="px-4 py-3 text-[10px] text-gray-500 font-medium whitespace-nowrap uppercase border-r border-gray-200">
                                           {t.dueDate ? (() => { const [y, m, d] = t.dueDate.split('-'); return `${d}/${m}/${y}`; })() : '—'}
                                         </td>
                                       );
@@ -3721,7 +3721,7 @@ function ListView({
                                   if (!field) return <td key={col.id}></td>;
                                   const currentValue = getFieldValue(field.id, t.id);
                                   return (
-                                  <td key={col.id} className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                                  <td key={col.id} className="px-4 py-3 border-r border-gray-200" onClick={(e) => e.stopPropagation()}>
                                     {field.type === CustomFieldType.FORMULA ? (
                                       <div className="text-xs font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded border border-blue-100 italic">
                                         {FormulaParser.evaluate(field.config?.formula || '', { ...t, ...Object.fromEntries(fieldValues.filter(fv => fv.entityId === t.id).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) })}
@@ -3950,6 +3950,8 @@ function ListView({
 }
 
 function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, lists, statusGroups, activeListId }: any) {
+  // useRef garante que o taskId está sempre atualizado no momento do drop (sem stale closure)
+  const draggingTaskIdRef = useRef<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
 
@@ -3986,12 +3988,14 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
   };
 
   const handleDragStart = (e: React.DragEvent, taskId: string) => {
+    draggingTaskIdRef.current = taskId;
     setDraggingTaskId(taskId);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', taskId);
   };
 
   const handleDragEnd = () => {
+    draggingTaskIdRef.current = null;
     setDraggingTaskId(null);
     setDragOverColumn(null);
   };
@@ -4008,17 +4012,22 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
     }
   };
 
-  const handleDrop = (e: React.DragEvent, status: string) => {
-    e.preventDefault();
-    const taskId = e.dataTransfer.getData('text/plain') || draggingTaskId;
+  const executeDrop = (status: string) => {
+    const taskId = draggingTaskIdRef.current;
     if (taskId) {
       const task = tasks.find((t: Task) => t.id === taskId);
       if (task && task.status !== status) {
         onStatusChange(taskId, status);
       }
     }
+    draggingTaskIdRef.current = null;
     setDraggingTaskId(null);
     setDragOverColumn(null);
+  };
+
+  const handleDrop = (e: React.DragEvent, status: string) => {
+    e.preventDefault();
+    executeDrop(status);
   };
 
   return (
@@ -4059,7 +4068,9 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
                     draggable
                     onDragStart={(e) => handleDragStart(e, task.id)}
                     onDragEnd={handleDragEnd}
-                    onClick={() => onSelectTask(task.id)}
+                    onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverColumn(status); }}
+                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); executeDrop(status); }}
+                    onClick={() => !draggingTaskId && onSelectTask(task.id)}
                     className={`bg-white p-3 rounded-lg shadow-sm border-l-4 border border-gray-200 hover:border-[var(--primary-color)] cursor-grab active:cursor-grabbing transition-all group relative select-none ${
                       isDragging ? 'opacity-40 scale-95' : 'opacity-100'
                     }`}
