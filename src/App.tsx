@@ -3950,10 +3950,10 @@ function ListView({
 }
 
 function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, lists, statusGroups, activeListId }: any) {
-  // useRef garante que o taskId está sempre atualizado no momento do drop (sem stale closure)
+  // Refs para não causar re-render durante drag (re-renders destroem o HTML5 DnD)
   const draggingTaskIdRef = useRef<string | null>(null);
+  const currentDragOverColRef = useRef<HTMLElement | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
-  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
 
   const activeList = lists?.find((l: any) => l.id === activeListId);
   const activeStatusGroup = statusGroups?.find((g: any) => g.id === activeList?.statusGroupId) || statusGroups?.[0];
@@ -3975,8 +3975,14 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
         return a.localeCompare(b);
       });
     }
-    // Deduplicate — evita colunas repetidas do banco de dados
-    return Array.from(new Set(labels));
+    // Deduplicate case-insensitive — evita "Concluído" e "CONCLUÍDO" como duas colunas
+    const seen = new Set<string>();
+    return labels.filter(label => {
+      const key = label.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }, [tasks, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(statusGroups?.[0]?.options)]);
 
   const getStatusColor = (statusLabel: string) => {
@@ -3987,6 +3993,17 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
     return '#94a3b8';
   };
 
+  // Manipula highlight da coluna diretamente no DOM — sem setState (re-render quebra DnD)
+  const highlightColumn = (el: HTMLElement | null) => {
+    if (currentDragOverColRef.current && currentDragOverColRef.current !== el) {
+      currentDragOverColRef.current.classList.remove('!bg-yellow-50', '!border-yellow-400', 'shadow-lg');
+    }
+    if (el && el !== currentDragOverColRef.current) {
+      el.classList.add('!bg-yellow-50', '!border-yellow-400', 'shadow-lg');
+    }
+    currentDragOverColRef.current = el;
+  };
+
   const handleDragStart = (e: React.DragEvent, taskId: string) => {
     draggingTaskIdRef.current = taskId;
     setDraggingTaskId(taskId);
@@ -3995,58 +4012,52 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
   };
 
   const handleDragEnd = () => {
+    highlightColumn(null);
     draggingTaskIdRef.current = null;
     setDraggingTaskId(null);
-    setDragOverColumn(null);
   };
 
-  const handleDragOver = (e: React.DragEvent, status: string) => {
+  const handleColumnDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    setDragOverColumn(status);
+    // Sobe até o elemento de coluna (data-kanban-col)
+    let el = e.target as HTMLElement;
+    while (el && !el.dataset.kanbanCol) el = el.parentElement as HTMLElement;
+    if (el) highlightColumn(el);
   };
 
-  const handleDragLeave = (e: React.DragEvent, status: string) => {
-    if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
-      setDragOverColumn(prev => prev === status ? null : prev);
+  const handleColumnDragLeave = (e: React.DragEvent) => {
+    const col = e.currentTarget as HTMLElement;
+    if (!col.contains(e.relatedTarget as Node)) {
+      highlightColumn(null);
     }
-  };
-
-  const executeDrop = (status: string) => {
-    const taskId = draggingTaskIdRef.current;
-    if (taskId) {
-      const task = tasks.find((t: Task) => t.id === taskId);
-      if (task && task.status !== status) {
-        onStatusChange(taskId, status);
-      }
-    }
-    draggingTaskIdRef.current = null;
-    setDraggingTaskId(null);
-    setDragOverColumn(null);
   };
 
   const handleDrop = (e: React.DragEvent, status: string) => {
     e.preventDefault();
-    executeDrop(status);
+    highlightColumn(null);
+    const taskId = draggingTaskIdRef.current || e.dataTransfer.getData('text/plain');
+    if (taskId) {
+      onStatusChange(taskId, status);
+    }
+    draggingTaskIdRef.current = null;
+    setDraggingTaskId(null);
   };
 
   return (
     <div className="flex gap-4 h-full overflow-x-auto pb-4 custom-scrollbar items-start" onClick={(e) => e.stopPropagation()}>
       {columns.map(status => {
         const statusColor = getStatusColor(status);
-        const isDragTarget = dragOverColumn === status;
-        const columnTasks = tasks.filter((t: Task) => t.status === status);
+        // Filtra ignorando case para agrupar "Concluído" e "CONCLUÍDO" juntos
+        const columnTasks = tasks.filter((t: Task) => t.status?.toLowerCase() === status.toLowerCase());
 
         return (
           <div
             key={status}
-            className={`w-80 shrink-0 flex flex-col max-h-full rounded-xl border p-3 transition-colors ${
-              isDragTarget
-                ? 'bg-yellow-50 border-yellow-400 shadow-lg'
-                : 'bg-gray-50 border-gray-200'
-            }`}
-            onDragOver={(e) => handleDragOver(e, status)}
-            onDragLeave={(e) => handleDragLeave(e, status)}
+            data-kanban-col={status}
+            className="w-80 shrink-0 flex flex-col max-h-full rounded-xl border border-gray-200 bg-gray-50 p-3 transition-colors"
+            onDragOver={handleColumnDragOver}
+            onDragLeave={handleColumnDragLeave}
             onDrop={(e) => handleDrop(e, status)}
           >
             <div className="flex items-center justify-between mb-3 px-1">
@@ -4068,11 +4079,9 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
                     draggable
                     onDragStart={(e) => handleDragStart(e, task.id)}
                     onDragEnd={handleDragEnd}
-                    onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); setDragOverColumn(status); }}
-                    onDrop={(e) => { e.preventDefault(); e.stopPropagation(); executeDrop(status); }}
-                    onClick={() => !draggingTaskId && onSelectTask(task.id)}
-                    className={`bg-white p-3 rounded-lg shadow-sm border-l-4 border border-gray-200 hover:border-[var(--primary-color)] cursor-grab active:cursor-grabbing transition-all group relative select-none ${
-                      isDragging ? 'opacity-40 scale-95' : 'opacity-100'
+                    onClick={() => onSelectTask(task.id)}
+                    className={`bg-white p-3 rounded-lg shadow-sm border-l-4 border border-gray-200 hover:shadow-md cursor-grab active:cursor-grabbing transition-all group relative select-none ${
+                      isDragging ? 'opacity-30' : 'opacity-100'
                     }`}
                     style={{ borderLeftColor: statusColor }}
                   >
@@ -4127,10 +4136,9 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, users, 
                   </div>
                 );
               })}
-              {/* Drop zone placeholder when column is empty or dragging */}
-              {isDragTarget && columnTasks.filter((t: Task) => t.id !== draggingTaskId).length === 0 && (
-                <div className="h-16 rounded-lg border-2 border-dashed border-yellow-400 bg-yellow-50/50 flex items-center justify-center text-xs text-yellow-600 font-medium">
-                  Soltar aqui
+              {columnTasks.length === 0 && (
+                <div className="h-12 rounded-lg border-2 border-dashed border-gray-200 flex items-center justify-center text-xs text-gray-400">
+                  Vazio
                 </div>
               )}
             </div>
