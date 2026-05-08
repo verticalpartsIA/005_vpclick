@@ -2084,6 +2084,7 @@ export default function App() {
                 onSelectTask={setSelectedTaskId}
                 onStatusChange={handleStatusChange}
                 onDeleteTask={handleDeleteTask}
+                onCreateTask={handleCreateTask}
                 onQuickCreate={(prefill?: any) => {
                   setPrefilledTaskData(prefill || null);
                   setIsTaskModalOpen(true);
@@ -3953,11 +3954,29 @@ function ListView({
   );
 }
 
-function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onQuickCreate, users, lists, statusGroups, activeListId }: any) {
+function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId }: any) {
   // Refs para não causar re-render durante drag (re-renders destroem o HTML5 DnD)
   const draggingTaskIdRef = useRef<string | null>(null);
   const currentDragOverColRef = useRef<HTMLElement | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
+  const [inlineCreateCol, setInlineCreateCol] = useState<string | null>(null);
+  const [inlineCreateTitle, setInlineCreateTitle] = useState('');
+  const inlineInputRef = useRef<HTMLInputElement>(null);
+
+  const confirmInlineCreate = async (status: string) => {
+    const title = inlineCreateTitle.trim();
+    if (title && activeListId) {
+      await onCreateTask({ title, status, listId: activeListId });
+    }
+    setInlineCreateCol(null);
+    setInlineCreateTitle('');
+  };
+
+  const openInlineCreate = (status: string) => {
+    setInlineCreateCol(status);
+    setInlineCreateTitle('');
+    setTimeout(() => inlineInputRef.current?.focus(), 50);
+  };
 
   const activeList = lists?.find((l: any) => l.id === activeListId);
   const activeStatusGroup = statusGroups?.find((g: any) => g.id === activeList?.statusGroupId) || statusGroups?.[0];
@@ -4125,6 +4144,24 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onQuick
                     {/* Hover actions */}
                     <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
                       <button
+                        onClick={(e) => { e.stopPropagation(); onSelectTask(task.id); }}
+                        className="p-1 rounded text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
+                        title="Abrir tarefa"
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M7 3H3v10h10V9M9 3h4v4M13 3L7 9"/>
+                        </svg>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onQuickCreate?.({ parentId: task.id, status, listId: task.listId }); }}
+                        className="p-1 rounded text-gray-400 hover:text-purple-500 hover:bg-purple-50 transition-colors"
+                        title="Adicionar subtarefa"
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+                          <circle cx="8" cy="8" r="6"/><path d="M8 5v6M5 8h6"/>
+                        </svg>
+                      </button>
+                      <button
                         onClick={(e) => { e.stopPropagation(); onStatusChange(task.id, columns[columns.length - 1]); }}
                         className="p-1 rounded text-gray-400 hover:text-green-600 hover:bg-green-50 transition-colors"
                         title="Marcar como concluída"
@@ -4222,15 +4259,34 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onQuick
             </div>
 
             {/* ── Footer — Adicionar Tarefa ── */}
-            <button
-              onClick={() => onQuickCreate?.({ status })}
-              className="flex items-center gap-2 w-full px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-b-xl transition-colors border-t border-gray-100"
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M7 2v10M2 7h10"/>
-              </svg>
-              Adicionar Tarefa
-            </button>
+            {inlineCreateCol === status ? (
+              <div className="px-2 pb-2 pt-1 border-t border-gray-100">
+                <input
+                  ref={inlineInputRef}
+                  type="text"
+                  value={inlineCreateTitle}
+                  onChange={e => setInlineCreateTitle(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') confirmInlineCreate(status);
+                    if (e.key === 'Escape') { setInlineCreateCol(null); setInlineCreateTitle(''); }
+                  }}
+                  onBlur={() => confirmInlineCreate(status)}
+                  placeholder="Nome da tarefa…"
+                  className="w-full px-2 py-1.5 text-xs rounded border border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
+                />
+                <p className="text-[10px] text-gray-400 mt-1 px-1">Enter para salvar · Esc para cancelar</p>
+              </div>
+            ) : (
+              <button
+                onClick={() => activeListId ? openInlineCreate(status) : onQuickCreate?.({ status })}
+                className="flex items-center gap-2 w-full px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-b-xl transition-colors border-t border-gray-100"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M7 2v10M2 7h10"/>
+                </svg>
+                Adicionar Tarefa
+              </button>
+            )}
           </div>
         );
       })}
