@@ -2467,6 +2467,26 @@ export default function App() {
   );
 }
 
+// ── Linkify: converte URLs de texto puro em <a> clicáveis ──────────────────
+function linkifyHtml(html: string): string {
+  // Divide o HTML em partes: já-linkificadas (<a>…</a>) e texto puro
+  const parts = html.split(/(<a[\s>][\s\S]*?<\/a>)/gi);
+  return parts
+    .map((part, i) => {
+      if (i % 2 === 1) return part; // já é um <a>, preserva
+      // Nos trechos de texto, linkifica URLs soltas
+      return part.replace(
+        /(?<![=\/"'`])(https?:\/\/[^\s<>"'`\]]+)/g,
+        (url) => {
+          const clean = url.replace(/[.,;:!?)\]]+$/, '');
+          const trail = url.slice(clean.length);
+          return `<a href="${clean}" target="_blank" rel="noopener noreferrer">${clean}</a>${trail}`;
+        }
+      );
+    })
+    .join('');
+}
+
 function DocView({ doc, onUpdate, currentUser, uploadFile }: {
   doc: Doc,
   onUpdate: (doc: Doc) => void,
@@ -2481,8 +2501,11 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
   useEffect(() => {
     setTitle(doc.title);
     setHeaderImage(doc.headerImage || '');
-    if (contentRef.current && contentRef.current.innerHTML !== doc.content) {
-      contentRef.current.innerHTML = doc.content;
+    if (contentRef.current) {
+      const linked = linkifyHtml(doc.content);
+      if (contentRef.current.innerHTML !== linked) {
+        contentRef.current.innerHTML = linked;
+      }
     }
   }, [doc]);
 
@@ -2494,6 +2517,33 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
   const handleContentBlur = () => {
     if (contentRef.current) {
       onUpdate({ ...doc, content: contentRef.current.innerHTML });
+    }
+  };
+
+  // Ao colar texto puro, linkifica URLs antes de inserir
+  const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const html = e.clipboardData.getData('text/html');
+    const plain = e.clipboardData.getData('text/plain');
+    if (!html && plain) {
+      e.preventDefault();
+      const escaped = plain
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/\n/g, '<br>');
+      document.execCommand('insertHTML', false, linkifyHtml(escaped));
+    }
+    // Se houver HTML (colar do Word/navegador), deixa o navegador inserir normalmente
+    // e aplica linkify no blur
+  };
+
+  // contentEditable bloqueia cliques em <a>; abrimos manualmente
+  const handleContentClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const link = (e.target as HTMLElement).closest('a');
+    if (link) {
+      e.preventDefault();
+      const href = link.getAttribute('href');
+      if (href) window.open(href, '_blank', 'noopener,noreferrer');
     }
   };
 
@@ -2679,8 +2729,10 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
           ref={contentRef}
           contentEditable
           onBlur={handleContentBlur}
-          dangerouslySetInnerHTML={{ __html: doc.content }}
-          className="w-full min-h-[300px] text-xl text-gray-700 leading-relaxed outline-none prose prose-orange max-w-none focus:prose-orange"
+          onPaste={handlePaste}
+          onClick={handleContentClick}
+          dangerouslySetInnerHTML={{ __html: linkifyHtml(doc.content) }}
+          className="w-full min-h-[300px] text-xl text-gray-700 leading-relaxed outline-none prose prose-orange max-w-none focus:prose-orange [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer hover:[&_a]:text-blue-800"
         />
 
         {/* Attachments Section */}
