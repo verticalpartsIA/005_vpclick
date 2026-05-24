@@ -18,7 +18,7 @@ import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
-import { AutomationEngine } from './lib/AutomationEngine';
+import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { TaskDependencies } from './components/TaskDependencies';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
@@ -1363,36 +1363,65 @@ export default function App() {
         if (t.id === taskId) {
           const updatedTask = { ...t, status: newStatus };
 
-          // T604 — Automation Engine connected
-          // Fire-and-forget: fetch active automations for this task's list and run them
+          // SESSION_04 — AutomationEngine.evaluate() com context + callbacks
+          const prevTask = t;
           const listId = t.listId;
           if (listId) {
             supabase
               .from('automations')
               .select('*')
               .eq('list_id', listId)
-              .eq('trigger_type', 'status_changed')
-              .eq('is_active', true)
-              .then(({ data: automations }) => {
-                if (!automations) return;
-                automations.forEach(async (automation) => {
-                  const conditionsMet = AutomationEngine.evaluateConditions(
-                    updatedTask,
-                    automation.conditions ?? []
-                  );
-                  if (conditionsMet) {
-                    await AutomationEngine.executeActions(
-                      updatedTask,
-                      automation.actions ?? [],
-                      {
-                        updateTask: (id: string, updates: any) =>
-                          handleUpdateTask(id, updates),
-                        notify: (msg: string) =>
-                          toast.info(msg)
-                      }
-                    );
-                  }
-                });
+              .eq('enabled', true)
+              .then(({ data: automationData }) => {
+                if (!automationData?.length) return;
+                const engine = new AutomationEngine(automationData as any[]);
+                const ctx: AutomationContext = {
+                  previousTask: prevTask,
+                  triggerType: 'status_changed',
+                  workspaceId: workspace.id,
+                  currentUserId: currentUser.id,
+                };
+                const cbs: AutomationCallbacks = {
+                  onChangeStatus:    (tid, s) => { supabase.from('tasks').update({ status: s }).eq('id', tid); },
+                  onChangePriority:  (tid, p) => { supabase.from('tasks').update({ priority: p }).eq('id', tid); },
+                  onAddAssignee:     (tid, uid) => { supabase.from('tasks').update({ main_assignee_id: uid }).eq('id', tid); },
+                  onRemoveAssignee:  (tid) => { supabase.from('tasks').update({ main_assignee_id: null }).eq('id', tid); },
+                  onPostComment:     (tid, text) => {
+                    supabase.from('comments').insert({ task_id: tid, user_id: currentUser.id, text });
+                  },
+                  onAddTag: (tid, tag) => {
+                    const task = tasks.find(tk => tk.id === tid);
+                    if (!task) return;
+                    const newTags = Array.from(new Set([...(task.tags ?? []), tag]));
+                    supabase.from('tasks').update({ tags: newTags }).eq('id', tid);
+                  },
+                  onRemoveTag: (tid, tag) => {
+                    const task = tasks.find(tk => tk.id === tid);
+                    if (!task) return;
+                    supabase.from('tasks').update({ tags: (task.tags ?? []).filter(tg => tg !== tag) }).eq('id', tid);
+                  },
+                  onSendNotification: (message) => toast.info(message),
+                  onCreateTask: (taskData) => {
+                    supabase.from('tasks').insert({
+                      title: taskData.title ?? 'Nova tarefa',
+                      list_id: taskData.listId ?? listId,
+                      status: 'A fazer',
+                      created_by: currentUser.id,
+                    });
+                  },
+                  onCreateSubtask: (parentId, taskData) => {
+                    supabase.from('tasks').insert({
+                      title: taskData.title ?? 'Nova subtarefa',
+                      parent_id: parentId,
+                      list_id: listId,
+                      status: 'A fazer',
+                      created_by: currentUser.id,
+                    });
+                  },
+                };
+                engine.evaluate(updatedTask, ctx, cbs).catch(err =>
+                  console.error('[AutomationEngine] status_changed:', err)
+                );
               });
           }
 
@@ -2338,6 +2367,7 @@ export default function App() {
             listId={automationListId}
             listName={lists.find(l => l.id === automationListId)?.name || ''}
             currentUserId={currentUser.id}
+            workspaceId={workspace.id}
             onClose={() => setIsAutomationModalOpen(false)}
             onCreated={() => setIsAutomationModalOpen(false)}
           />

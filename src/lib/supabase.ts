@@ -132,3 +132,77 @@ export async function updateTaskTags(taskId: string, tagNames: string[]): Promis
 
   if (error) throw error;
 }
+
+// ── Automations ────────────────────────────────────────────
+import type { Automation, AutomationLog } from '../types';
+
+export async function fetchAutomations(workspaceId: string): Promise<Automation[]> {
+  const { data, error } = await supabase
+    .from('automations')
+    .select('*')
+    .eq('workspace_id', workspaceId)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return (data ?? []) as Automation[];
+}
+
+export async function fetchAutomationsByList(listId: string): Promise<Automation[]> {
+  const { data, error } = await supabase
+    .from('automations')
+    .select('*')
+    .eq('list_id', listId)
+    .order('created_at', { ascending: false });
+
+  if (error) throw error;
+  return (data ?? []) as Automation[];
+}
+
+export async function createAutomation(
+  automation: Omit<Automation, 'id' | 'run_count' | 'created_at' | 'updated_at'>
+): Promise<Automation> {
+  const { data, error } = await supabase
+    .from('automations')
+    .insert(automation)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data as Automation;
+}
+
+export async function updateAutomation(
+  id: string,
+  changes: Partial<Pick<Automation, 'name' | 'enabled' | 'trigger_type' | 'trigger_config' | 'conditions' | 'actions'>>
+): Promise<void> {
+  const { error } = await supabase
+    .from('automations')
+    .update(changes)
+    .eq('id', id);
+
+  if (error) throw error;
+}
+
+export async function deleteAutomation(id: string): Promise<void> {
+  const { error } = await supabase
+    .from('automations')
+    .delete()
+    .eq('id', id);
+
+  if (error) throw error;
+}
+
+export async function fetchAutomationLogs(
+  automationId: string,
+  limit = 50
+): Promise<AutomationLog[]> {
+  const { data, error } = await supabase
+    .from('automation_logs')
+    .select('*')
+    .eq('automation_id', automationId)
+    .order('executed_at', { ascending: false })
+    .limit(limit);
+
+  if (error) throw error;
+  return (data ?? []) as AutomationLog[];
+}

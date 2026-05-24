@@ -214,3 +214,90 @@ export interface WorkspaceTag {
   created_by: string | null;
   created_at: string;
 }
+
+// ── Automations ───────────────────────────────────────────
+
+export type AutomationTriggerType =
+  | 'status_changed'
+  | 'priority_changed'
+  | 'assignee_changed'
+  | 'due_date_arrives'
+  | 'task_created'
+  | 'task_moved'
+  | 'custom_field_changed';
+
+export type AutomationActionType =
+  | 'change_status'
+  | 'change_priority'
+  | 'add_assignee'
+  | 'remove_assignee'
+  | 'post_comment'
+  | 'add_tag'
+  | 'remove_tag'
+  | 'send_notification'
+  | 'create_task'
+  | 'create_subtask';
+
+export type AutomationConditionOperator =
+  | 'equals'
+  | 'not_equals'
+  | 'contains'
+  | 'is_empty'
+  | 'is_not_empty';
+
+export interface AutomationCondition {
+  field: string;
+  operator: AutomationConditionOperator;
+  value?: string;
+}
+
+export interface AutomationAction {
+  type: AutomationActionType;
+  config: Record<string, unknown>;
+}
+
+export interface AutomationTriggerConfig {
+  from?: string;
+  to?: string;
+  field_id?: string;
+  days_before?: number;
+}
+
+export interface Automation {
+  id: string;
+  workspace_id: string | null;
+  list_id: string | null;
+  name: string;
+  enabled: boolean;
+  trigger_type: AutomationTriggerType;
+  trigger_config: AutomationTriggerConfig;
+  conditions: AutomationCondition[];
+  actions: AutomationAction[];
+  run_count: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutomationLog {
+  id: string;
+  automation_id: string;
+  task_id: string | null;
+  triggered_by: string;
+  status: 'success' | 'error' | 'skipped';
+  actions_taken: AutomationAction[];
+  error_message: string | null;
+  executed_at: string;
+}
+
+export interface AutomationTemplate {
+  id: string;
+  name: string;
+  description: string;
+  category: 'status' | 'prazo' | 'equipe' | 'qualidade';
+  icon: string;
+  trigger_type: AutomationTriggerType;
+  trigger_config: AutomationTriggerConfig;
+  conditions: AutomationCondition[];
+  actions: AutomationAction[];
+}
