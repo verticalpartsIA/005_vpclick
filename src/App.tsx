@@ -672,7 +672,8 @@ export default function App() {
           name: s.name,
           workspaceId: s.workspace_id,
           color: s.color,
-          icon: s.icon
+          icon: s.icon,
+          isSystem: s.is_system ?? false,
         })));
       }
 
@@ -869,7 +870,7 @@ export default function App() {
           const { data: spacesData } = await supabase.from('spaces').select('*');
           if (spacesData) {
             setSpaces(spacesData.map((s: any) => ({
-              id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon
+              id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon, isSystem: s.is_system ?? false
             })));
           }
           const { data: foldersData } = await supabase.from('folders').select('*');
@@ -1122,6 +1123,12 @@ export default function App() {
   };
 
   const handleDeleteSpace = (spaceId: string) => {
+    // Bloquear exclusão de spaces nativos do Hub de Integrações
+    const space = spaces.find(s => s.id === spaceId);
+    if (space?.isSystem) {
+      toast.error('🔒 Este espaço é nativo do VP Click e não pode ser excluído.');
+      return;
+    }
     setConfirmModal({
       message: 'Excluir este espaço e todas as suas pastas e tarefas?',
       onConfirm: async () => {

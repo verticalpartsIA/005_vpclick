@@ -180,6 +180,7 @@ export interface Space {
   workspaceId: string;
   color: string;
   icon?: string;
+  isSystem?: boolean; // true = space nativo do Hub, não pode ser deletado
 }
 
 export interface Workspace {
