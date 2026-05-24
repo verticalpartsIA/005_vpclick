@@ -1917,7 +1917,7 @@ export default function App() {
           <header className="h-14 border-b bg-card flex items-center justify-between px-6 shrink-0 z-10">
             <div className="flex items-center gap-4">
               <h1 className="text-lg font-bold text-gray-800 hidden md:block">
-                {activeScope.name}
+                {activeListId ? (lists.find(l => l.id === activeListId)?.name ?? activeScope.name) : activeScope.name}
               </h1>
               <div className="relative">
                 <input
@@ -2123,7 +2123,9 @@ export default function App() {
                 tasks={filteredTasks}
                 onSelectTask={setSelectedTaskId}
                 onStatusChange={handleStatusChange}
-                context={activeScope}
+                context={activeListId
+                  ? { ...activeScope, name: lists.find(l => l.id === activeListId)?.name ?? activeScope.name }
+                  : activeScope}
                 onQuickCreate={(prefill?: any) => {
                   setPrefilledTaskData(prefill || null);
                   setIsTaskModalOpen(true);
