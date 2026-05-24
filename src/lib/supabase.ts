@@ -18,7 +18,8 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     },
 });
 
-// Cliente admin (para operações privilegiadas como criar usuários)
+// AVISO: service role key tem acesso irrestrito ao banco.
+// Mover para Edge Function ou backend dedicado antes de ir a produção pública.
 export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey, {
     auth: {
         autoRefreshToken: false,
