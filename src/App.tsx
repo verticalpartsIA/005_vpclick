@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon } from "lucide-react";
+import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
-  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity
+  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -20,6 +20,8 @@ import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChar
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine } from './lib/AutomationEngine';
 import { TaskDependencies } from './components/TaskDependencies';
+import { TaskTagsInput } from './components/TaskTagsInput';
+import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
 import { Session, createClient } from '@supabase/supabase-js';
 import { Toaster, toast } from 'sonner';
@@ -44,6 +46,12 @@ import {
   CommandList,
   CommandSeparator,
 } from "@/components/ui/command";
+
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 
 // --- SSO CONFIGURATION ---
 const CENTRAL_URL = "https://ubdkoqxfwcraftesgmbw.supabase.co";
@@ -584,6 +592,8 @@ export default function App() {
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [fieldValues, setFieldValues] = useState<CustomFieldValue[]>([]);
   const [docs, setDocs] = useState<Doc[]>([]);
+  const [workspaceTags, setWorkspaceTags] = useState<WorkspaceTag[]>([]);
+  const [filterTags, setFilterTags] = useState<string[]>([]);
 
   useEffect(() => {
     // localStorage.removeItem("vp_docs"); // Clean up old mock data if needed
@@ -755,6 +765,14 @@ export default function App() {
           lists: []
         })));
       }
+
+      // Carregar Workspace Tags
+      const { data: tagsData } = await supabase
+        .from('workspace_tags')
+        .select('*')
+        .eq('workspace_id', workspace.id)
+        .order('name');
+      if (tagsData) setWorkspaceTags(tagsData as WorkspaceTag[]);
 
       // Carregar User Access
       const { data: accessData } = await supabase.from('user_access').select('*');
@@ -1805,8 +1823,12 @@ export default function App() {
       result = result.filter(t => t.mainAssigneeId === currentUser.id || t.secondaryAssigneeIds?.includes(currentUser.id));
     }
 
+    if (filterTags.length > 0) {
+      result = result.filter(t => filterTags.some(tag => (t.tags ?? []).includes(tag)));
+    }
+
     return result;
-  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope]);
+  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags]);
 
   const filteredSpaces = useMemo(() => {
     if (currentUser.role === UserRole.ADMIN) return spaces;
@@ -1909,6 +1931,53 @@ export default function App() {
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                 </div>
               </div>
+
+              {/* Tag filter */}
+              {workspaceTags.length > 0 && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${filterTags.length > 0 ? 'bg-orange-50 border-orange-300 text-orange-600' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'}`}>
+                      <Tag className="w-3.5 h-3.5" />
+                      Tags
+                      {filterTags.length > 0 && (
+                        <span className="ml-0.5 bg-orange-500 text-white rounded-full w-4 h-4 text-[10px] flex items-center justify-center font-bold">
+                          {filterTags.length}
+                        </span>
+                      )}
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-48 p-2" align="start">
+                    <p className="text-xs font-medium text-muted-foreground mb-2">Filtrar por tag</p>
+                    {workspaceTags.map((tag) => (
+                      <button
+                        key={tag.id}
+                        className="flex items-center gap-2 w-full px-2 py-1 rounded text-xs hover:bg-muted/50"
+                        onClick={() =>
+                          setFilterTags((prev) =>
+                            prev.includes(tag.name)
+                              ? prev.filter((t) => t !== tag.name)
+                              : [...prev, tag.name]
+                          )
+                        }
+                      >
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: tag.color }} />
+                        {tag.name}
+                        {filterTags.includes(tag.name) && (
+                          <span className="ml-auto text-orange-500 font-bold">✓</span>
+                        )}
+                      </button>
+                    ))}
+                    {filterTags.length > 0 && (
+                      <button
+                        className="w-full text-xs text-muted-foreground mt-2 pt-2 border-t hover:text-foreground"
+                        onClick={() => setFilterTags([])}
+                      >
+                        Limpar filtro
+                      </button>
+                    )}
+                  </PopoverContent>
+                </Popover>
+              )}
             </div>
 
             <div className="flex items-center gap-4 relative">
@@ -2107,6 +2176,7 @@ export default function App() {
                 statusGroups={statusGroups}
                 lists={lists}
                 activeListId={activeListId}
+                workspaceTags={workspaceTags}
               />
             )}
             {activeView === 'Dashboard' && (
@@ -2131,14 +2201,15 @@ export default function App() {
               />
             )}
             {activeView === 'Table' && (
-              <TableView 
-                tasks={filteredTasks} 
-                customFields={customFields} 
-                fieldValues={fieldValues} 
-                users={adminUsers} 
+              <TableView
+                tasks={filteredTasks}
+                customFields={customFields}
+                fieldValues={fieldValues}
+                users={adminUsers}
                 onTaskClick={setSelectedTaskId}
                 onUpdateTask={handleUpdateTask}
                 onUpdateFieldValue={handleUpdateFieldValue}
+                workspaceTags={workspaceTags}
               />
             )}
             {activeView === 'Doc' && activeDocId && (
@@ -3969,7 +4040,7 @@ function ListView({
   );
 }
 
-function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId }: any) {
+function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, workspaceTags }: any) {
   // Refs para não causar re-render durante drag (re-renders destroem o HTML5 DnD)
   const draggingTaskIdRef = useRef<string | null>(null);
   const currentDragOverColRef = useRef<HTMLElement | null>(null);
@@ -4212,6 +4283,17 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreat
                         )}
                         {task.title}
                       </p>
+
+                      {/* Tags */}
+                      {(task.tags ?? []).length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-1.5">
+                          {(task.tags ?? []).map((tagName: string) => {
+                            const tag = (workspaceTags ?? []).find((t: WorkspaceTag) => t.name === tagName);
+                            if (!tag) return null;
+                            return <TagBadge key={tagName} name={tag.name} color={tag.color} size="xs" />;
+                          })}
+                        </div>
+                      )}
 
                       {/* Context */}
                       {listName && (
@@ -5500,6 +5582,20 @@ function TaskDetailModal(props: any) {
             <div className="p-8 flex-1">
               {detailActiveTab === 'info' && (
                 <div className="space-y-12">
+                  <section>
+                    <TaskTagsInput
+                      taskId={task.id}
+                      workspaceId={workspace.id}
+                      currentTags={task.tags ?? []}
+                      currentUserId={currentUser.id}
+                      readOnly={currentUser.role === UserRole.COLABORADOR}
+                      onTagsChange={(tags) => {
+                        setTasks((prev) =>
+                          prev.map((t) => (t.id === task.id ? { ...t, tags } : t))
+                        );
+                      }}
+                    />
+                  </section>
                   <section>
                     <h3 className="text-sm font-bold text-gray-900 mb-6">Campos personalizados</h3>
                     <div className="space-y-6">

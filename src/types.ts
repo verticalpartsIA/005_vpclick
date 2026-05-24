@@ -145,6 +145,7 @@ export interface Task {
   parentId?: string;
   createdAt?: string;
   dependencies?: TaskDependency[];
+  tags?: string[];
 }
 
 // ── Task Dependencies ─────────────────────────────────────
@@ -203,4 +204,13 @@ export interface Doc {
   folderId: string;
   createdBy: string;
   attachments: Attachment[];
+}
+
+export interface WorkspaceTag {
+  id: string;
+  workspace_id: string;
+  name: string;
+  color: string;
+  created_by: string | null;
+  created_at: string;
 }

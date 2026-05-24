@@ -3,7 +3,8 @@ import {
   Filter, ArrowUpDown, CheckCircle2,
   MoreHorizontal, Plus, GripVertical, Settings2, AlertTriangle
 } from "lucide-react";
-import { Task, CustomField, CustomFieldValue, Profile } from '../../types';
+import { Task, CustomField, CustomFieldValue, Profile, WorkspaceTag } from '../../types';
+import { TagBadge } from '@/components/TagBadge';
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +24,7 @@ interface TableViewProps {
   onTaskClick: (taskId: string) => void;
   onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   onUpdateFieldValue: (taskId: string, fieldId: string, value: any) => void;
+  workspaceTags?: WorkspaceTag[];
 }
 
 const DEFAULT_WIDTHS: Record<string, number> = {
@@ -40,7 +42,8 @@ export const TableView: React.FC<TableViewProps> = ({
   users,
   onTaskClick,
   onUpdateTask,
-  onUpdateFieldValue
+  onUpdateFieldValue,
+  workspaceTags = [],
 }) => {
   const [visibleColumns, setVisibleColumns] = useState<string[]>(['title', 'status', 'priority', 'assignee', 'dueDate']);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_WIDTHS);
@@ -193,7 +196,18 @@ export const TableView: React.FC<TableViewProps> = ({
                           <AlertTriangle className="w-3 h-3 text-amber-400 mr-1" />
                         </span>
                       )}
-                      <span className="truncate">{task.title}</span>
+                      <div className="min-w-0">
+                        <span className="truncate block">{task.title}</span>
+                        {(task.tags ?? []).length > 0 && (
+                          <div className="flex flex-wrap gap-1 mt-0.5">
+                            {(task.tags ?? []).map((tagName) => {
+                              const tag = workspaceTags.find((t) => t.name === tagName);
+                              if (!tag) return null;
+                              return <TagBadge key={tagName} name={tag.name} color={tag.color} size="xs" />;
+                            })}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </td>
                 )}

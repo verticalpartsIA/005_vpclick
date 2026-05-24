@@ -31,7 +31,7 @@ export const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey, {
 export default supabase;
 
 // ── Task Dependencies ─────────────────────────────────────
-import type { TaskDependency, DependencyType } from '../types';
+import type { TaskDependency, DependencyType, WorkspaceTag } from '../types';
 
 export async function fetchTaskDependencies(taskId: string): Promise<TaskDependency[]> {
   const { data, error } = await supabase
@@ -85,4 +85,50 @@ export async function isTaskBlocked(taskId: string): Promise<boolean> {
     const doneKeywords = ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado'];
     return !doneKeywords.some(kw => status.toLowerCase().includes(kw));
   });
+}
+
+// ── Workspace Tags ─────────────────────────────────────────
+export async function fetchWorkspaceTags(workspaceId: string): Promise<WorkspaceTag[]> {
+  const { data, error } = await supabase
+    .from('workspace_tags')
+    .select('*')
+    .eq('workspace_id', workspaceId)
+    .order('name');
+
+  if (error) throw error;
+  return (data ?? []) as WorkspaceTag[];
+}
+
+export async function createWorkspaceTag(
+  workspaceId: string,
+  name: string,
+  color: string,
+  createdBy: string
+): Promise<WorkspaceTag> {
+  const { data, error } = await supabase
+    .from('workspace_tags')
+    .insert({ workspace_id: workspaceId, name, color, created_by: createdBy })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data as WorkspaceTag;
+}
+
+export async function deleteWorkspaceTag(tagId: string): Promise<void> {
+  const { error } = await supabase
+    .from('workspace_tags')
+    .delete()
+    .eq('id', tagId);
+
+  if (error) throw error;
+}
+
+export async function updateTaskTags(taskId: string, tagNames: string[]): Promise<void> {
+  const { error } = await supabase
+    .from('tasks')
+    .update({ tags: tagNames })
+    .eq('id', taskId);
+
+  if (error) throw error;
 }
