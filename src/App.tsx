@@ -3501,6 +3501,38 @@ function ListView({
     return finalOrder.map(id => allAvailableColumns.find(c => c.id === id)!);
   }, [allAvailableColumns, columnOrder]);
 
+  // --- Column Resize Logic ---
+  const [colWidths, setColWidths] = useState<Record<string, number>>({});
+  const resizeActiveRef = useRef<{ colId: string; startX: number; startWidth: number } | null>(null);
+
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent, colId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const th = (e.target as HTMLElement).closest('th') as HTMLElement | null;
+    const startWidth = th ? th.getBoundingClientRect().width : (colWidths[colId] || 150);
+    resizeActiveRef.current = { colId, startX: e.clientX, startWidth };
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!resizeActiveRef.current) return;
+      const delta = ev.clientX - resizeActiveRef.current.startX;
+      const newWidth = Math.max(60, resizeActiveRef.current.startWidth + delta);
+      setColWidths(prev => ({ ...prev, [resizeActiveRef.current!.colId]: newWidth }));
+    };
+    const onMouseUp = () => {
+      resizeActiveRef.current = null;
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [colWidths]);
+
+  const handleResizeDblClick = useCallback((e: React.MouseEvent, colId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setColWidths(prev => { const next = { ...prev }; delete next[colId]; return next; });
+  }, []);
+
   // --- Drag and Drop Logic ---
   const [draggedColumnId, setDraggedColumnId] = useState<string | null>(null);
 
@@ -3595,7 +3627,7 @@ function ListView({
                 </button>
 
                 {isExpanded && (
-                  <table className="w-full text-left border-collapse min-w-[900px]">
+                  <table className="w-full text-left border-collapse min-w-[900px]" style={{ tableLayout: 'fixed' }}>
                     <thead className="bg-gray-50 border-b border-gray-200">
                       <tr>
                         <th className="w-10 px-3 py-3 border-r border-gray-200">
@@ -3612,7 +3644,18 @@ function ListView({
                             }}
                           />
                         </th>
-                        <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase min-w-[300px] border-r border-gray-200">Tarefa</th>
+                        <th
+                          className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase border-r border-gray-200 relative overflow-hidden"
+                          style={{ width: colWidths['tarefa'] || 300, minWidth: 120 }}
+                        >
+                          Tarefa
+                          <div
+                            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-blue-400 transition-colors z-10 opacity-0 hover:opacity-60"
+                            style={{ cursor: 'col-resize' }}
+                            onMouseDown={(e) => handleResizeMouseDown(e, 'tarefa')}
+                            onDoubleClick={(e) => handleResizeDblClick(e, 'tarefa')}
+                          />
+                        </th>
 
                         {orderedColumns.map((col) => (
                           <th
@@ -3623,10 +3666,11 @@ function ListView({
                             onDragEnter={(e) => handleDragEnter(e, col.id)}
                             onDragEnd={handleDragEnd}
                             onDrop={handleDrop}
-                            className={`px-4 py-3 text-xs font-semibold text-gray-500 uppercase whitespace-nowrap cursor-move hover:bg-gray-100 transition-colors border-r border-gray-200 ${draggedColumnId === col.id ? 'bg-blue-50 opacity-40' : ''}`}
+                            className={`px-4 py-3 text-xs font-semibold text-gray-500 uppercase cursor-move hover:bg-gray-100 transition-colors border-r border-gray-200 relative overflow-hidden ${draggedColumnId === col.id ? 'bg-blue-50 opacity-40' : ''}`}
+                            style={{ width: colWidths[col.id] || 150, minWidth: 60 }}
                           >
-                            <div className="flex items-center gap-2">
-                              <span>{col.name}</span>
+                            <div className="flex items-center gap-2 whitespace-nowrap">
+                              <span className="truncate">{col.name}</span>
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -3635,7 +3679,6 @@ function ListView({
                                     if (!derivedActiveListId) return;
                                     onToggleStandardColumn?.(derivedActiveListId, col.id as any);
                                   } else {
-                                    // Custom Field Logic
                                     let targetListId = derivedActiveListId;
                                     if (!targetListId) {
                                       const chosen = window.prompt('Digite o ID da lista para ocultar este campo:', listIdsInView[0] ?? '');
@@ -3646,12 +3689,19 @@ function ListView({
                                     onHideTaskFieldForList(targetListId, col.id);
                                   }
                                 }}
-                                className="h-6 w-6 inline-flex items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition-colors"
+                                className="h-6 w-6 shrink-0 inline-flex items-center justify-center rounded-md border border-gray-200 bg-white text-gray-500 hover:bg-gray-50 hover:text-gray-900 transition-colors"
                                 title={`Ocultar ${col.name}`}
                               >
                                 {col.type === 'standard' ? <Icons.EyeOff /> : <Icons.Trash />}
                               </button>
                             </div>
+                            {/* Resize handle */}
+                            <div
+                              className="absolute right-0 top-0 h-full w-1.5 hover:bg-blue-400 hover:opacity-60 transition-colors z-10"
+                              style={{ cursor: 'col-resize' }}
+                              onMouseDown={(e) => handleResizeMouseDown(e, col.id)}
+                              onDoubleClick={(e) => handleResizeDblClick(e, col.id)}
+                            />
                           </th>
                         ))}
 
@@ -3694,7 +3744,7 @@ function ListView({
                                   onChange={() => toggleSelection(t.id)}
                                 />
                               </td>
-                              <td className="px-4 py-3 border-r border-gray-200">
+                              <td className="px-4 py-3 border-r border-gray-200 overflow-hidden" style={{ maxWidth: colWidths['tarefa'] || 300 }}>
                                 <div className="flex items-center gap-2" style={{ paddingLeft: `${depth * 24}px` }}>
                                   <div
                                     className={`w-1 h-10 rounded-full shrink-0 ${t.priority === TaskPriority.URGENTE ? 'bg-red-500' : 'bg-transparent'}`}
