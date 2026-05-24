@@ -144,6 +144,20 @@ export interface Task {
   projectId: string;
   parentId?: string;
   createdAt?: string;
+  dependencies?: TaskDependency[];
+}
+
+// ── Task Dependencies ─────────────────────────────────────
+export type DependencyType = 'blocks' | 'blocked_by' | 'relates_to';
+
+export interface TaskDependency {
+  id: string;
+  task_id: string;
+  depends_on_id: string;
+  type: DependencyType;
+  created_by: string | null;
+  created_at: string;
+  depends_on_task?: Pick<Task, 'id' | 'title' | 'status' | 'priority'>;
 }
 
 export interface List {

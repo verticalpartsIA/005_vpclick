@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip } from "lucide-react";
+import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
@@ -17,8 +17,9 @@ import { TableView } from './components/views/TableView';
 import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
-import { supabase, supabaseAdmin } from './lib/supabase';
+import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine } from './lib/AutomationEngine';
+import { TaskDependencies } from './components/TaskDependencies';
 import { AutomationModal } from './components/AutomationModal';
 import { Session, createClient } from '@supabase/supabase-js';
 import { Toaster, toast } from 'sonner';
@@ -1025,11 +1026,24 @@ export default function App() {
     }
   }, []);
 
-  const handleUpdateTask = useCallback((taskId: string, updates: Partial<Task>) => {
+  const handleUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === taskId);
-    if (task) {
-      updateTask({ ...task, ...updates });
+    if (!task) return;
+
+    if (updates.status) {
+      const newStatus = updates.status.toLowerCase();
+      const isDone = ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado']
+        .some(kw => newStatus.includes(kw));
+      if (isDone) {
+        const bloqueada = await isTaskBlocked(taskId);
+        if (bloqueada) {
+          toast.warning('Esta tarefa está bloqueada por outra que ainda não foi concluída.');
+          return;
+        }
+      }
     }
+
+    updateTask({ ...task, ...updates });
   }, [tasks, updateTask]);
 
   // --- Bulk Actions (T701) ---
@@ -4190,7 +4204,12 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreat
                       )}
 
                       {/* Title */}
-                      <p className="text-sm font-semibold text-gray-800 leading-snug line-clamp-2 pr-8 mb-1">
+                      <p className="text-sm font-semibold text-gray-800 leading-snug line-clamp-2 pr-8 mb-1 flex items-start gap-1">
+                        {task.dependencies?.some((d: any) => d.type === 'blocked_by') && (
+                          <span title="Tarefa bloqueada" className="shrink-0 mt-0.5">
+                            <AlertTriangleIcon className="w-3 h-3 text-amber-400" />
+                          </span>
+                        )}
                         {task.title}
                       </p>
 
@@ -5585,16 +5604,12 @@ function TaskDetailModal(props: any) {
                 </div>
               )}
               {detailActiveTab === 'dependencies' && (
-                <div className="space-y-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-bold text-gray-900">Dependências</h3>
-                  </div>
-                  <div className="space-y-4">
-                    {(task.dependencies || []).length === 0 && (
-                      <p className="text-center py-8 text-sm text-gray-400 font-medium italic">Nenhuma dependência definida.</p>
-                    )}
-                  </div>
-                </div>
+                <TaskDependencies
+                  task={task}
+                  allTasks={tasks}
+                  currentUserId={currentUser.id}
+                  readOnly={currentUser.role === UserRole.COLABORADOR}
+                />
               )}
               {detailActiveTab === 'watchers' && (
                 <div className="space-y-6">

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useCallback } from 'react';
 import {
   Filter, ArrowUpDown, CheckCircle2,
-  MoreHorizontal, Plus, GripVertical, Settings2
+  MoreHorizontal, Plus, GripVertical, Settings2, AlertTriangle
 } from "lucide-react";
 import { Task, CustomField, CustomFieldValue, Profile } from '../../types';
 import { Badge } from "@/components/ui/badge";
@@ -188,6 +188,11 @@ export const TableView: React.FC<TableViewProps> = ({
                       >
                         <div className="w-2 h-2 rounded-full bg-primary opacity-0 group-hover:opacity-100 transition-opacity" />
                       </div>
+                      {task.dependencies?.some(d => d.type === 'blocked_by') && (
+                        <span title="Tarefa bloqueada" className="inline-flex items-center shrink-0">
+                          <AlertTriangle className="w-3 h-3 text-amber-400 mr-1" />
+                        </span>
+                      )}
                       <span className="truncate">{task.title}</span>
                     </div>
                   </td>
