@@ -1,6 +1,5 @@
-# Relatório de Bugs — VP Click  
+# Relatório de Bugs e Melhorias — VP Click  
 **Data:** 26/05/2026  
-**Commit final:** `6b0f2c5`  
 **Branch:** `main` → `https://github.com/verticalpartsIA/vp-click.git`
 
 ---
@@ -27,6 +26,8 @@ Em JavaScript, funções fora de closures não têm acesso ao estado de outro co
 - Substituído `workspace.id` por `workspaceId` na linha do `TaskTagsInput`
 - Substituído o `setTasks(...)` pelo callback `onTagsChange?.(task.id, tags)` + `onUpdate({...task, tags})`
 
+**Commit:** `6b0f2c5`
+
 ---
 
 ### Bug 2 — Nova Lista: modal abre mas "nada funciona"
@@ -48,45 +49,112 @@ Se o insert no Supabase falhasse por qualquer motivo (RLS, timeout, coluna falta
 - `onConfirm` alterado para `Promise<void>` (interface e implementação)
 - Adicionado estado `isSubmitting` para feedback visual no botão ("Criando...")
 - `handleSubmit` agora é `async` e usa `await onConfirm()`
+- Modal redesenhado com **sticky footer sempre visível**: barra de preview mostrando "Nome → Modelo ✓ Pronto para criar" + botão dinâmico guiando o usuário passo a passo
 
 `src/App.tsx`:
 - `handleConfirmCreateList` agora retorna `Promise<void>` explicitamente
 - Caminho de erro adicionado: `toast.error('Erro ao criar lista: ' + error.message)`
-- Chamada do `onConfirm` na JSX agora usa `async/await`
+
+**Commit:** `338bb9a`
 
 ---
 
-## Outros bugs encontrados e corrigidos (nas sessões anteriores)
+## Outros bugs encontrados e corrigidos (sessões anteriores)
 
-### Bug 3 — Links em documentos não eram clicáveis (sessão anterior)
+### Bug 3 — Links em documentos não eram clicáveis
 URLs digitadas ou coladas nos documentos ficavam como texto puro. `contentEditable` também bloqueia o clique padrão em `<a>`. Correção: função `linkifyHtml()` + `handlePaste` + `handleContentClick`.
 
-### Bug 4 — Painel Admin: scroll infinito para ver alçadas (sessão anterior)
+### Bug 4 — Painel Admin: scroll infinito para ver alçadas
 A lista de usuários exibia todos os controles de acesso expandidos para todos os usuários ao mesmo tempo. Correção: redesign com acordeão (clique no usuário expande), pesquisa em tempo real, avatares compactos à esquerda.
 
 ---
 
-## Arquivos modificados nesta sessão
+## Melhorias implementadas
 
-| Arquivo | Tipo de mudança |
-|---|---|
-| `src/App.tsx` | Bugfix: `workspaceId` + `onTagsChange` em `TaskDetailModal`; `handleConfirmCreateList` com error handling |
-| `src/components/CreateListModal.tsx` | Bugfix: auto-select status group; isSubmitting; onConfirm async |
+### Melhoria 1 — Drag-and-drop na sidebar (listas e pastas)
+
+**Solicitação do usuário:** "cada pasta é um espaço o usuário precisa segurar e arrastar lista ou pastas para outros espaços"
+
+**Implementação (`src/App.tsx`):**
+
+| Ação | Comportamento |
+|------|--------------|
+| Arrastar uma **lista** sobre uma **pasta** | Move a lista para aquela pasta (qualquer espaço) |
+| Arrastar uma **pasta** sobre um **espaço** | Move a pasta para aquele espaço |
+| Feedback visual durante drag | Borda azul tracejada no destino válido; item sendo arrastado fica com 40% de opacidade |
+| Após o drop | Supabase atualizado imediatamente; estado React sincronizado; toast de confirmação |
+| Auto-expand | Ao mover uma lista para uma pasta recolhida, a pasta se expande automaticamente |
+
+**Novos handlers em `App.tsx`:**
+- `handleMoveList(listId, targetFolderId)` — atualiza `lists.folder_id` no Supabase
+- `handleMoveFolder(folderId, targetSpaceId)` — atualiza `folders.space_id` no Supabase
+
+**Commit:** `e2f041d`
 
 ---
 
-## Status geral pós-correções
+### Melhoria 2 — Migração de tarefas do Gelson para IntraSites_Projetos
+
+**Solicitação do usuário:** "mova todas as minhas tarefas para pasta intra site, todos por favor! Deixe tudo em um único lugar!"
+
+**Ação realizada via Supabase SQL:**  
+16 tarefas pessoais do usuário Gelson (UUID `73388463-f6b7-4cdf-ab02-30da6403cb4b`) foram movidas de espaços dispersos para um único ponto:
+
+> **T.I → IntraSites_Projetos → Geral** (list_id: `2698cfc2-3741-42a8-b0bf-81ca7403ac10`)
+
+**Tarefas migradas:**
+- Configurar GitHub Actions
+- Finalizar dashboards de analytics
+- Infraestrutura de Agentes de IA
+- Novo site vpsuprimentos (×2)
+- Portal VPSistema - Manutencao e Seguranca
+- Validar fluxo de propostas e vendedores
+- VerticalPartsLiveTV - Lancamento e Analytics
+- VP Requisicoes - Estabilizacao de Producao (Hostinger)
+- Nova versão vpclick / Teste vpclick / Teste Gelson
+- vprequisição / vprequisições (×2)
+- VerticalPartsLiveTV - Lan
+
+> Tarefas de integração (VP Requisicoes / SUPRIMENTOS) e tarefas E2E de auditoria foram mantidas em seus espaços funcionais para não quebrar workflows automáticos.
+
+---
+
+## Histórico de commits desta sessão
+
+| Commit | Descrição |
+|--------|-----------|
+| `6b0f2c5` | Bugfix: `workspaceId` + `onTagsChange` em `TaskDetailModal`; error handling em `handleConfirmCreateList` |
+| `338bb9a` | Bugfix + redesign: `CreateListModal` com sticky footer, auto-select grupo, `isSubmitting` |
+| `28ba327` | Docs: criação do relatório `.Claude/2026_05_26_relatorio.md` + push para GitHub |
+| `e2f041d` | Feat: drag-and-drop sidebar (listas/pastas entre espaços) + migração de tarefas |
+
+---
+
+## Arquivos modificados na sessão completa
+
+| Arquivo | Tipo de mudança |
+|---------|----------------|
+| `src/App.tsx` | Bugfix Kanban + bugfix Nova Lista + drag-and-drop sidebar |
+| `src/components/CreateListModal.tsx` | Redesign completo com sticky footer e UX guiada |
+| `src/pages/AdminPanel.tsx` | Redesign: acordeão + pesquisa + avatares |
+| `.Claude/2026_05_26_relatorio.md` | Este relatório |
+
+---
+
+## Status geral pós-sessão
 
 | Funcionalidade | Status |
-|---|---|
+|----------------|--------|
 | Kanban — clicar em card | ✅ Abre TaskDetailModal corretamente |
-| Nova Lista — criação | ✅ Grupo pré-selecionado, botão habilitado, feedback de erro |
+| Nova Lista — criação | ✅ Grupo pré-selecionado, sticky footer, feedback de erro |
 | Links em documentos | ✅ Clicáveis, auto-detectados no load e no paste |
 | Painel Admin — alçadas | ✅ Acordeão + pesquisa |
+| Drag-and-drop sidebar | ✅ Listas e pastas arrastáveis entre espaços |
+| Tarefas Gelson consolidadas | ✅ Todas em IntraSites_Projetos → Geral |
 | Spaces nativos (is_system) | ✅ Não deletáveis |
 | Integração VP Click Hub | ✅ Edge Function + triggers nos 3 projetos externos |
 | Automações VP REQUISICOES | ✅ 4 automações ativas |
 
 ---
 
-*Relatório gerado após conclusão e validação de build (`npm run build` sem erros).*
+*Relatório atualizado após conclusão e validação de build (`npm run build` sem erros).*
