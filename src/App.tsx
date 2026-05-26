@@ -1213,6 +1213,26 @@ export default function App() {
     });
   };
 
+  const handleMoveList = async (listId: string, targetFolderId: string) => {
+    const list = lists.find(l => l.id === listId);
+    if (!list || list.folderId === targetFolderId) return;
+    const { error } = await supabase.from('lists').update({ folder_id: targetFolderId }).eq('id', listId);
+    if (!error) {
+      setLists(prev => prev.map(l => l.id === listId ? { ...l, folderId: targetFolderId } : l));
+      toast.success('Lista movida.');
+    } else { toast.error('Erro ao mover lista: ' + error.message); }
+  };
+
+  const handleMoveFolder = async (folderId: string, targetSpaceId: string) => {
+    const folder = folders.find(f => f.id === folderId);
+    if (!folder || folder.spaceId === targetSpaceId) return;
+    const { error } = await supabase.from('folders').update({ space_id: targetSpaceId }).eq('id', folderId);
+    if (!error) {
+      setFolders(prev => prev.map(f => f.id === folderId ? { ...f, spaceId: targetSpaceId } : f));
+      toast.success('Pasta movida.');
+    } else { toast.error('Erro ao mover pasta: ' + error.message); }
+  };
+
   const handleCreateDoc = (folderId: string) => {
     setRenameModal({
       title: 'Novo Documento', defaultValue: '', placeholder: 'Título do documento…',
@@ -1948,6 +1968,8 @@ export default function App() {
           onSetActiveDocId={setActiveDocId}
           onCreateDoc={handleCreateDoc}
           onDeleteDoc={handleDeleteDoc}
+          onMoveList={handleMoveList}
+          onMoveFolder={handleMoveFolder}
         />
 
         {/* Main Content */}
@@ -2895,7 +2917,8 @@ function Sidebar({
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder,
   onDeleteList, onRenameList,
-  docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc
+  docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc,
+  onMoveList, onMoveFolder
 }: any) {
   const compactLogo = "https://verticalparts.com.br/wp-content/uploads/2026/01/grp__NM__bg__NM__logo_compacto-1.png";
   const isNonLightTheme = themePreset !== "claro";
@@ -2908,6 +2931,10 @@ function Sidebar({
   const [secMinhasTarefasOpen, setSecMinhasTarefasOpen] = useState(false);
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
   const [secEspacosOpen, setSecEspacosOpen] = useState(true);
+
+  // Drag-and-drop state
+  const [dragItem, setDragItem] = useState<{ type: 'list' | 'folder'; id: string } | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ type: 'folder' | 'space'; id: string } | null>(null);
 
   useEffect(() => {
     if (activeScope.type === 'space' && activeScope.id) {
@@ -3126,14 +3153,37 @@ function Sidebar({
                 <div className="pb-2">
                   {spaces.map((space: Space) => {
                     const isExpanded = expandedSpaces.includes(space.id);
+                    const isSpaceDropTarget = dropTarget?.type === 'space' && dropTarget.id === space.id && dragItem?.type === 'folder';
                     return (
                       <div key={space.id} className="mb-0.5">
                         <div
-                          className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer group transition-colors relative rounded-lg mx-1 ${activeScope.type === 'space' && activeScope.id === space.id ? 'bg-sidebar-accent' : 'hover:bg-sidebar-accent/50'}`}
+                          className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer group transition-colors relative rounded-lg mx-1 ${
+                            isSpaceDropTarget
+                              ? 'bg-primary/15 border border-primary/40 border-dashed'
+                              : activeScope.type === 'space' && activeScope.id === space.id
+                              ? 'bg-sidebar-accent'
+                              : 'hover:bg-sidebar-accent/50'
+                          }`}
                           onClick={() => {
                             const isActiveSpace = activeScope.type === 'space' && activeScope.id === space.id;
                             toggleSpace(space.id);
                             if (!isActiveSpace) onNavigate('space', space.id, space.name);
+                          }}
+                          onDragOver={(e) => {
+                            if (dragItem?.type === 'folder') {
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = 'move';
+                              setDropTarget({ type: 'space', id: space.id });
+                            }
+                          }}
+                          onDragLeave={() => setDropTarget(null)}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            if (dragItem?.type === 'folder') {
+                              onMoveFolder?.(dragItem.id, space.id);
+                            }
+                            setDragItem(null);
+                            setDropTarget(null);
                           }}
                         >
                           <div className={`text-sidebar-foreground/40 transition-transform duration-200 shrink-0 ${isExpanded ? 'rotate-90' : ''}`}>
@@ -3169,7 +3219,44 @@ function Sidebar({
                               return (
                                 <div key={folder.id}>
                                   <div
-                                    className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${activeScope.type === 'folder' && activeScope.id === folder.id ? 'bg-sidebar-accent text-sidebar-accent-foreground font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                                    draggable
+                                    onDragStart={(e) => {
+                                      e.stopPropagation();
+                                      setDragItem({ type: 'folder', id: folder.id });
+                                      e.dataTransfer.effectAllowed = 'move';
+                                      e.dataTransfer.setData('text/plain', folder.id);
+                                    }}
+                                    onDragEnd={() => { setDragItem(null); setDropTarget(null); }}
+                                    onDragOver={(e) => {
+                                      if (dragItem?.type === 'list') {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        e.dataTransfer.dropEffect = 'move';
+                                        setDropTarget({ type: 'folder', id: folder.id });
+                                      }
+                                    }}
+                                    onDragLeave={(e) => {
+                                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                                        setDropTarget(null);
+                                      }
+                                    }}
+                                    onDrop={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      if (dragItem?.type === 'list') {
+                                        onMoveList?.(dragItem.id, folder.id);
+                                        if (!expandedFolders.includes(folder.id)) toggleFolder(folder.id);
+                                      }
+                                      setDragItem(null);
+                                      setDropTarget(null);
+                                    }}
+                                    className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-grab active:cursor-grabbing rounded transition-colors group relative ${
+                                      dropTarget?.type === 'folder' && dropTarget.id === folder.id && dragItem?.type === 'list'
+                                        ? 'bg-primary/15 border border-primary/40 border-dashed'
+                                        : activeScope.type === 'folder' && activeScope.id === folder.id
+                                        ? 'bg-sidebar-accent text-sidebar-accent-foreground font-semibold'
+                                        : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'
+                                    }`}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       const isActiveFolder = activeScope.type === 'folder' && activeScope.id === folder.id;
@@ -3212,7 +3299,21 @@ function Sidebar({
                                         return (
                                           <div
                                             key={list.id}
-                                            className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${isActive ? 'bg-sidebar-accent text-sidebar-accent-foreground font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                                            draggable
+                                            onDragStart={(e) => {
+                                              e.stopPropagation();
+                                              setDragItem({ type: 'list', id: list.id });
+                                              e.dataTransfer.effectAllowed = 'move';
+                                              e.dataTransfer.setData('text/plain', list.id);
+                                            }}
+                                            onDragEnd={() => { setDragItem(null); setDropTarget(null); }}
+                                            className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-grab active:cursor-grabbing rounded transition-colors group relative ${
+                                              dragItem?.type === 'list' && dragItem.id === list.id
+                                                ? 'opacity-40 scale-95'
+                                                : isActive
+                                                ? 'bg-sidebar-accent text-sidebar-accent-foreground font-semibold'
+                                                : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'
+                                            }`}
                                             onClick={(e) => { e.stopPropagation(); onSetActiveListId?.(list.id); setTimeout(() => onViewChange?.('List'), 0); }}
                                             title={list.name}
                                           >
