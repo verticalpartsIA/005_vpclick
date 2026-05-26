@@ -1,25 +1,37 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { X, Check, Layout, Palette } from 'lucide-react';
 import { StatusGroup } from '../types';
 
 interface CreateListModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onConfirm: (name: string, statusGroupId: string) => void;
+    onConfirm: (name: string, statusGroupId: string) => Promise<void>;
     statusGroups: StatusGroup[];
 }
 
 const CreateListModal: React.FC<CreateListModalProps> = ({ isOpen, onClose, onConfirm, statusGroups }) => {
     const [name, setName] = useState('');
     const [selectedGroupId, setSelectedGroupId] = useState(statusGroups[0]?.id || '');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    // Quando os statusGroups carregarem depois do mount, pré-seleciona o primeiro
+    useEffect(() => {
+        if (!selectedGroupId && statusGroups.length > 0) {
+            setSelectedGroupId(statusGroups[0].id);
+        }
+    }, [statusGroups]);
 
     if (!isOpen) return null;
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (name.trim() && selectedGroupId) {
-            onConfirm(name.trim(), selectedGroupId);
+        if (!name.trim() || !selectedGroupId || isSubmitting) return;
+        setIsSubmitting(true);
+        try {
+            await onConfirm(name.trim(), selectedGroupId);
             setName('');
+        } finally {
+            setIsSubmitting(false);
         }
     };
 
@@ -106,11 +118,11 @@ const CreateListModal: React.FC<CreateListModalProps> = ({ isOpen, onClose, onCo
                         </button>
                         <button
                             type="submit"
-                            disabled={!name.trim() || !selectedGroupId}
+                            disabled={!name.trim() || !selectedGroupId || isSubmitting}
                             className="flex-[2] px-4 py-3 text-sm font-bold text-white bg-primary hover:bg-primary-dark rounded-xl shadow-lg shadow-primary/25 disabled:opacity-50 disabled:shadow-none transition-all flex items-center justify-center gap-2"
                         >
                             <Check className="w-4 h-4" />
-                            Criar Lista
+                            {isSubmitting ? 'Criando...' : 'Criar Lista'}
                         </button>
                     </div>
                 </form>

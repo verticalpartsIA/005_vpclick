@@ -1665,7 +1665,7 @@ export default function App() {
     [],
   );
 
-  const handleConfirmCreateList = async (folderId: string, name: string, statusGroupId: string) => {
+  const handleConfirmCreateList = async (folderId: string, name: string, statusGroupId: string): Promise<void> => {
     const folder = folders.find((f) => f.id === folderId);
 
     const { data, error } = await supabaseAdmin
@@ -1678,24 +1678,27 @@ export default function App() {
       .select()
       .single();
 
-    if (data && !error) {
-      const newList: List = {
-        id: data.id,
-        name: data.name,
-        folderId: data.folder_id,
-        statusGroupId: data.status_group_id
-      };
-
-      setLists((prev) => [...prev, newList]);
-      setActiveListId(newList.id);
-      if (folder) {
-        setActiveScope({ type: 'folder', id: folder.id, name: folder.name });
-        setActiveView('List');
-      }
-      toast.success('Lista criada com sucesso!');
-      setIsCreateListModalOpen(false);
-      setCreateListFolderId(null);
+    if (error || !data) {
+      toast.error('Erro ao criar lista: ' + (error?.message || 'tente novamente'));
+      return;
     }
+
+    const newList: List = {
+      id: data.id,
+      name: data.name,
+      folderId: data.folder_id,
+      statusGroupId: data.status_group_id
+    };
+
+    setLists((prev) => [...prev, newList]);
+    setActiveListId(newList.id);
+    if (folder) {
+      setActiveScope({ type: 'folder', id: folder.id, name: folder.name });
+      setActiveView('List');
+    }
+    toast.success('Lista criada com sucesso!');
+    setIsCreateListModalOpen(false);
+    setCreateListFolderId(null);
   };
 
   const handleCreateTask = async (newTaskPartial: Partial<Task>) => {
@@ -2265,9 +2268,9 @@ export default function App() {
         <CreateListModal
           isOpen={isCreateListModalOpen}
           onClose={() => setIsCreateListModalOpen(false)}
-          onConfirm={(name, statusGroupId) => {
+          onConfirm={async (name, statusGroupId) => {
             if (createListFolderId) {
-              handleConfirmCreateList(createListFolderId, name, statusGroupId);
+              await handleConfirmCreateList(createListFolderId, name, statusGroupId);
             }
           }}
           statusGroups={statusGroups}
@@ -2305,6 +2308,10 @@ export default function App() {
             uploadFile={uploadFile}
             statusGroups={statusGroups}
             lists={lists}
+            workspaceId={workspace.id}
+            onTagsChange={(taskId: string, tags: string[]) =>
+              setTasks(prev => prev.map(t => t.id === taskId ? { ...t, tags } : t))
+            }
           />
         )}
 
@@ -5223,7 +5230,9 @@ function TaskDetailModal(props: any) {
     saveTaskActivity,
     uploadFile,
     statusGroups,
-    lists
+    lists,
+    workspaceId,
+    onTagsChange,
   } = props;
 
   const currentList = lists?.find((l: any) => l.id === task.listId);
@@ -5726,14 +5735,13 @@ function TaskDetailModal(props: any) {
                   <section>
                     <TaskTagsInput
                       taskId={task.id}
-                      workspaceId={workspace.id}
+                      workspaceId={workspaceId}
                       currentTags={task.tags ?? []}
                       currentUserId={currentUser.id}
                       readOnly={currentUser.role === UserRole.COLABORADOR}
                       onTagsChange={(tags) => {
-                        setTasks((prev) =>
-                          prev.map((t) => (t.id === task.id ? { ...t, tags } : t))
-                        );
+                        onTagsChange?.(task.id, tags);
+                        onUpdate({ ...task, tags });
                       }}
                     />
                   </section>
