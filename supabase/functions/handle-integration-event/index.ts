@@ -24,6 +24,16 @@ const LIST_IDS: Record<string, string> = {
   posvenda:  '44400000-0000-4000-8000-000000000004',
 };
 
+// Acompanhantes fixos por origem (responsáveis secundários).
+// Propostas: Jurídico (Bianca) + Gestores Comerciais (Marcus e Guilherme).
+const FOLLOWERS: Record<string, string[]> = {
+  propostas: [
+    '55ce8f2d-cd8c-46f6-9703-fc5508638128', // Bianca (Jurídico)
+    'ed709c0c-f997-4e68-abbb-c25f9886a891', // Marcus Braz
+    'f97faace-1e76-42ef-856d-582abd34a6b7', // Guilherme Garcia
+  ],
+};
+
 // Mapeamento status origem → label do VP Click
 const STATUS_MAP: Record<string, Record<string, string>> = {
   propostas: {
@@ -173,6 +183,18 @@ Deno.serve(async (req: Request) => {
   const status     = mapStatus(source, record.status ?? '');
   const recordIdStr = String(record.id ?? record.numero ?? '');
 
+  // Acompanhantes (responsáveis secundários), sem duplicar o principal
+  const followers = (FOLLOWERS[source] ?? []).filter((id) => id !== assigneeId);
+
+  // Descrição amigável (usada na criação)
+  const descLines = [
+    `Registro de ${source} integrado automaticamente ao VP Click.`,
+    extra.cliente_nome ? `• Cliente: ${extra.cliente_nome}` : '',
+    extra.vendedor_nome ? `• Vendedor: ${extra.vendedor_nome}` : '',
+    record.valor_total ? `• Valor: R$ ${Number(record.valor_total).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : '',
+  ].filter(Boolean);
+  const description = descLines.join('\n');
+
   try {
     // ── Verificar se já existe link ──
     const { data: existingLink } = await supabase
@@ -207,15 +229,13 @@ Deno.serve(async (req: Request) => {
         .from('tasks')
         .insert({
           title,
-          description: '',
+          description,
           status,
-          priority:              'Média',
+          priority:              source === 'propostas' ? 'Alta' : 'Média',
           main_assignee_id:      assigneeId,
-          secondary_assignee_ids: [],
+          secondary_assignee_ids: followers,
           list_id:               listId,
           extension_count:       0,
-          extension_history:     [],
-          checklists:            [],
           tags:                  [],
           created_by:            AUTOMACAO_USER_ID,
         })
@@ -242,7 +262,9 @@ Deno.serve(async (req: Request) => {
     }
 
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = err instanceof Error
+      ? err.message
+      : (err && typeof err === 'object' ? JSON.stringify(err) : String(err));
     console.error('[Hub] Erro:', msg);
     return new Response(JSON.stringify({ error: msg }), { status: 500 });
   }

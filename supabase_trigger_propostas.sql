@@ -35,9 +35,12 @@ BEGIN
   );
 
   -- Chamar Edge Function (fire-and-forget)
+  -- IMPORTANTE: body deve ser JSONB (não TEXT). net.http_post(body jsonb).
+  -- Passar ::TEXT fazia a assinatura não bater e o erro era engolido pelo
+  -- EXCEPTION WHEN OTHERS — nenhuma tarefa era criada. (corrigido 29/05/2026)
   PERFORM net.http_post(
     url     := 'https://sfpnjwllcmentoocylow.supabase.co/functions/v1/handle-integration-event',
-    body    := v_payload::TEXT,
+    body    := v_payload,
     headers := jsonb_build_object(
       'Content-Type',          'application/json',
       'x-integration-secret',  'vp-hub-integration-2026-secret'
