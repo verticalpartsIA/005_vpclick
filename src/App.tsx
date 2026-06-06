@@ -2056,8 +2056,10 @@ export default function App() {
     // A seleção de lista na sidebar seta activeListId explicitamente.
     setActiveListId(null);
 
-    // Automatically switch to List view if navigating to a Space or Folder, unless already on Kanban
-    if (type !== 'global' && activeView === 'Dashboard') {
+    // Navegação de escopo: espaço → Space Overview (Dashboard); pasta → List; global → Dashboard
+    if (type === 'space' && activeView === 'Dashboard') {
+      // Mantém Dashboard → SpaceOverview renderiza o overview do espaço
+    } else if (type === 'folder' && activeView === 'Dashboard') {
       setActiveView('List');
     } else if (type === 'global') {
       setActiveView('Dashboard');
@@ -2106,6 +2108,46 @@ export default function App() {
     }
     return result;
   }, [tasks, activeScope, lists, folders, currentUser, userAccess]);
+
+  // ── Badge counts: tarefas abertas por lista (ClickUp-style) ──────────────
+  const listTaskCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const t of tasks) {
+      if (!t.listId) continue;
+      const s = (t.status || '').toLowerCase();
+      const isDone = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+      if (!isDone) {
+        map.set(t.listId, (map.get(t.listId) || 0) + 1);
+      }
+    }
+    return map;
+  }, [tasks]);
+
+  // ── Progress map: { done, total } por lista (Space Overview) ────────────
+  const listProgressMap = useMemo(() => {
+    const map = new Map<string, { done: number; total: number }>();
+    for (const t of tasks) {
+      if (!t.listId) continue;
+      const s = (t.status || '').toLowerCase();
+      const isDone = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+      const cur = map.get(t.listId) || { done: 0, total: 0 };
+      map.set(t.listId, { done: cur.done + (isDone ? 1 : 0), total: cur.total + 1 });
+    }
+    return map;
+  }, [tasks]);
+
+  // ── Favorites (localStorage-based) ──────────────────────────────────────
+  const [favorites, setFavorites] = useState<{ type: 'list' | 'folder' | 'space'; id: string; name: string }[]>(() => {
+    try { return JSON.parse(localStorage.getItem('vp_favorites') || '[]'); } catch { return []; }
+  });
+  const toggleFavorite = (type: 'list' | 'folder' | 'space', id: string, name: string) => {
+    setFavorites(prev => {
+      const exists = prev.some(f => f.type === type && f.id === id);
+      const next = exists ? prev.filter(f => !(f.type === type && f.id === id)) : [...prev, { type, id, name }];
+      localStorage.setItem('vp_favorites', JSON.stringify(next));
+      return next;
+    });
+  };
 
   // Filter Tasks based on Hierarchy + Search + Filters (for List/Kanban)
   const filteredTasks = useMemo(() => {
@@ -2219,6 +2261,10 @@ export default function App() {
           onDeleteDoc={handleDeleteDoc}
           onMoveList={handleMoveList}
           onMoveFolder={handleMoveFolder}
+          listTaskCounts={listTaskCounts}
+          listProgressMap={listProgressMap}
+          favorites={favorites}
+          onToggleFavorite={toggleFavorite}
         />
 
         {/* Main Content */}
@@ -2373,12 +2419,17 @@ export default function App() {
               </div>
             ) : activeView !== 'Admin' ? (
               <>
+                {activeScope.type === 'space' && (
+                  <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Overview" />
+                )}
                 <ViewTab active={activeView === 'List'} onClick={() => setActiveView('List')} label="Lista" />
                 <ViewTab active={activeView === 'Kanban'} onClick={() => setActiveView('Kanban')} label="Kanban" />
                 <ViewTab active={activeView === 'Calendar'} onClick={() => setActiveView('Calendar')} label="Calendário" />
                 <ViewTab active={activeView === 'Gantt'} onClick={() => setActiveView('Gantt')} label="Gantt" />
                 <ViewTab active={activeView === 'Table'} onClick={() => setActiveView('Table')} label="Tabela" />
-                <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Dashboards" />
+                {activeScope.type !== 'space' && (
+                  <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Dashboards" />
+                )}
                 {activeListId && (
                   <button
                     onClick={() => { setAutomationListId(activeListId); setIsAutomationModalOpen(true); }}
@@ -2494,8 +2545,21 @@ export default function App() {
               />
             )}
             {activeView === 'Dashboard' && (
-              // We pass scopeTasks here so the Dashboard reflects the Space/Folder metrics, ignoring search query for stats
-              <DashboardView tasks={scopeTasks} users={adminUsers} statusGroups={statusGroups} activeListId={activeListId} lists={lists} />
+              activeScope.type === 'space' && activeScope.id ? (
+                <SpaceOverview
+                  space={spaces.find((s: Space) => s.id === activeScope.id)!}
+                  folders={folders.filter((f: Folder) => f.spaceId === activeScope.id)}
+                  lists={lists}
+                  listProgressMap={listProgressMap}
+                  tasks={scopeTasks}
+                  onNavigateFolder={(id: string, name: string) => handleNavigate('folder', id, name)}
+                  onNavigateList={(listId: string) => { setActiveListId(listId); setActiveView('List'); }}
+                  onCreateFolder={() => openFolderModal(activeScope.id!)}
+                />
+              ) : (
+                // We pass scopeTasks here so the Dashboard reflects the Space/Folder metrics, ignoring search query for stats
+                <DashboardView tasks={scopeTasks} users={adminUsers} statusGroups={statusGroups} activeListId={activeListId} lists={lists} />
+              )
             )}
             {activeView === 'Calendar' && (
               <CalendarView 
@@ -2714,46 +2778,86 @@ export default function App() {
         )}
       </div>
         <CommandDialog open={isCommandOpen} onOpenChange={setIsCommandOpen}>
-          <CommandInput placeholder="Digite um comando ou busque uma tarefa..." />
+          <CommandInput placeholder="Pesquisar tarefas, listas, espaços ou executar um comando..." />
           <CommandList>
             <CommandEmpty>Nenhum resultado encontrado.</CommandEmpty>
-            <CommandGroup heading="Navegação Direta">
-              <CommandItem onSelect={() => { setActiveView('List'); setIsCommandOpen(false); }}>
-                <Icons.List className="mr-2 h-4 w-4" />
-                <span>Ir para Lista</span>
+
+            {/* Espaços */}
+            <CommandGroup heading="Espaços">
+              {spaces.map((s: Space) => (
+                <CommandItem key={`space-${s.id}`} value={`espaço ${s.name}`} onSelect={() => { handleNavigate('space', s.id, s.name); setIsCommandOpen(false); }}>
+                  <div className="w-4 h-4 rounded flex items-center justify-center shrink-0 font-bold text-[9px] text-white mr-2" style={{ backgroundColor: s.color || '#6366f1' }}>{s.name.charAt(0)}</div>
+                  <span>{s.name}</span>
+                  <span className="ml-auto text-xs text-muted-foreground">Espaço</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            <CommandSeparator />
+
+            {/* Listas */}
+            <CommandGroup heading="Listas">
+              {lists.slice(0, 20).map((l: List) => {
+                const folder = folders.find((f: Folder) => f.id === l.folderId);
+                return (
+                  <CommandItem key={`list-${l.id}`} value={`lista ${l.name} ${folder?.name || ''}`} onSelect={() => { setActiveListId(l.id); setActiveView('List'); setIsCommandOpen(false); }}>
+                    <Icons.List className="mr-2 h-4 w-4 text-muted-foreground shrink-0" />
+                    <span>{l.name}</span>
+                    {folder && <span className="ml-2 text-xs text-muted-foreground truncate">em {folder.name}</span>}
+                    <span className="ml-auto text-xs text-muted-foreground">Lista</span>
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+            <CommandSeparator />
+
+            {/* Ações rápidas */}
+            <CommandGroup heading="Ações">
+              <CommandItem value="criar nova tarefa" onSelect={() => { setIsTaskModalOpen(true); setIsCommandOpen(false); }}>
+                <Icons.Plus className="mr-2 h-4 w-4" />
+                <span>Criar Nova Tarefa</span>
+                <span className="ml-auto text-xs text-muted-foreground">Ctrl+N</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Kanban'); setIsCommandOpen(false); }}>
+              <CommandItem value="minhas tarefas" onSelect={() => { handleNavigate('global', null, 'Minhas Tarefas'); setActiveView('List'); setIsCommandOpen(false); }}>
+                <Icons.Check className="mr-2 h-4 w-4" />
+                <span>Minhas Tarefas</span>
+              </CommandItem>
+              <CommandItem value="dashboard geral" onSelect={() => { handleNavigate('global', null, 'Dashboard'); setActiveView('Dashboard'); setIsCommandOpen(false); }}>
+                <Icons.Home className="mr-2 h-4 w-4" />
+                <span>Dashboard Geral</span>
+              </CommandItem>
+              <CommandItem value="view kanban quadro" onSelect={() => { setActiveView('Kanban'); setIsCommandOpen(false); }}>
                 <Icons.Columns className="mr-2 h-4 w-4" />
                 <span>Ir para Kanban</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Gantt'); setIsCommandOpen(false); }}>
+              <CommandItem value="view gantt cronograma" onSelect={() => { setActiveView('Gantt'); setIsCommandOpen(false); }}>
                 <Icons.GanttIcon className="mr-2 h-4 w-4" />
                 <span>Ir para Gantt</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Calendar'); setIsCommandOpen(false); }}>
+              <CommandItem value="view calendario" onSelect={() => { setActiveView('Calendar'); setIsCommandOpen(false); }}>
                 <Icons.Calendar className="mr-2 h-4 w-4" />
                 <span>Ir para Calendário</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Admin'); setIsCommandOpen(false); }}>
-                <Icons.Shield className="mr-2 h-4 w-4" />
-                <span>Configurações Admin</span>
-              </CommandItem>
-            </CommandGroup>
-            <CommandSeparator />
-            <CommandGroup heading="Ações Rápidas">
-              <CommandItem onSelect={() => { setIsTaskModalOpen(true); setIsCommandOpen(false); }}>
-                <Icons.Plus className="mr-2 h-4 w-4" />
-                <span>Criar Nova Tarefa</span>
-              </CommandItem>
-            </CommandGroup>
-            <CommandSeparator />
-            <CommandGroup heading="Tarefas Ativas">
-              {tasks.slice(0, 10).map((t: Task) => (
-                <CommandItem key={t.id} onSelect={() => { setSelectedTaskId(t.id); setIsCommandOpen(false); }}>
-                  <div className={`w-2 h-2 rounded-full mr-2 ${t.priority === TaskPriority.URGENTE ? 'bg-red-500' : 'bg-blue-400'}`} />
-                  <span>{t.title}</span>
+              {(currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.GESTOR) && (
+                <CommandItem value="admin administracao configuracoes" onSelect={() => { openAdminPanel(); setIsCommandOpen(false); }}>
+                  <Icons.Shield className="mr-2 h-4 w-4" />
+                  <span>Painel Admin</span>
                 </CommandItem>
-              ))}
+              )}
+            </CommandGroup>
+            <CommandSeparator />
+
+            {/* Tarefas */}
+            <CommandGroup heading="Tarefas">
+              {tasks.slice(0, 15).map((t: Task) => {
+                const list = lists.find((l: List) => l.id === t.listId);
+                return (
+                  <CommandItem key={`task-${t.id}`} value={`tarefa ${t.title} ${list?.name || ''}`} onSelect={() => { setSelectedTaskId(t.id); setIsCommandOpen(false); }}>
+                    <div className={`w-2 h-2 rounded-full mr-2 shrink-0 ${t.priority === TaskPriority.URGENTE ? 'bg-red-500' : t.priority === TaskPriority.ALTA ? 'bg-orange-400' : 'bg-blue-400'}`} />
+                    <span className="truncate flex-1">{t.title}</span>
+                    {list && <span className="ml-2 text-xs text-muted-foreground shrink-0">{list.name}</span>}
+                  </CommandItem>
+                );
+              })}
             </CommandGroup>
           </CommandList>
         </CommandDialog>
@@ -2779,6 +2883,191 @@ function linkifyHtml(html: string): string {
       );
     })
     .join('');
+}
+
+// ── Space Overview — dashboard do espaço (estilo ClickUp) ─────────────────
+function SpaceOverview({ space, folders, lists, listProgressMap, tasks, onNavigateFolder, onNavigateList, onCreateFolder }: {
+  space: Space;
+  folders: Folder[];
+  lists: List[];
+  listProgressMap: Map<string, { done: number; total: number }>;
+  tasks: Task[];
+  onNavigateFolder: (id: string, name: string) => void;
+  onNavigateList: (listId: string) => void;
+  onCreateFolder: () => void;
+}) {
+  if (!space) return null;
+
+  const totalTasks = tasks.length;
+  const doneTasks = tasks.filter(t => {
+    const s = (t.status || '').toLowerCase();
+    return s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+  }).length;
+  const openTasks = totalTasks - doneTasks;
+  const progressPct = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
+
+  // Recent lists (last 5 with tasks)
+  const listsWithTasks = lists
+    .filter(l => folders.some(f => f.id === l.folderId))
+    .filter(l => (listProgressMap.get(l.id)?.total || 0) > 0)
+    .slice(0, 6);
+
+  // All lists in this space (via folders)
+  const folderIds = new Set(folders.map(f => f.id));
+  const spaceLists = lists.filter(l => folderIds.has(l.folderId));
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6 bg-muted">
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-6">
+        {space.icon ? (
+          (() => { const IconComponent = (Icons as any)[space.icon] || Icons.Layout; return <IconComponent className="w-8 h-8" style={{ color: space.color }} />; })()
+        ) : (
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg text-white shadow-sm" style={{ backgroundColor: space.color || '#6366f1' }}>
+            {space.name.charAt(0).toUpperCase()}
+          </div>
+        )}
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">{space.name}</h1>
+          <p className="text-sm text-muted-foreground">{folders.length} pasta{folders.length !== 1 ? 's' : ''} · {spaceLists.length} lista{spaceLists.length !== 1 ? 's' : ''} · {totalTasks} tarefa{totalTasks !== 1 ? 's' : ''}</p>
+        </div>
+      </div>
+
+      {/* Progress bar geral */}
+      {totalTasks > 0 && (
+        <div className="mb-6 bg-card rounded-xl p-4 border border-border shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-foreground">Progresso Geral</span>
+            <span className="text-sm text-muted-foreground">{doneTasks}/{totalTasks} concluídas ({progressPct}%)</span>
+          </div>
+          <div className="h-2.5 bg-muted rounded-full overflow-hidden">
+            <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${progressPct}%` }} />
+          </div>
+          <div className="flex gap-4 mt-3 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" />{doneTasks} concluídas</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />{openTasks} em aberto</span>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Pastas */}
+        <div className="bg-card rounded-xl border border-border shadow-sm p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <Icons.Folder className="w-4 h-4 text-muted-foreground" />
+              Pastas
+            </h2>
+            <button
+              onClick={onCreateFolder}
+              className="text-xs text-primary hover:underline flex items-center gap-1"
+            >
+              <Icons.Plus className="w-3 h-3" /> Adicionar pasta
+            </button>
+          </div>
+          {folders.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-4 text-center">Nenhuma pasta criada</p>
+          ) : (
+            <div className="space-y-1">
+              {folders.map(folder => {
+                const folderLists = lists.filter(l => l.folderId === folder.id);
+                const folderTotalTasks = folderLists.reduce((sum, l) => sum + (listProgressMap.get(l.id)?.total || 0), 0);
+                const folderDoneTasks = folderLists.reduce((sum, l) => sum + (listProgressMap.get(l.id)?.done || 0), 0);
+                const folderPct = folderTotalTasks > 0 ? Math.round((folderDoneTasks / folderTotalTasks) * 100) : 0;
+                return (
+                  <div
+                    key={folder.id}
+                    className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-muted cursor-pointer group transition-colors"
+                    onClick={() => onNavigateFolder(folder.id, folder.name)}
+                  >
+                    <Icons.Folder className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <span className="text-sm font-medium text-foreground flex-1 group-hover:text-primary transition-colors">{folder.name}</span>
+                    <span className="text-xs text-muted-foreground">{folderLists.length} lista{folderLists.length !== 1 ? 's' : ''}</span>
+                    {folderTotalTasks > 0 && (
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <div className="w-12 h-1.5 bg-muted rounded-full overflow-hidden">
+                          <div className="h-full bg-primary rounded-full" style={{ width: `${folderPct}%` }} />
+                        </div>
+                        <span>{folderPct}%</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Listas com progresso */}
+        <div className="bg-card rounded-xl border border-border shadow-sm p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <Icons.List className="w-4 h-4 text-muted-foreground" />
+              Listas
+            </h2>
+          </div>
+          {spaceLists.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-4 text-center">Nenhuma lista criada</p>
+          ) : (
+            <div className="space-y-2">
+              {spaceLists.slice(0, 8).map(list => {
+                const prog = listProgressMap.get(list.id) || { done: 0, total: 0 };
+                const pct = prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
+                const folder = folders.find(f => f.id === list.folderId);
+                return (
+                  <div
+                    key={list.id}
+                    className="cursor-pointer group hover:bg-muted rounded-lg px-3 py-2 transition-colors"
+                    onClick={() => onNavigateList(list.id)}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Icons.List className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      <span className="text-sm font-medium text-foreground flex-1 truncate group-hover:text-primary transition-colors">{list.name}</span>
+                      {folder && <span className="text-[10px] text-muted-foreground shrink-0">{folder.name}</span>}
+                      <span className="text-xs text-muted-foreground shrink-0">{prog.done}/{prog.total}</span>
+                    </div>
+                    {prog.total > 0 ? (
+                      <div className="flex items-center gap-2 ml-5">
+                        <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                          <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-[10px] text-muted-foreground w-7 text-right">{pct}%</span>
+                      </div>
+                    ) : (
+                      <div className="ml-5 h-1.5 bg-muted/50 rounded-full" />
+                    )}
+                  </div>
+                );
+              })}
+              {spaceLists.length > 8 && (
+                <p className="text-xs text-muted-foreground text-center pt-1">+ {spaceLists.length - 8} mais listas</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Estatísticas rápidas */}
+        <div className="bg-card rounded-xl border border-border shadow-sm p-4">
+          <h2 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+            <svg className="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="8" width="3" height="6" rx="0.5"/><rect x="6" y="5" width="3" height="9" rx="0.5"/><rect x="11" y="2" width="3" height="12" rx="0.5"/></svg>
+            Resumo
+          </h2>
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Total', value: totalTasks, color: 'text-foreground' },
+              { label: 'Em aberto', value: openTasks, color: 'text-blue-500' },
+              { label: 'Concluídas', value: doneTasks, color: 'text-green-500' },
+            ].map(stat => (
+              <div key={stat.label} className="text-center bg-muted/50 rounded-lg py-3">
+                <div className={`text-2xl font-bold ${stat.color}`}>{stat.value}</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5">{stat.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function DocView({ doc, onUpdate, currentUser, uploadFile }: {
@@ -3183,7 +3472,9 @@ function Sidebar({
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder,
   onDeleteList, onRenameList,
   docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc,
-  onMoveList, onMoveFolder
+  onMoveList, onMoveFolder,
+  listTaskCounts, listProgressMap,
+  favorites, onToggleFavorite
 }: any) {
   const compactLogo = "https://verticalparts.com.br/wp-content/uploads/2026/01/grp__NM__bg__NM__logo_compacto-1.png";
   const isNonLightTheme = themePreset !== "claro";
@@ -3386,11 +3677,40 @@ function Sidebar({
                 Favoritos
               </button>
               {secFavoritosOpen && (
-                <div className="px-3 py-2 mb-1">
-                  <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
-                    Adicione à sua barra lateral
-                  </p>
+                <div className="pb-1">
+                  {favorites && favorites.length === 0 && (
+                    <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5 px-4 py-2">
+                      <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                      Passe o mouse sobre uma lista ou pasta e clique ★
+                    </p>
+                  )}
+                  {(favorites || []).map((fav: any) => {
+                    const isActiveList = fav.type === 'list' && activeListId === fav.id;
+                    const isActiveFolder = fav.type === 'folder' && activeScope.type === 'folder' && activeScope.id === fav.id;
+                    const isActiveSpace = fav.type === 'space' && activeScope.type === 'space' && activeScope.id === fav.id;
+                    const isActive = isActiveList || isActiveFolder || isActiveSpace;
+                    return (
+                      <div
+                        key={`${fav.type}-${fav.id}`}
+                        className={`text-[12px] flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors ${isActive ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                        onClick={() => {
+                          if (fav.type === 'list') { onSetActiveListId?.(fav.id); setTimeout(() => onViewChange?.('List'), 0); }
+                          else if (fav.type === 'folder') { onNavigate('folder', fav.id, fav.name); }
+                          else if (fav.type === 'space') { onNavigate('space', fav.id, fav.name); }
+                        }}
+                      >
+                        {fav.type === 'list' ? <Icons.List /> : fav.type === 'folder' ? <Icons.Folder /> : <Icons.Layout />}
+                        <span className="truncate flex-1">{fav.name}</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onToggleFavorite?.(fav.type, fav.id, fav.name); }}
+                          className="opacity-0 group-hover:opacity-100 text-yellow-400 transition-opacity"
+                          title="Remover dos favoritos"
+                        >
+                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -3535,6 +3855,14 @@ function Sidebar({
                                     <Icons.Folder />
                                     <span className="truncate flex-1">{folder.name}</span>
                                     <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-sidebar/90 rounded px-0.5 absolute right-1">
+                                      {/* Star: favorites */}
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('folder', folder.id, folder.name); }}
+                                        className={`p-1 transition-colors ${favorites?.some((f: any) => f.type === 'folder' && f.id === folder.id) ? 'text-yellow-400' : 'text-sidebar-foreground/40 hover:text-yellow-400'}`}
+                                        title="Favoritar"
+                                      >
+                                        <svg className="w-3 h-3" fill={favorites?.some((f: any) => f.type === 'folder' && f.id === folder.id) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                                      </button>
                                       <DropdownMenu>
                                         <DropdownMenuTrigger asChild>
                                           <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground" title="Ações">
@@ -3542,6 +3870,10 @@ function Sidebar({
                                           </button>
                                         </DropdownMenuTrigger>
                                         <DropdownMenuContent align="end" sideOffset={6}>
+                                          <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('folder', folder.id, folder.name); }}>
+                                            {favorites?.some((f: any) => f.type === 'folder' && f.id === folder.id) ? '★ Remover dos favoritos' : '☆ Adicionar aos favoritos'}
+                                          </DropdownMenuItem>
+                                          <DropdownMenuSeparator />
                                           <DropdownMenuSub>
                                             <DropdownMenuSubTrigger className="text-xs">Criar novo</DropdownMenuSubTrigger>
                                             <DropdownMenuSubContent>
@@ -3584,12 +3916,30 @@ function Sidebar({
                                           >
                                             <Icons.List />
                                             <span className="truncate flex-1">{list.name}</span>
+                                            {/* Badge: open task count */}
+                                            {listTaskCounts?.get(list.id) ? (
+                                              <span className="text-[10px] font-medium text-sidebar-foreground/50 bg-sidebar-accent/70 rounded px-1 min-w-[16px] text-center group-hover:hidden shrink-0">
+                                                {listTaskCounts.get(list.id)}
+                                              </span>
+                                            ) : null}
                                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-sidebar/90 rounded px-0.5 absolute right-1">
+                                              {/* Star: favorites */}
+                                              <button
+                                                onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('list', list.id, list.name); }}
+                                                className={`p-1 transition-colors ${favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? 'text-yellow-400' : 'text-sidebar-foreground/40 hover:text-yellow-400'}`}
+                                                title="Favoritar"
+                                              >
+                                                <svg className="w-3 h-3" fill={favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                                              </button>
                                               <DropdownMenu>
                                                 <DropdownMenuTrigger asChild>
                                                   <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground"><MoreHorizontal className="h-3 w-3" /></button>
                                                 </DropdownMenuTrigger>
                                                 <DropdownMenuContent align="end" sideOffset={6}>
+                                                  <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('list', list.id, list.name); }}>
+                                                    {favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? '★ Remover dos favoritos' : '☆ Adicionar aos favoritos'}
+                                                  </DropdownMenuItem>
+                                                  <DropdownMenuSeparator />
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
                                                   <DropdownMenuItem className="text-xs text-red-600 focus:text-red-600" onClick={(e) => { e.stopPropagation(); onDeleteList(list.id); }}>Excluir lista</DropdownMenuItem>
                                                 </DropdownMenuContent>
