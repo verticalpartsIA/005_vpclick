@@ -1042,7 +1042,7 @@ export default function App() {
     loadTasks();
   }, [loadTasks]);
 
-  const updateTask = useCallback(async (updatedTask: Task) => {
+  const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
       const { error } = await supabase
         .from('tasks')
@@ -1064,13 +1064,16 @@ export default function App() {
 
       if (!error) {
         setTasks(prev => prev.map(t => t.id === updatedTask.id ? { ...t, ...updatedTask } : t));
+        return true;
       } else {
         console.error('Erro ao atualizar tarefa:', error);
         toast.error('Erro ao salvar tarefa: ' + error.message);
+        return false;
       }
     } catch (err) {
       console.error('Erro inesperado ao atualizar tarefa:', err);
       toast.error('Erro inesperado ao salvar tarefa.');
+      return false;
     }
   }, []);
 
@@ -6166,6 +6169,7 @@ function TaskDetailModal(props: any) {
   const [newDueDate, setNewDueDate] = useState(task.dueDate);
   const [extensionReason, setExtensionReason] = useState('');
   const [isExtending, setIsExtending] = useState(false);
+  const [isSavingExtension, setIsSavingExtension] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [newComment, setNewComment] = useState('');
   const [description, setDescription] = useState(task.description || '');
@@ -6264,32 +6268,59 @@ function TaskDetailModal(props: any) {
   };
 
   const handleSaveDueDate = async () => {
+    if (!newDueDate) {
+      toast.warning('Selecione uma nova data de vencimento.');
+      return;
+    }
     if (newDueDate === task.dueDate) {
-      setIsExtending(false);
+      toast.warning('A nova data é igual à data atual. Escolha uma data diferente.');
+      return;
+    }
+    if (!extensionReason.trim()) {
+      toast.warning('Informe uma justificativa para alterar o prazo.');
       return;
     }
 
-    const log: ExtensionLog = {
-      id: Math.random().toString(36).substr(2, 9),
-      oldDate: task.dueDate,
-      newDate: newDueDate,
-      reason: extensionReason || 'Sem motivo detalhado',
-      updatedBy: currentUser.id,
-      timestamp: new Date().toISOString()
-    };
+    setIsSavingExtension(true);
+    try {
+      const log: ExtensionLog = {
+        id: Math.random().toString(36).substr(2, 9),
+        oldDate: task.dueDate,
+        newDate: newDueDate,
+        reason: extensionReason.trim(),
+        updatedBy: currentUser.id,
+        timestamp: new Date().toISOString()
+      };
 
-    if (saveExtensionLog) {
-      await saveExtensionLog(task.id, log);
+      // Salva o log de extensão — falha silenciosa não bloqueia o update da tarefa
+      if (saveExtensionLog) {
+        try {
+          await saveExtensionLog(task.id, log);
+        } catch (logErr) {
+          console.warn('Falha ao salvar log de extensão (não crítico):', logErr);
+        }
+      }
+
+      // Atualiza a tarefa com nova data e contador
+      const ok = await onUpdate({
+        ...task,
+        dueDate: newDueDate,
+        extensionCount: (task.extensionCount || 0) + 1,
+        extensionHistory: [log, ...(task.extensionHistory || [])]
+      });
+
+      // updateTask retorna false em caso de erro (e já mostra toast de erro)
+      if (ok !== false) {
+        toast.success('Prazo alterado com sucesso!');
+        setIsExtending(false);
+        setExtensionReason('');
+      }
+    } catch (err: any) {
+      console.error('Erro ao alterar prazo:', err);
+      toast.error('Erro ao alterar prazo: ' + (err?.message || 'tente novamente.'));
+    } finally {
+      setIsSavingExtension(false);
     }
-
-    onUpdate({
-      ...task,
-      dueDate: newDueDate,
-      extensionCount: (task.extensionCount || 0) + 1,
-      extensionHistory: [log, ...(task.extensionHistory || [])]
-    });
-    setIsExtending(false);
-    setExtensionReason('');
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -6961,10 +6992,15 @@ function TaskDetailModal(props: any) {
                 </button>
                 <button
                   onClick={handleSaveDueDate}
-                  disabled={newDueDate === task.dueDate || !extensionReason.trim()}
-                  className="flex-[2] py-3 bg-orange-500 text-white font-black rounded-2xl shadow-xl shadow-orange-100 hover:brightness-110 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100"
+                  disabled={isSavingExtension || !newDueDate || newDueDate === task.dueDate || !extensionReason.trim()}
+                  className="flex-[2] py-3 bg-orange-500 text-white font-black rounded-2xl shadow-xl shadow-orange-100 hover:brightness-110 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100 flex items-center justify-center gap-2"
                 >
-                  Salvar Novo Prazo
+                  {isSavingExtension ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      Salvando...
+                    </>
+                  ) : 'Salvar Novo Prazo'}
                 </button>
               </div>
             </div>
