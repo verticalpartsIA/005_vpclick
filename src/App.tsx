@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag } from "lucide-react";
+import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
@@ -53,6 +53,17 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+import { Checkbox } from "@/components/ui/checkbox";
+
 // --- SSO CONFIGURATION ---
 const CENTRAL_URL = "https://ubdkoqxfwcraftesgmbw.supabase.co";
 const CENTRAL_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViZGtvcXhmd2NyYWZ0ZXNnbWJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUwNjUwMjcsImV4cCI6MjA5MDY0MTAyN30.s1A15nFQVne94gbz0511L2IYvHdTcgYeL0H8YU80iI8";
@@ -70,6 +81,21 @@ interface NavigationScope {
   id: string | null;
   name: string;
 }
+
+interface DuplicateTaskOptions {
+  title: string;
+  listId: string;
+  includeDescription: boolean;
+  includeAssignees: boolean;
+  includeDates: boolean;
+  includePriority: boolean;
+  includeSubtasks: boolean;
+  includeChecklists: boolean;
+  includeTags: boolean;
+  includeCustomFields: boolean;
+}
+
+type DuplicateTaskBooleanOption = Exclude<keyof DuplicateTaskOptions, 'title' | 'listId'>;
 
 // --- Theme presets (HSL tokens) ---
 type ThemePresetId = "claro" | "grafite" | "oceano" | "floresta" | "ameixa";
@@ -646,6 +672,8 @@ export default function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [isSharedTaskView, setIsSharedTaskView] = useState(false);
   const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
+  const [taskToDuplicate, setTaskToDuplicate] = useState<Task | null>(null);
+  const [isDuplicatingTask, setIsDuplicatingTask] = useState(false);
 
   // New State for Creation Modals
   const [isSpaceModalOpen, setIsSpaceModalOpen] = useState(false);
@@ -1003,7 +1031,8 @@ export default function App() {
           listId: d.list_id,
           projectId: d.project_id,
           parentId: d.parent_id,
-          createdAt: d.created_at
+          createdAt: d.created_at,
+          tags: d.tags || []
         };
       }));
     }
@@ -1794,6 +1823,226 @@ export default function App() {
     }
   };
 
+  const handleDuplicateTask = async (sourceTask: Task, options: DuplicateTaskOptions) => {
+    if (!sourceTask || isDuplicatingTask) return;
+    const title = options.title.trim();
+    if (!title) {
+      toast.error('Informe um nome para a nova tarefa.');
+      return;
+    }
+    if (!options.listId) {
+      toast.error('Selecione uma lista de destino.');
+      return;
+    }
+
+    setIsDuplicatingTask(true);
+    try {
+      const clonePayload = {
+        title,
+        description: options.includeDescription ? (sourceTask.description || '') : '',
+        status: sourceTask.status,
+        priority: options.includePriority ? sourceTask.priority : TaskPriority.MEDIA,
+        main_assignee_id: options.includeAssignees ? sourceTask.mainAssigneeId : currentUser.id,
+        secondary_assignee_ids: options.includeAssignees ? (sourceTask.secondaryAssigneeIds || []) : [],
+        start_date: options.includeDates ? (sourceTask.startDate || null) : null,
+        due_date: options.includeDates ? (sourceTask.dueDate || null) : null,
+        list_id: options.listId,
+        project_id: sourceTask.projectId || null,
+        parent_id: null,
+        extension_count: 0,
+        tags: options.includeTags ? (sourceTask.tags || []) : [],
+      };
+
+      const { data: created, error } = await supabaseAdmin
+        .from('tasks')
+        .insert(clonePayload)
+        .select()
+        .single();
+
+      if (error || !created) {
+        throw error || new Error('A tarefa duplicada não foi retornada pelo banco.');
+      }
+
+      const duplicatedTask: Task = {
+        id: created.id,
+        title: created.title,
+        description: created.description || '',
+        status: created.status,
+        priority: created.priority as TaskPriority,
+        mainAssigneeId: created.main_assignee_id,
+        secondaryAssigneeIds: created.secondary_assignee_ids || [],
+        startDate: created.start_date,
+        dueDate: created.due_date,
+        extensionCount: created.extension_count || 0,
+        extensionHistory: [],
+        checklists: [],
+        comments: [],
+        attachments: [],
+        activities: [],
+        listId: created.list_id,
+        projectId: created.project_id,
+        parentId: created.parent_id,
+        createdAt: created.created_at,
+        tags: created.tags || [],
+      };
+
+      const stateTasksToAdd: Task[] = [duplicatedTask];
+      const fieldValuesToAdd: CustomFieldValue[] = [];
+
+      if (options.includeChecklists && (sourceTask.checklists || []).length > 0) {
+        const checklistRows = sourceTask.checklists.map((item) => ({
+          task_id: duplicatedTask.id,
+          text: item.text,
+          completed: item.completed,
+        }));
+        const { data: checklistData, error: checklistError } = await supabase
+          .from('task_checklists')
+          .insert(checklistRows)
+          .select();
+
+        if (checklistError) throw checklistError;
+        duplicatedTask.checklists = (checklistData || []).map((item: any) => ({
+          id: item.id,
+          text: item.text,
+          completed: item.completed,
+        }));
+      }
+
+      if (options.includeCustomFields) {
+        const originalValues = fieldValues.filter((value) => value.entityId === sourceTask.id);
+        if (originalValues.length > 0) {
+          const customValueRows = originalValues.map((value) => ({
+            field_id: value.fieldId,
+            entity_id: duplicatedTask.id,
+            value: value.value,
+          }));
+          const { error: customValuesError } = await supabase
+            .from('custom_field_values')
+            .insert(customValueRows);
+
+          if (customValuesError) throw customValuesError;
+          fieldValuesToAdd.push(...originalValues.map((value) => ({
+            ...value,
+            entityId: duplicatedTask.id,
+          })));
+        }
+      }
+
+      if (options.includeSubtasks) {
+        const subtasks = tasks.filter((task) => task.parentId === sourceTask.id);
+        for (const subtask of subtasks) {
+          const { data: createdSubtask, error: subtaskError } = await supabaseAdmin
+            .from('tasks')
+            .insert({
+              title: subtask.title,
+              description: options.includeDescription ? (subtask.description || '') : '',
+              status: subtask.status,
+              priority: options.includePriority ? subtask.priority : TaskPriority.MEDIA,
+              main_assignee_id: options.includeAssignees ? subtask.mainAssigneeId : currentUser.id,
+              secondary_assignee_ids: options.includeAssignees ? (subtask.secondaryAssigneeIds || []) : [],
+              start_date: options.includeDates ? (subtask.startDate || null) : null,
+              due_date: options.includeDates ? (subtask.dueDate || null) : null,
+              list_id: options.listId,
+              project_id: subtask.projectId || sourceTask.projectId || null,
+              parent_id: duplicatedTask.id,
+              extension_count: 0,
+              tags: options.includeTags ? (subtask.tags || []) : [],
+            })
+            .select()
+            .single();
+
+          if (subtaskError || !createdSubtask) {
+            throw subtaskError || new Error(`Não foi possível duplicar a subtarefa "${subtask.title}".`);
+          }
+
+          const duplicatedSubtask: Task = {
+            id: createdSubtask.id,
+            title: createdSubtask.title,
+            description: createdSubtask.description || '',
+            status: createdSubtask.status,
+            priority: createdSubtask.priority as TaskPriority,
+            mainAssigneeId: createdSubtask.main_assignee_id,
+            secondaryAssigneeIds: createdSubtask.secondary_assignee_ids || [],
+            startDate: createdSubtask.start_date,
+            dueDate: createdSubtask.due_date,
+            extensionCount: createdSubtask.extension_count || 0,
+            extensionHistory: [],
+            checklists: [],
+            comments: [],
+            attachments: [],
+            activities: [],
+            listId: createdSubtask.list_id,
+            projectId: createdSubtask.project_id,
+            parentId: createdSubtask.parent_id,
+            createdAt: createdSubtask.created_at,
+            tags: createdSubtask.tags || [],
+          };
+
+          if (options.includeChecklists && (subtask.checklists || []).length > 0) {
+            const { data: subChecklistData, error: subChecklistError } = await supabase
+              .from('task_checklists')
+              .insert(subtask.checklists.map((item) => ({
+                task_id: duplicatedSubtask.id,
+                text: item.text,
+                completed: item.completed,
+              })))
+              .select();
+
+            if (subChecklistError) throw subChecklistError;
+            duplicatedSubtask.checklists = (subChecklistData || []).map((item: any) => ({
+              id: item.id,
+              text: item.text,
+              completed: item.completed,
+            }));
+          }
+
+          if (options.includeCustomFields) {
+            const subtaskValues = fieldValues.filter((value) => value.entityId === subtask.id);
+            if (subtaskValues.length > 0) {
+              const { error: subtaskValuesError } = await supabase
+                .from('custom_field_values')
+                .insert(subtaskValues.map((value) => ({
+                  field_id: value.fieldId,
+                  entity_id: duplicatedSubtask.id,
+                  value: value.value,
+                })));
+
+              if (subtaskValuesError) throw subtaskValuesError;
+              fieldValuesToAdd.push(...subtaskValues.map((value) => ({
+                ...value,
+                entityId: duplicatedSubtask.id,
+              })));
+            }
+          }
+
+          stateTasksToAdd.push(duplicatedSubtask);
+        }
+      }
+
+      await supabase.from('task_activities').insert({
+        task_id: duplicatedTask.id,
+        user_id: currentUser.id,
+        type: 'TASK_DUPLICATED',
+        old_value: sourceTask.id,
+        new_value: sourceTask.title,
+      });
+
+      setTasks(prev => [...stateTasksToAdd, ...prev]);
+      if (fieldValuesToAdd.length > 0) {
+        setFieldValues(prev => [...prev, ...fieldValuesToAdd]);
+      }
+      setTaskToDuplicate(null);
+      setSelectedTaskId(duplicatedTask.id);
+      toast.success(`Tarefa "${duplicatedTask.title}" duplicada com sucesso.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Erro ao duplicar tarefa:', err);
+      toast.error('Erro ao duplicar tarefa: ' + message);
+    } finally {
+      setIsDuplicatingTask(false);
+    }
+  };
+
   const openFolderModal = (spaceId: string) => {
     setTargetSpaceId(spaceId);
     setIsFolderModalOpen(true);
@@ -2192,6 +2441,7 @@ export default function App() {
                   setIsTaskModalOpen(true);
                 }}
                 onDeleteTask={handleDeleteTask}
+                onDuplicateTask={setTaskToDuplicate}
                 lists={lists}
                 activeListId={activeListId}
                 hiddenStandardColumnKeysByList={hiddenStandardColumnKeysByList}
@@ -2230,6 +2480,7 @@ export default function App() {
                 onSelectTask={setSelectedTaskId}
                 onStatusChange={handleStatusChange}
                 onDeleteTask={handleDeleteTask}
+                onDuplicateTask={setTaskToDuplicate}
                 onCreateTask={handleCreateTask}
                 onQuickCreate={(prefill?: any) => {
                   setPrefilledTaskData(prefill || null);
@@ -2316,6 +2567,7 @@ export default function App() {
             fieldValues={fieldValues}
             onUpdateFieldValue={handleUpdateFieldValue}
             onDelete={() => handleDeleteTask(selectedTask.id)}
+            onDuplicate={() => setTaskToDuplicate(selectedTask)}
             onSelectTask={setSelectedTaskId}
             onQuickCreate={(prefill?: any) => {
               setPrefilledTaskData(prefill || null);
@@ -2357,6 +2609,19 @@ export default function App() {
             statusGroups={statusGroups}
           />
         )}
+
+        <DuplicateTaskModal
+          task={taskToDuplicate}
+          lists={lists}
+          isOpen={!!taskToDuplicate}
+          isSubmitting={isDuplicatingTask}
+          onClose={() => {
+            if (!isDuplicatingTask) setTaskToDuplicate(null);
+          }}
+          onDuplicate={(options) => {
+            if (taskToDuplicate) handleDuplicateTask(taskToDuplicate, options);
+          }}
+        />
 
         {/* Custom Fields Manager */}
         {isFieldManagerOpen && (
@@ -3478,6 +3743,171 @@ function ConfirmModal({ message, onConfirm, onClose }: { message: string; onConf
   );
 }
 
+function DuplicateTaskModal({
+  task,
+  lists,
+  isOpen,
+  isSubmitting,
+  onClose,
+  onDuplicate,
+}: {
+  task: Task | null;
+  lists: List[];
+  isOpen: boolean;
+  isSubmitting: boolean;
+  onClose: () => void;
+  onDuplicate: (options: DuplicateTaskOptions) => void;
+}) {
+  const [options, setOptions] = useState<DuplicateTaskOptions>({
+    title: '',
+    listId: '',
+    includeDescription: true,
+    includeAssignees: true,
+    includeDates: true,
+    includePriority: true,
+    includeSubtasks: true,
+    includeChecklists: true,
+    includeTags: true,
+    includeCustomFields: true,
+  });
+
+  useEffect(() => {
+    if (!task) return;
+    setOptions({
+      title: `Cópia de ${task.title}`,
+      listId: task.listId,
+      includeDescription: true,
+      includeAssignees: true,
+      includeDates: true,
+      includePriority: true,
+      includeSubtasks: true,
+      includeChecklists: true,
+      includeTags: true,
+      includeCustomFields: true,
+    });
+  }, [task]);
+
+  const toggle = (key: DuplicateTaskBooleanOption, value: boolean) => {
+    setOptions((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!task || isSubmitting || !options.title.trim() || !options.listId) return;
+    onDuplicate({ ...options, title: options.title.trim() });
+  };
+
+  const copyItems: Array<{ key: DuplicateTaskBooleanOption; label: string; description: string }> = [
+    { key: 'includeDescription', label: 'Descrição', description: 'Copia o texto principal da tarefa.' },
+    { key: 'includeAssignees', label: 'Responsáveis', description: 'Mantém responsável principal e acompanhantes.' },
+    { key: 'includeDates', label: 'Datas', description: 'Mantém início e prazo da tarefa original.' },
+    { key: 'includePriority', label: 'Prioridade', description: 'Mantém a prioridade atual.' },
+    { key: 'includeSubtasks', label: 'Subtarefas', description: 'Cria cópias independentes das subtarefas diretas.' },
+    { key: 'includeChecklists', label: 'Checklists', description: 'Copia itens de ação e seus estados.' },
+    { key: 'includeTags', label: 'Etiquetas', description: 'Mantém as tags aplicadas.' },
+    { key: 'includeCustomFields', label: 'Campos personalizados', description: 'Copia valores preenchidos nos campos customizados.' },
+  ];
+
+  return (
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl p-0 overflow-hidden">
+        <form onSubmit={handleSubmit}>
+          <DialogHeader className="px-6 pt-6 pb-4 border-b bg-gray-50/60">
+            <DialogTitle className="flex items-center gap-2 text-xl">
+              <Copy className="w-5 h-5 text-blue-500" />
+              Duplicar tarefa
+            </DialogTitle>
+            <DialogDescription>
+              Crie uma nova tarefa independente a partir da tarefa atual. Alterações na cópia não mudam a original.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="p-6 space-y-6">
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-gray-700" htmlFor="duplicate-task-title">
+                Nome da nova tarefa
+              </label>
+              <input
+                id="duplicate-task-title"
+                autoFocus
+                value={options.title}
+                onChange={(event) => setOptions((prev) => ({ ...prev, title: event.target.value }))}
+                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-900 outline-none transition-all focus:border-blue-400 focus:ring-4 focus:ring-blue-100"
+                placeholder="Digite o nome da tarefa duplicada"
+              />
+              {task && (
+                <p className="text-xs text-gray-400">
+                  Original: <span className="font-medium text-gray-500">{task.title}</span>
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-gray-700" htmlFor="duplicate-task-list">
+                Lista de destino
+              </label>
+              <select
+                id="duplicate-task-list"
+                value={options.listId}
+                onChange={(event) => setOptions((prev) => ({ ...prev, listId: event.target.value }))}
+                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-900 outline-none transition-all focus:border-blue-400 focus:ring-4 focus:ring-blue-100"
+              >
+                {lists.map((list) => (
+                  <option key={list.id} value={list.id}>{list.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="text-sm font-semibold text-gray-700 mb-3">O que copiar</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {copyItems.map((item) => (
+                  <label
+                    key={item.key}
+                    className="flex items-start gap-3 rounded-xl border border-gray-200 bg-white p-3 hover:border-blue-200 hover:bg-blue-50/30 transition-colors cursor-pointer"
+                  >
+                    <Checkbox
+                      checked={Boolean(options[item.key])}
+                      onCheckedChange={(checked) => toggle(item.key, checked === true)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="block text-sm font-semibold text-gray-800">{item.label}</span>
+                      <span className="block text-xs text-gray-500 leading-snug">{item.description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+              Comentários e anexos não são copiados automaticamente. Assim a nova tarefa nasce limpa, sem duplicar histórico ou arquivos da original.
+            </div>
+          </div>
+
+          <DialogFooter className="px-6 py-4 border-t bg-gray-50/80">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isSubmitting}
+              className="px-4 py-2 rounded-lg border border-gray-200 bg-white text-sm font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={isSubmitting || !options.title.trim() || !options.listId}
+              className="px-5 py-2 rounded-lg bg-[var(--primary-color)] text-[#2c3e50] text-sm font-black hover:brightness-95 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSubmitting ? 'Duplicando...' : 'Duplicar tarefa'}
+            </button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function getTaskHealth(task: Task) {
   const status = (task.status || '').toLowerCase();
   if (status.includes('conclu') || status.includes('aprovado') || status.includes('fechado')) {
@@ -3513,6 +3943,7 @@ function ListView({
   context,
   onQuickCreate,
   onDeleteTask,
+  onDuplicateTask,
   lists,
   statusGroups,
   activeListId,
@@ -4183,16 +4614,28 @@ function ListView({
                               <td className="px-2 py-3" />
 
                               <td className="px-4 py-3">
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onDeleteTask(t.id);
-                                  }}
-                                  className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                                  title="Excluir Tarefa"
-                                >
-                                  <Icons.Trash />
-                                </button>
+                                <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onDuplicateTask?.(t);
+                                    }}
+                                    className="p-1.5 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                                    title="Duplicar Tarefa"
+                                  >
+                                    <Copy className="w-4 h-4" />
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onDeleteTask(t.id);
+                                    }}
+                                    className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Excluir Tarefa"
+                                  >
+                                    <Icons.Trash />
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );
@@ -4289,7 +4732,7 @@ function ListView({
   );
 }
 
-function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, workspaceTags }: any) {
+function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDuplicateTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, workspaceTags }: any) {
   // Refs para não causar re-render durante drag (re-renders destroem o HTML5 DnD)
   const draggingTaskIdRef = useRef<string | null>(null);
   const currentDragOverColRef = useRef<HTMLElement | null>(null);
@@ -4504,6 +4947,13 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreat
                         <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M3 8l3.5 3.5L13 4.5"/>
                         </svg>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); onDuplicateTask?.(task); }}
+                        className="p-1 rounded text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
+                        title="Duplicar tarefa"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
                       </button>
                       <button
                         onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
@@ -5320,6 +5770,7 @@ function TaskDetailModal(props: any) {
     fieldValues,
     onUpdateFieldValue,
     onDelete,
+    onDuplicate,
     tasks,
     onSelectTask,
     onQuickCreate,
@@ -5576,6 +6027,15 @@ function TaskDetailModal(props: any) {
             >
               <LinkIcon className="w-4 h-4" /> Compartilhar
             </button>
+            {!isReadOnly && onDuplicate && (
+              <button
+                onClick={() => onDuplicate(task)}
+                className="flex items-center gap-2 px-3 py-1.5 hover:bg-blue-50 text-gray-500 hover:text-blue-600 text-sm font-medium rounded-lg transition-all"
+                title="Duplicar tarefa"
+              >
+                <Copy className="w-4 h-4" /> Duplicar
+              </button>
+            )}
             {!isReadOnly && onDelete && (
               <button onClick={onDelete} className="p-2 hover:bg-red-50 text-red-400 rounded-lg transition-colors" title="Excluir Tarefa">
                 <Icons.Trash />
