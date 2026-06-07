@@ -1051,13 +1051,35 @@ export default function App() {
     if (!session) return;
     setIsDashboardLoading(true);
     try {
-      const { data, error } = await supabaseAdmin.from('tasks').select('*');
-      if (data && !error) {
-        const taskIds = data.map((d: any) => d.id);
-        const [actResult] = await Promise.all([
-          supabaseAdmin.from('task_activities').select('id,task_id,user_id,type,old_value,new_value,created_at').in('task_id', taskIds),
-        ]);
-        const actData = actResult.data || [];
+      // Paginação manual: Supabase limita 1000 linhas por request por padrão
+      let allData: any[] = [];
+      let from = 0;
+      const pageSize = 1000;
+      while (true) {
+        const { data: page, error: pageErr } = await supabaseAdmin
+          .from('tasks')
+          .select('*')
+          .range(from, from + pageSize - 1);
+        if (pageErr || !page || page.length === 0) break;
+        allData = [...allData, ...page];
+        if (page.length < pageSize) break;
+        from += pageSize;
+      }
+      const data = allData;
+      if (data.length > 0) {
+        // Atividades recentes: busca as últimas 200 globalmente (evita IN com 1555 IDs)
+        const { data: actData } = await supabaseAdmin
+          .from('task_activities')
+          .select('id,task_id,user_id,type,old_value,new_value,created_at')
+          .order('created_at', { ascending: false })
+          .limit(200);
+
+        const actMap = new Map<string, any[]>();
+        (actData || []).forEach((a: any) => {
+          if (!actMap.has(a.task_id)) actMap.set(a.task_id, []);
+          actMap.get(a.task_id)!.push(a);
+        });
+
         setDashboardTasks(data.map((d: any) => ({
           id: d.id,
           title: d.title,
@@ -1073,7 +1095,7 @@ export default function App() {
           checklists: [],
           comments: [],
           attachments: [],
-          activities: actData.filter((a: any) => a.task_id === d.id).map((a: any) => ({
+          activities: (actMap.get(d.id) || []).map((a: any) => ({
             id: a.id, taskId: a.task_id, userId: a.user_id,
             type: a.type, oldValue: a.old_value, newValue: a.new_value, createdAt: a.created_at
           })),
@@ -4327,9 +4349,30 @@ function DuplicateTaskModal({
 
 function getTaskHealth(task: Task) {
   const status = (task.status || '').toLowerCase();
+
+  // ── 1. Terminal / concluído ───────────────────────────────────────────────
   if (status.includes('conclu') || status.includes('aprovado') || status.includes('fechado')) {
     return { emoji: '🎉', label: 'Missão cumprida!', bg: 'bg-green-100', text: 'text-green-800', border: 'border-green-200' };
   }
+
+  // ── 2. Cancelado / Reprovado — terminal, não conta como atraso ───────────
+  if (status.includes('cancel') || status.includes('reprova')) {
+    return { emoji: '🚫', label: 'Cancelado / Reprovado', bg: 'bg-gray-100', text: 'text-gray-500', border: 'border-gray-200' };
+  }
+
+  // ── 3. Aguardando / Bloqueado / Pendente — em espera, NÃO é atraso ───────
+  if (
+    status.includes('aguardando') ||
+    status.includes('pendente') ||
+    status.includes('enviada') ||
+    status.includes('em espera') ||
+    status.includes('bloqueada') ||
+    status.includes('em analise') ||
+    status.includes('em análise')
+  ) {
+    return { emoji: '⏳', label: 'Aguardando / Em espera', bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-200' };
+  }
+
   if (!task.dueDate) return null;
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -5577,13 +5620,15 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
   // --- Health buckets (dynamic, using getTaskHealth) ---
   const healthBuckets = useMemo(() => {
     const buckets: Record<string, { label: string; emoji: string; color: string; bg: string; count: number }> = {
-      done:    { label: 'Missão cumprida',     emoji: '🎉', color: '#10b981', bg: '#d1fae5', count: 0 },
-      ok:      { label: 'Tranquilo, em dia',   emoji: '😄', color: '#3b82f6', bg: '#dbeafe', count: 0 },
-      warning: { label: 'Atenção ao prazo',    emoji: '😅', color: '#f59e0b', bg: '#fef9c3', count: 0 },
-      urgent:  { label: 'Cuidado, últimos dias', emoji: '😰', color: '#f97316', bg: '#ffedd5', count: 0 },
-      late:    { label: 'Atrasado! Corra',     emoji: '😡', color: '#ef4444', bg: '#fee2e2', count: 0 },
-      waiting: { label: 'Aguardando início',   emoji: '⏰', color: '#6b7280', bg: '#f3f4f6', count: 0 },
-      nodate:  { label: 'Sem prazo definido',  emoji: '—',  color: '#d1d5db', bg: '#f9fafb', count: 0 },
+      done:      { label: 'Missão cumprida',        emoji: '🎉', color: '#10b981', bg: '#d1fae5', count: 0 },
+      ok:        { label: 'Tranquilo, em dia',      emoji: '😄', color: '#3b82f6', bg: '#dbeafe', count: 0 },
+      warning:   { label: 'Atenção ao prazo',       emoji: '😅', color: '#f59e0b', bg: '#fef9c3', count: 0 },
+      urgent:    { label: 'Cuidado, últimos dias',  emoji: '😰', color: '#f97316', bg: '#ffedd5', count: 0 },
+      late:      { label: 'Atrasado! Corra',        emoji: '😡', color: '#ef4444', bg: '#fee2e2', count: 0 },
+      waiting:   { label: 'Aguardando início',      emoji: '⏰', color: '#6b7280', bg: '#f3f4f6', count: 0 },
+      blocked:   { label: 'Aguardando / Em espera', emoji: '⏳', color: '#8b5cf6', bg: '#ede9fe', count: 0 },
+      cancelled: { label: 'Cancelado / Reprovado',  emoji: '🚫', color: '#9ca3af', bg: '#f3f4f6', count: 0 },
+      nodate:    { label: 'Sem prazo definido',      emoji: '—',  color: '#d1d5db', bg: '#f9fafb', count: 0 },
     };
 
     filteredTasks.forEach((t: Task) => {
@@ -5595,6 +5640,8 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
       else if (h.emoji === '😰') buckets.urgent.count++;
       else if (h.emoji === '😡') buckets.late.count++;
       else if (h.emoji === '⏰') buckets.waiting.count++;
+      else if (h.emoji === '⏳') buckets.blocked.count++;
+      else if (h.emoji === '🚫') buckets.cancelled.count++;
       else buckets.nodate.count++;
     });
 
@@ -5656,6 +5703,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
   const atrasadas = healthBuckets.find(b => b.emoji === '😡')?.count || 0;
   const emDia = healthBuckets.find(b => b.emoji === '😄')?.count || 0;
   const criticas = healthBuckets.find(b => b.emoji === '😰')?.count || 0;
+  const aguardando = healthBuckets.find(b => b.emoji === '⏳')?.count || 0;
   const prorrogadas = tasks.filter((t: Task) => (t.extensionCount || 0) > 0).length;
   const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
 
@@ -5715,12 +5763,12 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
       {/* ── Row 1: KPI Cards ── */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {[
-          { emoji: '📋', title: 'Total', value: total, sub: 'tarefas', bg: 'bg-blue-50', text: 'text-blue-700' },
+          { emoji: '📋', title: 'Total', value: total, sub: 'tarefas no workspace', bg: 'bg-blue-50', text: 'text-blue-700' },
           { emoji: '🎉', title: 'Concluídas', value: concluidas, sub: `${taxaConclusao}% do total`, bg: 'bg-green-50', text: 'text-green-700' },
-          { emoji: '😡', title: 'Atrasadas', value: atrasadas, sub: 'precisam de atenção', bg: 'bg-red-50', text: 'text-red-700' },
+          { emoji: '😡', title: 'Atrasadas', value: atrasadas, sub: 'passaram do prazo', bg: 'bg-red-50', text: 'text-red-700' },
           { emoji: '😄', title: 'Em Dia', value: emDia, sub: 'dentro do prazo', bg: 'bg-sky-50', text: 'text-sky-700' },
-          { emoji: '😰', title: 'Críticas', value: criticas, sub: 'últimos dias de prazo', bg: 'bg-orange-50', text: 'text-orange-700' },
-          { emoji: '⚠️', title: 'Prorrogadas', value: prorrogadas, sub: 'tiveram extensão', bg: 'bg-yellow-50', text: 'text-yellow-700' },
+          { emoji: '⏳', title: 'Aguardando', value: aguardando, sub: 'em espera / bloqueadas', bg: 'bg-purple-50', text: 'text-purple-700' },
+          { emoji: '⚠️', title: 'Prorrogadas', value: prorrogadas, sub: 'tiveram extensão de prazo', bg: 'bg-yellow-50', text: 'text-yellow-700' },
         ].map(k => (
           <div key={k.title} className={`${k.bg} rounded-xl p-4 border border-white shadow-sm flex flex-col gap-1 hover:scale-[1.03] transition-transform`}>
             <span className="text-2xl">{k.emoji}</span>
