@@ -690,6 +690,10 @@ export default function App() {
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [userAccess, setUserAccess] = useState<Record<string, { spaceIds: string[]; folderIds: string[] }>>({});
 
+  // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
+  const [dashboardTasks, setDashboardTasks] = useState<Task[]>([]);
+  const [isDashboardLoading, setIsDashboardLoading] = useState(false);
+
   const loadInitialData = useCallback(async () => {
     try {
       // Carregar Spaces
@@ -1041,6 +1045,58 @@ export default function App() {
   useEffect(() => {
     loadTasks();
   }, [loadTasks]);
+
+  // ── Dashboard global: carrega TODAS as tarefas sem filtro de escopo ─────────
+  const loadDashboardTasks = useCallback(async () => {
+    if (!session) return;
+    setIsDashboardLoading(true);
+    try {
+      const { data, error } = await supabaseAdmin.from('tasks').select('*');
+      if (data && !error) {
+        const taskIds = data.map((d: any) => d.id);
+        const [actResult] = await Promise.all([
+          supabaseAdmin.from('task_activities').select('id,task_id,user_id,type,old_value,new_value,created_at').in('task_id', taskIds),
+        ]);
+        const actData = actResult.data || [];
+        setDashboardTasks(data.map((d: any) => ({
+          id: d.id,
+          title: d.title,
+          description: d.description || '',
+          status: d.status as string,
+          priority: d.priority as TaskPriority,
+          mainAssigneeId: d.main_assignee_id,
+          secondaryAssigneeIds: d.secondary_assignee_ids || [],
+          startDate: d.start_date,
+          dueDate: d.due_date,
+          extensionCount: d.extension_count || 0,
+          extensionHistory: [],
+          checklists: [],
+          comments: [],
+          attachments: [],
+          activities: actData.filter((a: any) => a.task_id === d.id).map((a: any) => ({
+            id: a.id, taskId: a.task_id, userId: a.user_id,
+            type: a.type, oldValue: a.old_value, newValue: a.new_value, createdAt: a.created_at
+          })),
+          listId: d.list_id,
+          projectId: d.project_id,
+          parentId: d.parent_id,
+          createdAt: d.created_at,
+          tags: d.tags || []
+        })));
+      }
+    } catch (err) {
+      console.error('Erro ao carregar tarefas para Dashboard:', err);
+    } finally {
+      setIsDashboardLoading(false);
+    }
+  }, [session]);
+
+  // Recarrega dados do Dashboard sempre que a view muda para Dashboard
+  useEffect(() => {
+    if (activeView === 'Dashboard') {
+      loadDashboardTasks();
+    }
+  }, [activeView, loadDashboardTasks]);
 
   const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
@@ -2560,8 +2616,16 @@ export default function App() {
                   onCreateFolder={() => openFolderModal(activeScope.id!)}
                 />
               ) : (
-                // We pass scopeTasks here so the Dashboard reflects the Space/Folder metrics, ignoring search query for stats
-                <DashboardView tasks={scopeTasks} users={adminUsers} statusGroups={statusGroups} activeListId={activeListId} lists={lists} />
+                // Dashboard global: usa dashboardTasks (todas as tarefas, sem filtro de escopo)
+                // Fallback para scopeTasks enquanto carrega pela primeira vez
+                <DashboardView
+                  tasks={dashboardTasks.length > 0 ? dashboardTasks : scopeTasks}
+                  users={adminUsers}
+                  statusGroups={statusGroups}
+                  activeListId={activeListId}
+                  lists={lists}
+                  isLoading={isDashboardLoading && dashboardTasks.length === 0}
+                />
               )
             )}
             {activeView === 'Calendar' && (
@@ -5460,7 +5524,26 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDupli
   );
 }
 
-function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any) {
+function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoading }: any) {
+  // Loading state: mostra skeleton enquanto carrega dados globais pela primeira vez
+  if (isLoading) {
+    return (
+      <div className="flex flex-col gap-6 animate-pulse">
+        <div className="h-8 bg-gray-100 rounded-lg w-48 ml-auto" />
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-28 bg-gray-100 rounded-xl" />
+          ))}
+        </div>
+        <div className="h-40 bg-gray-100 rounded-xl" />
+        <div className="grid grid-cols-3 gap-6">
+          <div className="h-72 bg-gray-100 rounded-xl col-span-2" />
+          <div className="h-72 bg-gray-100 rounded-xl" />
+        </div>
+      </div>
+    );
+  }
+
   // Resolve CSS custom property so Recharts SVG fill works correctly
   const primaryChartColor = useMemo(() => {
     const val = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim();
@@ -5575,6 +5658,42 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
   const criticas = healthBuckets.find(b => b.emoji === '😰')?.count || 0;
   const prorrogadas = tasks.filter((t: Task) => (t.extensionCount || 0) > 0).length;
   const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
+
+  // --- Resumo por lista (todos os projetos) ---
+  const listSummary = useMemo(() => {
+    if (!lists || lists.length === 0) return [];
+    const map = new Map<string, { name: string; total: number; done: number }>();
+    filteredTasks.forEach((t: Task) => {
+      if (!t.listId) return;
+      const list = lists.find((l: any) => l.id === t.listId);
+      if (!list) return;
+      const cur = map.get(t.listId) || { name: list.name, total: 0, done: 0 };
+      map.set(t.listId, {
+        name: list.name,
+        total: cur.total + 1,
+        done: cur.done + (isConcluido(t.status) ? 1 : 0)
+      });
+    });
+    return Array.from(map.values())
+      .filter(l => l.total > 0)
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
+  }, [filteredTasks, lists]);
+
+  // --- Atividade recente (últimas mudanças de status) ---
+  const recentActivity = useMemo(() => {
+    const acts: { taskTitle: string; type: string; newValue: string; createdAt: string }[] = [];
+    filteredTasks.forEach((t: Task) => {
+      (t.activities || []).forEach((a: any) => {
+        if (a.type === 'status_changed') {
+          acts.push({ taskTitle: t.title, type: a.type, newValue: a.newValue, createdAt: a.createdAt });
+        }
+      });
+    });
+    return acts
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 8);
+  }, [filteredTasks]);
 
   const PIE_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#6b7280', '#a855f7', '#06b6d4'];
 
@@ -5746,6 +5865,71 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
           </div>
         </div>
       </div>
+
+      {/* ── Row 5: Resumo por Lista + Atividade Recente ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        {/* Resumo por lista/projeto */}
+        <div className="bg-white p-6 rounded-xl border shadow-sm">
+          <h3 className="font-bold text-gray-700 mb-5">📁 Resumo por Lista / Projeto</h3>
+          {listSummary.length === 0 ? (
+            <p className="text-sm text-gray-400 text-center py-8">Nenhuma tarefa com lista atribuída.</p>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {listSummary.map(l => {
+                const pct = l.total > 0 ? Math.round((l.done / l.total) * 100) : 0;
+                return (
+                  <div key={l.name} className="flex items-center gap-3">
+                    <span className="text-xs font-medium text-gray-600 w-36 shrink-0 truncate" title={l.name}>{l.name}</span>
+                    <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{ width: `${Math.max(pct, 2)}%`, backgroundColor: pct === 100 ? '#10b981' : pct >= 60 ? '#3b82f6' : pct >= 30 ? '#f59e0b' : '#ef4444' }}
+                      />
+                    </div>
+                    <span className="text-xs font-bold text-gray-700 w-10 text-right shrink-0">{pct}%</span>
+                    <span className="text-[10px] text-gray-400 w-14 text-right shrink-0">{l.done}/{l.total}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Atividade recente */}
+        <div className="bg-white p-6 rounded-xl border shadow-sm">
+          <h3 className="font-bold text-gray-700 mb-5">⚡ Atividade Recente</h3>
+          {recentActivity.length === 0 ? (
+            <p className="text-sm text-gray-400 text-center py-8">Nenhuma atividade registrada no período.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {recentActivity.map((a, i) => {
+                const statusColor = (a.newValue || '').toLowerCase().includes('conclu') ? '#10b981'
+                  : (a.newValue || '').toLowerCase().includes('andamento') ? '#3b82f6'
+                  : (a.newValue || '').toLowerCase().includes('cancel') ? '#6b7280'
+                  : '#f59e0b';
+                const dt = new Date(a.createdAt);
+                const label = dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+                return (
+                  <div key={i} className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-50 transition-colors">
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
+                    <p className="flex-1 text-xs text-gray-700 truncate" title={a.taskTitle}>{a.taskTitle}</p>
+                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 text-white" style={{ backgroundColor: statusColor }}>
+                      {a.newValue}
+                    </span>
+                    <span className="text-[10px] text-gray-400 shrink-0">{label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Fonte dos dados */}
+      <p className="text-center text-[10px] text-gray-300 pb-2">
+        Dashboard global · {total} tarefas · dados em tempo real do Supabase
+      </p>
     </div>
   );
 }
