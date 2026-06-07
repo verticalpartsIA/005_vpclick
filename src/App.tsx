@@ -846,16 +846,21 @@ export default function App() {
   }, []);
 
   const loadAllUsers = useCallback(async () => {
-    const { data } = await supabase.from('profiles').select('*');
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('is_active', true);           // exclui usuários inativados
     if (data && data.length > 0) {
-      const users: User[] = data.map((d: any) => ({
-        id: d.id,
-        name: d.name,
-        email: d.email,
-        avatar: d.avatar || `https://picsum.photos/seed/${d.id}/100`,
-        role: d.role as UserRole,
-        theme: d.theme,
-      }));
+      const users: User[] = data
+        .filter((d: any) => !d.email?.includes('@vpclick.test')) // exclui contas CI/teste
+        .map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          email: d.email,
+          avatar: d.avatar || `https://picsum.photos/seed/${d.id}/100`,
+          role: d.role as UserRole,
+          theme: d.theme,
+        }));
 
       // Ensure the logged-in user is always in the list even if they have no profile
       if (currentUser.id !== 'loading' && !users.some(u => u.id === currentUser.id)) {
@@ -5690,7 +5695,13 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
         };
       })
       .filter((u: any) => u.total > 0)
-      .sort((a: any, b: any) => b.total - a.total)
+      // Ranking por desempenho: quem mais concluiu (primário) → maior taxa (desempate)
+      .sort((a: any, b: any) => {
+        if (b.concluidas !== a.concluidas) return b.concluidas - a.concluidas;
+        const taxaA = a.total > 0 ? a.concluidas / a.total : 0;
+        const taxaB = b.total > 0 ? b.concluidas / b.total : 0;
+        return taxaB - taxaA;
+      })
   , [filteredTasks, users]);
 
   // --- Priority breakdown ---
@@ -5899,28 +5910,37 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-white p-6 rounded-xl border shadow-sm">
           <h3 className="font-bold text-gray-700 mb-5">🔥 Distribuição por Prioridade</h3>
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {priorityData.map(p => {
-              const pct = Math.round((p.count / totalWithHealth) * 100);
+              const pct = Math.round((p.count / (total || 1)) * 100);
               return (
-                <div key={p.name} className="flex items-center gap-3">
-                  <span className="text-xs font-semibold text-gray-600 w-32 shrink-0">{p.name}</span>
-                  <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-                    <div className="h-full rounded-full" style={{ width: `${Math.max(pct, 3)}%`, backgroundColor: p.color }} />
+                <div key={p.name} className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-gray-700">{p.name}</span>
+                    <span className="text-gray-400">{pct}% · <span className="font-bold text-gray-700">{p.count}</span> tarefas</span>
                   </div>
-                  <span className="text-xs font-bold text-gray-700 w-10 text-right shrink-0">{p.count}</span>
+                  <div className="w-full bg-gray-100 rounded-full h-5 overflow-hidden">
+                    <div className="h-full rounded-full flex items-center justify-end pr-2 transition-all duration-500"
+                      style={{ width: `${Math.max(pct, 3)}%`, backgroundColor: p.color }}>
+                      {pct > 10 && <span className="text-[10px] font-bold text-white">{pct}%</span>}
+                    </div>
+                  </div>
                 </div>
               );
             })}
           </div>
+          {/* Nota de contexto */}
+          <p className="text-[10px] text-gray-400 mt-5 text-center">Baseado em {total} tarefas do workspace</p>
         </div>
 
         <div className="bg-white p-6 rounded-xl border shadow-sm">
-          <h3 className="font-bold text-gray-700 mb-5">🏆 Ranking da Equipe</h3>
+          <h3 className="font-bold text-gray-700 mb-1">🏆 Ranking da Equipe</h3>
+          <p className="text-[10px] text-gray-400 mb-4">Ordenado por tarefas concluídas</p>
           <div className="flex flex-col gap-2">
             {userPerformance.slice(0, 7).map((u: any, i: number) => {
               const taxa = u.total > 0 ? Math.round((u.concluidas / u.total) * 100) : 0;
               const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}º`;
+              const barColor = taxa >= 80 ? '#10b981' : taxa >= 50 ? '#3b82f6' : taxa >= 30 ? '#f59e0b' : '#ef4444';
               return (
                 <div key={u.fullName} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 transition-colors">
                   <span className="text-base w-7 text-center shrink-0">{medal}</span>
@@ -5928,10 +5948,10 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-semibold text-gray-800 truncate">{u.fullName}</p>
                     <div className="flex items-center gap-2 mt-0.5">
-                      <div className="flex-1 bg-gray-100 rounded-full h-1.5">
-                        <div className="h-full rounded-full bg-green-500" style={{ width: `${taxa}%` }} />
+                      <div className="flex-1 bg-gray-100 rounded-full h-2">
+                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${taxa}%`, backgroundColor: barColor }} />
                       </div>
-                      <span className="text-[10px] text-gray-500 shrink-0">{taxa}%</span>
+                      <span className="text-[10px] font-bold shrink-0" style={{ color: barColor }}>{taxa}%</span>
                     </div>
                   </div>
                   <div className="text-right shrink-0">
