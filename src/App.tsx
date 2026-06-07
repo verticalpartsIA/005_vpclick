@@ -692,6 +692,7 @@ export default function App() {
 
   // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
   const [dashboardTasks, setDashboardTasks] = useState<Task[]>([]);
+  const [dashboardLists, setDashboardLists] = useState<{ id: string; name: string }[]>([]);
   const [isDashboardLoading, setIsDashboardLoading] = useState(false);
 
   const loadInitialData = useCallback(async () => {
@@ -1067,12 +1068,17 @@ export default function App() {
       }
       const data = allData;
       if (data.length > 0) {
-        // Atividades recentes: busca as últimas 200 globalmente (evita IN com 1555 IDs)
-        const { data: actData } = await supabaseAdmin
-          .from('task_activities')
-          .select('id,task_id,user_id,type,old_value,new_value,created_at')
-          .order('created_at', { ascending: false })
-          .limit(200);
+        // Atividades + listas em paralelo (evita IN com milhares de IDs)
+        const [actResult, listsResult] = await Promise.all([
+          supabaseAdmin
+            .from('task_activities')
+            .select('id,task_id,user_id,type,old_value,new_value,created_at')
+            .order('created_at', { ascending: false })
+            .limit(200),
+          supabaseAdmin.from('lists').select('id,name'),
+        ]);
+        const actData = actResult.data;
+        if (listsResult.data) setDashboardLists(listsResult.data);
 
         const actMap = new Map<string, any[]>();
         (actData || []).forEach((a: any) => {
@@ -2646,6 +2652,7 @@ export default function App() {
                   statusGroups={statusGroups}
                   activeListId={activeListId}
                   lists={lists}
+                  allLists={dashboardLists.length > 0 ? dashboardLists : lists}
                   isLoading={isDashboardLoading && dashboardTasks.length === 0}
                 />
               )
@@ -5567,7 +5574,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDupli
   );
 }
 
-function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoading }: any) {
+function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLists, isLoading }: any) {
   // Loading state: mostra skeleton enquanto carrega dados globais pela primeira vez
   if (isLoading) {
     return (
@@ -5602,7 +5609,8 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
     cutoff.setDate(cutoff.getDate() - (period === '7d' ? 7 : period === '30d' ? 30 : 90));
     cutoff.setHours(0, 0, 0, 0);
     return tasks.filter((t: Task) => {
-      const ref = t.dueDate || t.startDate;
+      // Usa dueDate → startDate → createdAt como referência de data; sem data = sempre inclui
+      const ref = t.dueDate || t.startDate || t.createdAt;
       if (!ref) return true;
       return new Date(ref) >= cutoff;
     });
@@ -5650,16 +5658,21 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
 
   const totalWithHealth = filteredTasks.length || 1;
 
-  // --- Status distribution ---
+  // --- Status distribution (grupos consolidados — evita torta com 13 fatias) ---
+  const STATUS_GROUPS_DASH = [
+    { name: '✅ Concluído',    color: '#10b981', test: (s: string) => s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') },
+    { name: '⏳ Aguardando',   color: '#8b5cf6', test: (s: string) => s.includes('aguardando') || s.includes('pendente') || s.includes('enviada') || s.includes('em espera') || s.includes('bloqueada') || s.includes('em analise') || s.includes('em análise') },
+    { name: '📋 A Fazer',      color: '#6b7280', test: (s: string) => s.includes('a fazer') || s.includes('semana') || s.includes('backlog') || s.includes('todo') },
+    { name: '🔄 Em Andamento', color: '#3b82f6', test: (s: string) => s.includes('andamento') || s.includes('progresso') || s.includes('revisão') || s.includes('revisao') || s.includes('em revisão') },
+    { name: '🚫 Cancelado',    color: '#ef4444', test: (s: string) => s.includes('cancel') || s.includes('reprova') },
+  ];
   const statusData = useMemo(() => {
-    const statuses = activeListId
-      ? activeStatusOptions.map((o: any) => o.label)
-      : Array.from(new Set(filteredTasks.map((t: Task) => t.status)));
-    return (statuses as string[]).map((status) => ({
-      name: status,
-      value: filteredTasks.filter((t: Task) => t.status === status).length
-    })).filter((d: any) => d.value > 0);
-  }, [filteredTasks, activeListId, activeStatusOptions]);
+    return STATUS_GROUPS_DASH.map(g => ({
+      name: g.name,
+      value: filteredTasks.filter((t: Task) => g.test((t.status || '').toLowerCase())).length,
+      color: g.color,
+    })).filter(d => d.value > 0);
+  }, [filteredTasks]);
 
   // --- User performance ---
   const userPerformance = useMemo(() =>
@@ -5681,20 +5694,24 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
   , [filteredTasks, users]);
 
   // --- Priority breakdown ---
+  const PRIORITY_CFG = [
+    { key: 'URGENTE',        label: '🔴 Urgente',       color: '#ef4444' },
+    { key: 'ALTA',           label: '🟠 Alta',           color: '#f97316' },
+    { key: 'MÉDIA',          label: '🟡 Média',          color: '#f59e0b' },
+    { key: 'BAIXA',          label: '🔵 Baixa',          color: '#3b82f6' },
+    { key: 'SEM PRIORIDADE', label: '⚪ Sem prioridade', color: '#9ca3af' },
+  ];
   const priorityData = useMemo(() => {
-    const map: Record<string, { color: string; count: number }> = {
-      'URGENTE': { color: '#ef4444', count: 0 },
-      'ALTA':    { color: '#f97316', count: 0 },
-      'MÉDIA':   { color: '#f59e0b', count: 0 },
-      'BAIXA':   { color: '#3b82f6', count: 0 },
-      'SEM PRIORIDADE': { color: '#6b7280', count: 0 },
-    };
+    const counts: Record<string, number> = {};
+    PRIORITY_CFG.forEach(c => { counts[c.key] = 0; });
     filteredTasks.forEach((t: Task) => {
       const p = (t.priority || 'SEM PRIORIDADE').toUpperCase();
-      if (map[p]) map[p].count++;
-      else map['SEM PRIORIDADE'].count++;
+      if (counts[p] !== undefined) counts[p]++;
+      else counts['SEM PRIORIDADE']++;
     });
-    return Object.entries(map).map(([name, v]) => ({ name, ...v })).filter(d => d.count > 0);
+    return PRIORITY_CFG
+      .map(c => ({ name: c.label, color: c.color, count: counts[c.key] }))
+      .filter(d => d.count > 0);
   }, [filteredTasks]);
 
   // --- KPI values ---
@@ -5707,13 +5724,14 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
   const prorrogadas = tasks.filter((t: Task) => (t.extensionCount || 0) > 0).length;
   const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
 
-  // --- Resumo por lista (todos os projetos) ---
+  // --- Resumo por lista (todos os projetos) — usa allLists (dados globais) ---
   const listSummary = useMemo(() => {
-    if (!lists || lists.length === 0) return [];
+    // Prefere allLists (carregado globalmente) → cai no lists local como fallback
+    const availLists = (allLists && allLists.length > 0) ? allLists : (lists || []);
     const map = new Map<string, { name: string; total: number; done: number }>();
     filteredTasks.forEach((t: Task) => {
       if (!t.listId) return;
-      const list = lists.find((l: any) => l.id === t.listId);
+      const list = availLists.find((l: any) => l.id === t.listId);
       if (!list) return;
       const cur = map.get(t.listId) || { name: list.name, total: 0, done: 0 };
       map.set(t.listId, {
@@ -5726,12 +5744,12 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
       .filter(l => l.total > 0)
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
-  }, [filteredTasks, lists]);
+  }, [filteredTasks, lists, allLists]);
 
-  // --- Atividade recente (últimas mudanças de status) ---
+  // --- Atividade recente (últimas mudanças de status — usa tasks completo, não filtrado por período) ---
   const recentActivity = useMemo(() => {
     const acts: { taskTitle: string; type: string; newValue: string; createdAt: string }[] = [];
-    filteredTasks.forEach((t: Task) => {
+    tasks.forEach((t: Task) => {
       (t.activities || []).forEach((a: any) => {
         if (a.type === 'status_changed') {
           acts.push({ taskTitle: t.title, type: a.type, newValue: a.newValue, createdAt: a.createdAt });
@@ -5741,9 +5759,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
     return acts
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, 8);
-  }, [filteredTasks]);
-
-  const PIE_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#6b7280', '#a855f7', '#06b6d4'];
+  }, [tasks]);
 
   return (
     <div className="flex flex-col gap-6" onClick={(e) => e.stopPropagation()}>
@@ -5810,13 +5826,19 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
       {/* ── Row 3: Performance + Status ── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="bg-white p-6 rounded-xl border shadow-sm lg:col-span-2">
-          <h3 className="font-bold text-gray-700 mb-5 flex items-center gap-2">👥 Performance por Usuário</h3>
+          <h3 className="font-bold text-gray-700 mb-5 flex items-center gap-2">
+            👥 Performance por Usuário
+            <span className="ml-auto text-xs text-gray-400 font-normal">{userPerformance.length} membro{userPerformance.length !== 1 ? 's' : ''} ativos</span>
+          </h3>
+          {userPerformance.length === 0 ? (
+            <div className="h-[260px] flex items-center justify-center text-sm text-gray-400">Nenhum usuário com tarefas no período.</div>
+          ) : (
           <div className="h-[260px]">
             <ResponsiveContainer width="100%" height="100%">
-              <ReBarChart data={userPerformance} barGap={4}>
+              <ReBarChart data={userPerformance} barGap={4} barCategoryGap={userPerformance.length === 1 ? '60%' : '20%'}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis dataKey="name" fontSize={11} stroke="#94a3b8" />
-                <YAxis fontSize={11} stroke="#94a3b8" />
+                <YAxis fontSize={11} stroke="#94a3b8" allowDecimals={false} />
                 <Tooltip
                   cursor={{ fill: '#f8fafc' }}
                   formatter={(val: any, name: string) => [val, name === 'total' ? 'Total' : name === 'concluidas' ? 'Concluídas' : 'Atrasadas']}
@@ -5827,13 +5849,16 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
               </ReBarChart>
             </ResponsiveContainer>
           </div>
-          <div className="flex items-center gap-5 mt-3 justify-center">
-            {[[primaryChartColor, 'Total'], ['#10b981', 'Concluídas'], ['#ef4444', 'Atrasadas']].map(([c, l]) => (
-              <div key={l} className="flex items-center gap-1.5 text-xs text-gray-500">
-                <div className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: c }} />{l}
-              </div>
-            ))}
-          </div>
+          )}
+          {userPerformance.length > 0 && (
+            <div className="flex items-center gap-5 mt-3 justify-center">
+              {[[primaryChartColor, 'Total'], ['#10b981', 'Concluídas'], ['#ef4444', 'Atrasadas']].map(([c, l]) => (
+                <div key={l} className="flex items-center gap-1.5 text-xs text-gray-500">
+                  <div className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: c }} />{l}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="bg-white p-6 rounded-xl border shadow-sm">
@@ -5842,8 +5867,8 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={statusData} innerRadius={55} outerRadius={80} paddingAngle={3} dataKey="value">
-                  {statusData.map((_: any, i: number) => (
-                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                  {statusData.map((d: any, i: number) => (
+                    <Cell key={i} fill={d.color} />
                   ))}
                 </Pie>
                 <Tooltip formatter={(val: any, name: string) => [val, name]} />
@@ -5851,15 +5876,21 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, isLoad
             </ResponsiveContainer>
           </div>
           <div className="mt-3 flex flex-col gap-1.5">
-            {statusData.map((d: any, i: number) => (
-              <div key={d.name} className="flex items-center justify-between text-xs text-gray-600">
-                <div className="flex items-center gap-1.5">
-                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: PIE_COLORS[i % PIE_COLORS.length] }} />
-                  <span className="truncate max-w-[120px]">{d.name}</span>
+            {statusData.map((d: any) => {
+              const pct = total > 0 ? Math.round((d.value / total) * 100) : 0;
+              return (
+                <div key={d.name} className="flex items-center justify-between text-xs text-gray-600">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: d.color }} />
+                    <span className="truncate max-w-[130px]">{d.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-gray-400">{pct}%</span>
+                    <span className="font-bold w-8 text-right">{d.value}</span>
+                  </div>
                 </div>
-                <span className="font-bold">{d.value}</span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
