@@ -53,10 +53,15 @@ O **VP Click** é a plataforma de gestão de tarefas e projetos da VerticalParts
 
 ### Gestão de Tarefas
 - Hierarquia completa: **Workspace → Space → Folder → List → Task**
-- Subtarefas, checklists, comentários e anexos
+- Subtarefas aninhadas (até 7 níveis), checklists, comentários e anexos
 - Log de atividades por tarefa
 - Prioridades: `BAIXA` · `MÉDIA` · `ALTA` · `URGENTE`
 - 17 departamentos organizados em Spaces independentes
+
+### Colaboração
+- **Equipes**: grupos de usuários atribuíveis a tarefas de uma vez (estilo ClickUp Teams)
+- **Menções**: `@Pessoa` ou `@Equipe` nos comentários, com autocomplete
+- **Notificações in-app**: sino em tempo real para menções e atribuições
 
 ### Campos Customizados
 `DROPDOWN` · `TEXT` · `TEXTAREA` · `DATE` · `NUMBER` · `LABELS` · `CHECKBOX` · `MONEY` · `WEBSITE`

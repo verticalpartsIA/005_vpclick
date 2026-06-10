@@ -148,6 +148,31 @@ export interface Task {
   tags?: string[];
 }
 
+// ── Equipes (grupos de usuários, estilo ClickUp Teams) ───
+export interface Team {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  memberIds: string[];
+}
+
+// ── Notificações in-app (sino) ────────────────────────────
+export type NotificationType = 'mention' | 'team_mention' | 'assignment' | 'comment' | 'automation';
+
+export interface AppNotification {
+  id: string;
+  userId: string;
+  actorId?: string;
+  type: NotificationType;
+  title: string;
+  body: string;
+  taskId?: string;
+  commentId?: string;
+  read: boolean;
+  createdAt: string;
+}
+
 // ── Task Dependencies ─────────────────────────────────────
 export type DependencyType = 'blocks' | 'blocked_by' | 'relates_to';
 

@@ -3,7 +3,7 @@ import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIco
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
-  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag
+  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -20,6 +20,10 @@ import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChar
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { TaskDependencies } from './components/TaskDependencies';
+import { NotificationBell } from './components/NotificationBell';
+import { TeamsModal } from './components/TeamsModal';
+import { MentionTextarea } from './components/MentionTextarea';
+import { MentionText, notifyMentions, notifyAssignment } from './lib/mentions';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
@@ -620,6 +624,8 @@ export default function App() {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [workspaceTags, setWorkspaceTags] = useState<WorkspaceTag[]>([]);
   const [filterTags, setFilterTags] = useState<string[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
 
   useEffect(() => {
     // localStorage.removeItem("vp_docs"); // Clean up old mock data if needed
@@ -819,6 +825,19 @@ export default function App() {
           };
         });
         setUserAccess(nextAccess);
+      }
+
+      // Carregar Equipes e membros
+      const { data: teamsData } = await supabase.from('teams').select('*').order('name');
+      const { data: teamMembersData } = await supabase.from('team_members').select('*');
+      if (teamsData) {
+        setTeams(teamsData.map((t: any) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description || '',
+          color: t.color || '#8b5cf6',
+          memberIds: (teamMembersData || []).filter((m: any) => m.team_id === t.id).map((m: any) => m.user_id),
+        })));
       }
 
       // Carregar Status Groups e Options
@@ -2429,6 +2448,12 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-4 relative">
+              <NotificationBell
+                currentUser={currentUser}
+                users={adminUsers}
+                onOpenTask={(taskId) => setSelectedTaskId(taskId)}
+              />
+
               <div className="hidden sm:flex flex-col items-end">
                 <span className="text-sm font-semibold">{currentUser.name}</span>
                 <span className="text-xs text-gray-500 uppercase tracking-wider">{currentUser.role}</span>
@@ -2460,6 +2485,14 @@ export default function App() {
                     >
                       <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                       Configurações
+                    </button>
+
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setIsTeamsModalOpen(true); setIsUserMenuOpen(false); }}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                      Equipes
                     </button>
 
                     {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
@@ -2748,11 +2781,21 @@ export default function App() {
             statusGroups={statusGroups}
             lists={lists}
             workspaceId={workspace.id}
+            teams={teams}
             onTagsChange={(taskId: string, tags: string[]) =>
               setTasks(prev => prev.map(t => t.id === taskId ? { ...t, tags } : t))
             }
           />
         )}
+
+        <TeamsModal
+          isOpen={isTeamsModalOpen}
+          onClose={() => setIsTeamsModalOpen(false)}
+          teams={teams}
+          setTeams={setTeams}
+          users={adminUsers}
+          currentUser={currentUser}
+        />
 
         {/* Create Task Modal */}
         {isTaskModalOpen && (
@@ -6421,6 +6464,7 @@ function TaskDetailModal(props: any) {
     lists,
     workspaceId,
     onTagsChange,
+    teams = [],
   } = props;
 
   const currentList = lists?.find((l: any) => l.id === task.listId);
@@ -6526,9 +6570,25 @@ function TaskDetailModal(props: any) {
       if (saveTaskActivity) {
         await saveTaskActivity(task.id, 'RESPONSIBLE_ADDED', '', users.find((u: any) => u.id === userId)?.name);
       }
+      notifyAssignment({ userIds: [userId], actor: currentUser, taskId: task.id, taskTitle: task.title });
     }
 
     onUpdate({ ...task, secondaryAssigneeIds: nextSecondaryIds });
+  };
+
+  // Atribui uma Equipe inteira como responsáveis adicionais (estilo ClickUp Teams)
+  const handleAssignTeam = async (team: Team) => {
+    const current = new Set<string>(task.secondaryAssigneeIds || []);
+    const newIds = team.memberIds.filter((id: string) => id !== task.mainAssigneeId && !current.has(id));
+    if (newIds.length === 0) {
+      toast.info(`Todos da equipe ${team.name} já estão na tarefa.`);
+      return;
+    }
+    if (saveTaskActivity) {
+      await saveTaskActivity(task.id, 'TEAM_ASSIGNED', '', team.name);
+    }
+    notifyAssignment({ userIds: newIds, actor: currentUser, taskId: task.id, taskTitle: task.title, teamName: team.name });
+    onUpdate({ ...task, secondaryAssigneeIds: [...(task.secondaryAssigneeIds || []), ...newIds] });
   };
 
   const handleSetMainAssignee = async (userId: string) => {
@@ -6547,6 +6607,7 @@ function TaskDetailModal(props: any) {
       nextSecondaryIds.push(task.mainAssigneeId);
     }
 
+    notifyAssignment({ userIds: [userId], actor: currentUser, taskId: task.id, taskTitle: task.title });
     onUpdate({ ...task, mainAssigneeId: userId, secondaryAssigneeIds: nextSecondaryIds });
   };
 
@@ -6644,9 +6705,19 @@ function TaskDetailModal(props: any) {
     if (!newComment.trim()) return;
 
     if (saveComment) {
-      const success = await saveComment(task.id, newComment);
+      const text = newComment;
+      const success = await saveComment(task.id, text);
       if (success) {
         setNewComment('');
+        // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
+        notifyMentions({
+          text,
+          taskId: task.id,
+          taskTitle: task.title,
+          actor: currentUser,
+          users: users || [],
+          teams,
+        });
       }
     }
   };
@@ -6827,6 +6898,21 @@ function TaskDetailModal(props: any) {
                             {(task.secondaryAssigneeIds || []).includes(u.id) && <Icons.Check className="w-4 h-4 ml-auto text-green-500" />}
                           </DropdownMenuItem>
                         ))}
+                        {teams.length > 0 && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Equipes</div>
+                            {teams.map((team: Team) => (
+                              <DropdownMenuItem key={team.id} onClick={() => handleAssignTeam(team)} className="flex items-center gap-3 py-2">
+                                <span className="w-6 h-6 rounded-full flex items-center justify-center text-white shrink-0" style={{ backgroundColor: team.color }}>
+                                  <Icons.Users className="w-3.5 h-3.5" />
+                                </span>
+                                <span className="text-sm text-gray-600">{team.name}</span>
+                                <span className="ml-auto text-[10px] text-gray-400">{team.memberIds.length} {team.memberIds.length === 1 ? 'membro' : 'membros'}</span>
+                              </DropdownMenuItem>
+                            ))}
+                          </>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
 
@@ -7134,7 +7220,7 @@ function TaskDetailModal(props: any) {
                             <span className="text-xs font-bold text-gray-900">{users.find((u: any) => u.id === item.userId)?.name}</span>
                             <span className="text-[10px] text-gray-300">{formatDate(item.date)}</span>
                           </div>
-                          <p className="text-sm text-gray-600 leading-relaxed">{item.text}</p>
+                          <p className="text-sm text-gray-600 leading-relaxed"><MentionText text={item.text} users={users || []} teams={teams} /></p>
                         </div>
                       </div>
                     );
@@ -7146,7 +7232,8 @@ function TaskDetailModal(props: any) {
                       'PRIORITY_CHANGE': 'bg-cyan-50/30 border-cyan-50 text-cyan-600 circle-cyan-400',
                       'MAIN_RESPONSIBLE_CHANGE': 'bg-purple-50/30 border-purple-50 text-purple-600 circle-purple-400',
                       'RESPONSIBLE_ADDED': 'bg-green-50/30 border-green-50 text-green-600 circle-green-400',
-                      'RESPONSIBLE_REMOVED': 'bg-red-50/30 border-red-50 text-red-600 circle-red-400'
+                      'RESPONSIBLE_REMOVED': 'bg-red-50/30 border-red-50 text-red-600 circle-red-400',
+                      'TEAM_ASSIGNED': 'bg-purple-50/30 border-purple-50 text-purple-600 circle-purple-400'
                     };
 
                     const style = typeStyles[item.type] || 'bg-gray-50/30 border-gray-50 text-gray-600 circle-gray-400';
@@ -7175,6 +7262,9 @@ function TaskDetailModal(props: any) {
                             )}
                             {item.type === 'RESPONSIBLE_REMOVED' && (
                               <>removeu <span className={`font-bold ${textAccentClass}`}>{item.oldValue}</span> dos responsáveis adicionais</>
+                            )}
+                            {item.type === 'TEAM_ASSIGNED' && (
+                              <>atribuiu a equipe <span className={`font-bold ${textAccentClass}`}>{item.newValue}</span> à tarefa</>
                             )}
                           </p>
                         </div>
@@ -7207,13 +7297,15 @@ function TaskDetailModal(props: any) {
             <div className="p-6 border-t bg-white shrink-0">
               <input type="file" ref={fileInputRef} className="hidden" multiple onChange={handleFileUpload} />
               <div className="bg-gray-50 rounded-2xl p-4 border border-gray-100 shadow-inner">
-                <textarea
-                  placeholder="Escreva um comentário..."
+                <MentionTextarea
+                  placeholder="Escreva um comentário... use @ para mencionar pessoas ou Equipes"
                   value={newComment}
-                  onChange={(e) => setNewComment(e.target.value)}
+                  onChange={setNewComment}
+                  onSubmit={handleAddComment}
+                  users={users || []}
+                  teams={teams}
                   className="w-full bg-transparent border-none focus:ring-0 text-sm p-0 resize-none min-h-[60px] custom-scrollbar text-gray-700"
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAddComment(); } }}
-                ></textarea>
+                />
                 <div className="flex items-center justify-between mt-3">
                   <div className="flex items-center gap-3 text-gray-400">
                     <div onClick={() => fileInputRef.current?.click()} className="cursor-pointer hover:text-gray-600 transition-colors">
