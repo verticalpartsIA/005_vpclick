@@ -7,7 +7,7 @@ on:
 
 jobs:
   deploy:
-    name: Build + Deploy Hostinger
+    name: Build + Deploy Hostinger (FTP)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,47 +27,16 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: Descobrir caminho public_html
-        id: find_path
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Deploy via FTP para Hostinger
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
-          host: ${{ secrets.HOSTINGER_SSH_HOST }}
-          port: ${{ secrets.HOSTINGER_SSH_PORT }}
+          server: ${{ secrets.HOSTINGER_SSH_HOST }}
           username: ${{ secrets.HOSTINGER_SSH_USER }}
           password: ${{ secrets.HOSTINGER_SSH_PASSWORD }}
-          script: |
-            for p in \
-              "$HOME/domains/vpclick.vpsistema.com/public_html" \
-              "$HOME/public_html/vpclick.vpsistema.com" \
-              "$HOME/public_html" \
-            ; do
-              if [ -d "$p" ]; then
-                echo "DEPLOY_PATH=$p"
-                break
-              fi
-            done
-
-      - name: Enviar arquivos via SCP
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOSTINGER_SSH_HOST }}
-          port: ${{ secrets.HOSTINGER_SSH_PORT }}
-          username: ${{ secrets.HOSTINGER_SSH_USER }}
-          password: ${{ secrets.HOSTINGER_SSH_PASSWORD }}
-          source: "dist/*"
-          target: "domains/vpclick.vpsistema.com/public_html"
-          strip_components: 1
-          rm: true
-
-      - name: Verificar deploy
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.HOSTINGER_SSH_HOST }}
-          port: ${{ secrets.HOSTINGER_SSH_PORT }}
-          username: ${{ secrets.HOSTINGER_SSH_USER }}
-          password: ${{ secrets.HOSTINGER_SSH_PASSWORD }}
-          script: |
-            echo "=== Arquivos em public_html ==="
-            ls -la ~/domains/vpclick.vpsistema.com/public_html/ | head -20
-            echo "=== index.html (primeiras linhas) ==="
-            head -5 ~/domains/vpclick.vpsistema.com/public_html/index.html 2>/dev/null || echo "index.html nao encontrado"
+          local-dir: ./dist/
+          server-dir: /domains/vpclick.vpsistema.com/public_html/
+          dangerous-clean-slate: true
+          exclude: |
+            **/.git*
+            **/.git*/**
+            **/node_modules/**
