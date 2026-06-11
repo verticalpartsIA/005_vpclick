@@ -212,6 +212,73 @@ const THEME_PRESETS: Record<ThemePresetId, { label: string; vars: Record<string,
   },
 };
 
+// ── CommentItem: comentário com edição/exclusão inline ────────────────────
+function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, formatDate }: {
+  item: any;
+  users: any[];
+  teams: any[];
+  isOwn: boolean;
+  taskId: string;
+  onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
+  onDelete: (taskId: string, commentId: string) => Promise<void>;
+  formatDate: (d: string) => string;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [editText, setEditText] = React.useState(item.text);
+  const [saving, setSaving] = React.useState(false);
+  const author = users.find((u: any) => u.id === item.userId);
+
+  const handleSave = async () => {
+    if (!editText.trim() || editText === item.text) { setEditing(false); return; }
+    setSaving(true);
+    await onEdit(taskId, item.id, editText.trim());
+    setSaving(false);
+    setEditing(false);
+  };
+
+  return (
+    <div className="relative group/comment">
+      <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
+        <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
+      </div>
+      <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-bold text-gray-900">{author?.name}</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-gray-300">{formatDate(item.date)}{item.updatedAt ? ' · editado' : ''}</span>
+            {isOwn && !editing && (
+              <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                <button onClick={() => { setEditText(item.text); setEditing(true); }} className="text-[10px] text-gray-400 hover:text-blue-500 font-semibold px-1.5 py-0.5 rounded hover:bg-blue-50 transition-all">Editar</button>
+                <button onClick={() => onDelete(taskId, item.id)} className="text-[10px] text-gray-400 hover:text-red-500 font-semibold px-1.5 py-0.5 rounded hover:bg-red-50 transition-all">Excluir</button>
+              </div>
+            )}
+          </div>
+        </div>
+        {editing ? (
+          <div className="space-y-2">
+            <textarea
+              value={editText}
+              onChange={e => setEditText(e.target.value)}
+              className="w-full text-sm p-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white"
+              rows={3}
+              autoFocus
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === 'Escape') setEditing(false); }}
+            />
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setEditing(false)} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
+              <button onClick={handleSave} disabled={saving || !editText.trim()} className="text-xs bg-orange-500 text-white font-bold px-3 py-1 rounded-lg hover:brightness-110 disabled:opacity-50">{saving ? '...' : 'Salvar'}</button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-600 leading-relaxed">
+            <MentionText text={item.text} users={users || []} teams={teams} />
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // --- Global Context Mock-up ---
 const FALLBACK_USER: User = {
   id: 'loading',
@@ -462,6 +529,47 @@ export default function App() {
       return true;
     }
     return false;
+  }, [currentUser]);
+
+  const editTaskComment = useCallback(async (taskId: string, commentId: string, newText: string) => {
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from('task_comments')
+      .update({ text: newText, updated_at: now })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao editar comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).map(c => c.id === commentId ? { ...c, text: newText, updatedAt: now } : c),
+    }));
+  }, []);
+
+  const deleteTaskComment = useCallback(async (taskId: string, commentId: string) => {
+    const { error } = await supabase
+      .from('task_comments')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao excluir comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).filter(c => c.id !== commentId),
+    }));
+    toast.success('Comentário excluído.');
+  }, []);
+
+  // isWatching vem do call site para evitar referência circular com tasks
+  const toggleWatcher = useCallback(async (taskId: string, isWatching: boolean) => {
+    if (!currentUser || currentUser.id === 'loading') return;
+    if (isWatching) {
+      const { error } = await supabase.from('task_watchers').delete().eq('task_id', taskId).eq('user_id', currentUser.id);
+      if (error) { toast.error('Erro ao parar de observar.'); return; }
+      setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: (t.watcherIds || []).filter(id => id !== currentUser.id) }));
+    } else {
+      const { error } = await supabase.from('task_watchers').insert({ task_id: taskId, user_id: currentUser.id });
+      if (error) { toast.error('Erro ao observar tarefa.'); return; }
+      setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: [...(t.watcherIds || []), currentUser.id] }));
+      toast.success('Você está observando esta tarefa.');
+    }
   }, [currentUser]);
 
   const saveTaskActivity = useCallback(async (taskId: string, type: string, oldValue?: string, newValue?: string) => {
@@ -1045,16 +1153,18 @@ export default function App() {
       // Fetch sub-entities in parallel
       const results = await Promise.all([
         supabaseAdmin.from('task_attachments').select('*').in('task_id', taskIds),
-        supabaseAdmin.from('task_comments').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_comments').select('*').in('task_id', taskIds).is('deleted_at', null),
         supabaseAdmin.from('task_extension_logs').select('*').in('task_id', taskIds),
         supabaseAdmin.from('task_checklists').select('*').in('task_id', taskIds),
         supabaseAdmin.from('task_activities').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_watchers').select('task_id, user_id').in('task_id', taskIds),
       ]);
       const attData = results[0].data;
       const commData = results[1].data;
       const logData = results[2].data;
       const checkData = results[3].data;
       const actData = results[4].data;
+      const watchData = results[5].data;
 
       setTasks(data.map((d: any) => {
         const tAttachments = (attData || []).filter((a: any) => a.task_id === d.id).map((a: any) => ({
@@ -1070,7 +1180,8 @@ export default function App() {
           id: c.id,
           userId: c.user_id,
           text: c.text,
-          timestamp: c.created_at
+          timestamp: c.created_at,
+          updatedAt: c.updated_at || undefined,
         }));
 
         const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
@@ -1118,7 +1229,8 @@ export default function App() {
           projectId: d.project_id,
           parentId: d.parent_id,
           createdAt: d.created_at,
-          tags: d.tags || []
+          tags: d.tags || [],
+          watcherIds: (watchData || []).filter((w: any) => w.task_id === d.id).map((w: any) => w.user_id),
         };
       }));
     }
@@ -2368,17 +2480,36 @@ export default function App() {
     return map;
   }, [tasks]);
 
-  // ── Favorites (localStorage-based) ──────────────────────────────────────
+  // ── Favorites (Supabase-synced, localStorage como seed inicial) ──────────
   const [favorites, setFavorites] = useState<{ type: 'list' | 'folder' | 'space'; id: string; name: string }[]>(() => {
     try { return JSON.parse(localStorage.getItem('vp_favorites') || '[]'); } catch { return []; }
   });
-  const toggleFavorite = (type: 'list' | 'folder' | 'space', id: string, name: string) => {
-    setFavorites(prev => {
-      const exists = prev.some(f => f.type === type && f.id === id);
-      const next = exists ? prev.filter(f => !(f.type === type && f.id === id)) : [...prev, { type, id, name }];
-      localStorage.setItem('vp_favorites', JSON.stringify(next));
-      return next;
-    });
+
+  // Carrega favoritos do Supabase ao autenticar (sobrescreve localStorage)
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    supabase.from('user_favorites').select('type, item_id, item_name').eq('user_id', session.user.id)
+      .then(({ data }) => {
+        if (!data) return;
+        const favs = data.map((r: any) => ({ type: r.type as 'list' | 'folder' | 'space', id: r.item_id, name: r.item_name }));
+        setFavorites(favs);
+        localStorage.setItem('vp_favorites', JSON.stringify(favs));
+      });
+  }, [session?.user?.id]);
+
+  const toggleFavorite = async (type: 'list' | 'folder' | 'space', id: string, name: string) => {
+    const exists = favorites.some(f => f.type === type && f.id === id);
+    const next = exists
+      ? favorites.filter(f => !(f.type === type && f.id === id))
+      : [...favorites, { type, id, name }];
+    setFavorites(next);
+    localStorage.setItem('vp_favorites', JSON.stringify(next));
+    if (!session?.user?.id) return;
+    if (exists) {
+      await supabase.from('user_favorites').delete().eq('user_id', session.user.id).eq('type', type).eq('item_id', id);
+    } else {
+      await supabase.from('user_favorites').upsert({ user_id: session.user.id, type, item_id: id, item_name: name }, { onConflict: 'user_id,type,item_id' });
+    }
   };
 
   // Filter Tasks based on Hierarchy + Search + Filters (for List/Kanban)
@@ -2908,6 +3039,9 @@ export default function App() {
             saveAttachment={saveTaskAttachment}
             removeAttachment={removeTaskAttachment}
             saveComment={saveTaskComment}
+            editComment={editTaskComment}
+            deleteComment={deleteTaskComment}
+            toggleWatcher={toggleWatcher}
             saveExtensionLog={saveExtensionLog}
             saveTaskActivity={saveTaskActivity}
             uploadFile={uploadFile}
@@ -6628,6 +6762,9 @@ function TaskDetailModal(props: any) {
     saveAttachment,
     removeAttachment: removeTaskAttachment,
     saveComment,
+    editComment,
+    deleteComment,
+    toggleWatcher,
     saveExtensionLog,
     saveTaskActivity,
     uploadFile,
@@ -7434,15 +7571,50 @@ function TaskDetailModal(props: any) {
                 />
               )}
               {detailActiveTab === 'watchers' && (
-                <div className="space-y-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-bold text-gray-900">Observadores</h3>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    {(task.watchers || []).length === 0 && (
-                      <p className="col-span-2 text-center py-8 text-sm text-gray-400 font-medium italic">Nenhum observador definido.</p>
-                    )}
-                  </div>
+                <div className="space-y-4">
+                  {(() => {
+                    const amWatching = (task.watcherIds || []).includes(currentUser.id);
+                    return (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-sm font-bold text-gray-900">Observadores</h3>
+                          <button
+                            onClick={() => toggleWatcher(task.id, amWatching)}
+                            className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-all ${
+                              amWatching
+                                ? 'bg-orange-100 text-orange-600 hover:bg-orange-200'
+                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            }`}
+                          >
+                            {amWatching ? '✓ Observando' : '+ Observar'}
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-gray-400">Observadores recebem notificações de comentários e mudanças nesta tarefa.</p>
+                        {(task.watcherIds || []).length === 0 ? (
+                          <p className="text-center py-8 text-sm text-gray-400 italic">Nenhum observador ainda.</p>
+                        ) : (
+                          <div className="space-y-2">
+                            {(task.watcherIds || []).map((uid: string) => {
+                              const watcher = users.find((u: any) => u.id === uid);
+                              if (!watcher) return null;
+                              return (
+                                <div key={uid} className="flex items-center gap-3 p-2 rounded-xl hover:bg-gray-50">
+                                  <img src={watcher.avatar} className="w-8 h-8 rounded-full" alt="" />
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-semibold text-gray-800 truncate">{watcher.name}</p>
+                                    <p className="text-[11px] text-gray-400 truncate">{watcher.email}</p>
+                                  </div>
+                                  {uid === currentUser.id && (
+                                    <button onClick={() => toggleWatcher(task.id, true)} className="text-[10px] text-red-400 hover:text-red-600 font-semibold">Sair</button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -7476,19 +7648,19 @@ function TaskDetailModal(props: any) {
                   }
 
                   if (item.unifiedType === 'COMMENT') {
+                    const isOwn = item.userId === currentUser.id;
                     return (
-                      <div key={item.id} className="relative">
-                        <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
-                          <img src={users.find((u: any) => u.id === item.userId)?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
-                        </div>
-                        <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs font-bold text-gray-900">{users.find((u: any) => u.id === item.userId)?.name}</span>
-                            <span className="text-[10px] text-gray-300">{formatDate(item.date)}</span>
-                          </div>
-                          <p className="text-sm text-gray-600 leading-relaxed"><MentionText text={item.text} users={users || []} teams={teams} /></p>
-                        </div>
-                      </div>
+                      <CommentItem
+                        key={item.id}
+                        item={item}
+                        users={users}
+                        teams={teams}
+                        isOwn={isOwn}
+                        taskId={task.id}
+                        onEdit={editComment}
+                        onDelete={deleteComment}
+                        formatDate={formatDate}
+                      />
                     );
                   }
 

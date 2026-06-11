@@ -103,6 +103,7 @@ export interface Comment {
   userId: string;
   text: string;
   timestamp: string;
+  updatedAt?: string;
 }
 
 export interface Attachment {
@@ -146,6 +147,7 @@ export interface Task {
   createdAt?: string;
   dependencies?: TaskDependency[];
   tags?: string[];
+  watcherIds?: string[];
 }
 
 // ── Equipes (grupos de usuários, estilo ClickUp Teams) ───
