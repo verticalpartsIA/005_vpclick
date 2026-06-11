@@ -7,16 +7,23 @@ interface AIMessage {
 }
 
 interface AIPanelProps {
-  /** Contexto textual da tarefa (título, descrição, status, comentários...) */
-  context: string;
+  /** Contexto textual da tarefa aberta (omitir no modo global/workspace) */
+  context?: string;
   onClose: () => void;
 }
 
-const QUICK_ACTIONS: { label: string; prompt: string }[] = [
+const TASK_ACTIONS: { label: string; prompt: string }[] = [
   { label: '📋 Resumir tarefa', prompt: 'Resuma a situação atual desta tarefa em até 5 linhas, destacando prazo, responsável e pendências.' },
   { label: '💬 Resumir comentários', prompt: 'Resuma a discussão dos comentários desta tarefa: decisões tomadas, pendências e quem está com a bola.' },
   { label: '✅ Sugerir subtarefas', prompt: 'Sugira de 3 a 7 subtarefas práticas para concluir esta tarefa, uma por linha começando com "- ".' },
   { label: '✍️ Melhorar descrição', prompt: 'Reescreva a descrição desta tarefa de forma clara e completa, pronta para colar no campo de descrição.' },
+];
+
+const WORKSPACE_ACTIONS: { label: string; prompt: string }[] = [
+  { label: '🩻 Visão geral (Raio-X)', prompt: 'Me dê uma visão geral do andamento das tarefas: totais, concluídas, em andamento, atrasadas e prorrogadas. Destaque o que merece atenção.' },
+  { label: '⏰ Tarefas atrasadas', prompt: 'Quais tarefas estão atrasadas, de quem são e há quanto tempo venceram? Ordene da mais crítica para a menos crítica.' },
+  { label: '🔁 Prorrogadas', prompt: 'Quais tarefas já foram prorrogadas e quantas vezes? Quem são os responsáveis?' },
+  { label: '👤 Desempenho por pessoa', prompt: 'Monte um resumo de desempenho por pessoa: quantas tarefas cada um tem, quantas concluiu e quantas estão atrasadas.' },
 ];
 
 export function AIPanel({ context, onClose }: AIPanelProps) {
@@ -55,7 +62,7 @@ export function AIPanel({ context, onClose }: AIPanelProps) {
   const copy = (text: string) => navigator.clipboard.writeText(text);
 
   return (
-    <div className="absolute inset-y-0 right-0 w-[420px] bg-white border-l shadow-2xl z-20 flex flex-col animate-in slide-in-from-right duration-200">
+    <div onClick={(e) => e.stopPropagation()} className="absolute inset-y-0 right-0 w-[420px] max-w-full bg-white border-l shadow-2xl z-20 flex flex-col animate-in slide-in-from-right duration-200">
       <div className="px-5 py-4 border-b flex items-center justify-between bg-gradient-to-r from-purple-50 to-white shrink-0">
         <div className="flex items-center gap-2">
           <span className="text-lg">✨</span>
@@ -69,8 +76,12 @@ export function AIPanel({ context, onClose }: AIPanelProps) {
       <div ref={scrollRef} className="flex-1 overflow-y-auto custom-scrollbar p-5 space-y-4">
         {messages.length === 0 && (
           <div className="space-y-3">
-            <p className="text-xs text-gray-400 font-medium">A IA conhece o contexto desta tarefa. Comece com uma ação rápida ou pergunte algo:</p>
-            {QUICK_ACTIONS.map((a) => (
+            <p className="text-xs text-gray-400 font-medium">
+              {context
+                ? 'A IA conhece o contexto desta tarefa e pode consultar todas as tarefas do sistema (modo Raio-X). Comece com uma ação rápida ou pergunte algo:'
+                : 'Modo Raio-X: a IA consulta as tarefas do sistema em tempo real. Pergunte coisas como "O José já iniciou a tarefa X?" ou use uma ação rápida:'}
+            </p>
+            {(context ? TASK_ACTIONS : WORKSPACE_ACTIONS).map((a) => (
               <button
                 key={a.label}
                 onClick={() => ask(a.prompt)}
@@ -125,7 +136,7 @@ export function AIPanel({ context, onClose }: AIPanelProps) {
               }
             }}
             rows={2}
-            placeholder="Pergunte algo sobre esta tarefa..."
+            placeholder={context ? 'Pergunte algo sobre esta tarefa...' : 'Ex: O Marcus já iniciou a proposta da ACME?'}
             className="flex-1 px-3 py-2 text-sm border rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-purple-300"
           />
           <button

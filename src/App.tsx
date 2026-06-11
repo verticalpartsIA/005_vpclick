@@ -691,6 +691,7 @@ export default function App() {
 
   // User Menu State
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [showGlobalAI, setShowGlobalAI] = useState(false);
   const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState(false);
 
   // Admin - carregado do Supabase
@@ -2463,6 +2464,18 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-4 relative">
+              <button
+                onClick={() => setShowGlobalAI(true)}
+                title="IA do VP Click — modo Raio-X"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-purple-600 hover:bg-purple-50 font-bold text-sm rounded-lg transition-colors"
+              >
+                ✨ <span className="hidden md:inline">IA</span>
+              </button>
+              {showGlobalAI && (
+                <div className="fixed inset-0 z-[95] bg-black/20" onClick={() => setShowGlobalAI(false)}>
+                  <AIPanel onClose={() => setShowGlobalAI(false)} />
+                </div>
+              )}
               <NotificationBell
                 currentUser={currentUser}
                 users={adminUsers}
