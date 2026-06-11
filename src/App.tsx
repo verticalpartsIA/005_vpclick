@@ -3660,6 +3660,34 @@ function Sidebar({
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
   const [secEspacosOpen, setSecEspacosOpen] = useState(true);
 
+  // Largura redimensionável da sidebar (arrastar borda direita; duplo clique restaura)
+  const SIDEBAR_DEFAULT_W = 240;
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('vp_sidebar_width'));
+    return saved >= 200 && saved <= 520 ? saved : SIDEBAR_DEFAULT_W;
+  });
+  const startSidebarResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    let lastW = startW;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    const onMove = (ev: MouseEvent) => {
+      lastW = Math.min(520, Math.max(200, startW + ev.clientX - startX));
+      setSidebarWidth(lastW);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      localStorage.setItem('vp_sidebar_width', String(lastW));
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
+
   // Drag-and-drop state
   const [dragItem, setDragItem] = useState<{ type: 'list' | 'folder'; id: string } | null>(null);
   const [dropTarget, setDropTarget] = useState<{ type: 'folder' | 'space'; id: string } | null>(null);
@@ -3761,7 +3789,17 @@ function Sidebar({
 
       {/* ══ EXPANDED PANEL (colapsável) ══ */}
       {!isCollapsed && (
-        <div className="w-60 flex flex-col bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
+        <div style={{ width: sidebarWidth }} className="relative shrink-0 flex flex-col bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
+          {/* Alça de redimensionamento (segurar e arrastar; duplo clique restaura) */}
+          <div
+            onMouseDown={startSidebarResize}
+            onDoubleClick={() => {
+              setSidebarWidth(SIDEBAR_DEFAULT_W);
+              localStorage.setItem('vp_sidebar_width', String(SIDEBAR_DEFAULT_W));
+            }}
+            title="Arraste para redimensionar · duplo clique restaura"
+            className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize z-20 hover:bg-orange-400/50 active:bg-orange-500/60 transition-colors"
+          />
 
           {/* Header */}
           <div className="flex items-center gap-1 px-2 py-2 border-b border-sidebar-border">
