@@ -127,6 +127,7 @@ A lista de usuários exibia todos os controles de acesso expandidos para todos o
 | `338bb9a` | Bugfix + redesign: `CreateListModal` com sticky footer, auto-select grupo, `isSubmitting` |
 | `28ba327` | Docs: criação do relatório `.Claude/2026_05_26_relatorio.md` + push para GitHub |
 | `e2f041d` | Feat: drag-and-drop sidebar (listas/pastas entre espaços) + migração de tarefas |
+| `686828d` | Feat: 4 melhorias ClickUp — Space Overview, badges, favoritos, command palette |
 
 ---
 
@@ -154,7 +155,60 @@ A lista de usuários exibia todos os controles de acesso expandidos para todos o
 | Spaces nativos (is_system) | ✅ Não deletáveis |
 | Integração VP Click Hub | ✅ Edge Function + triggers nos 3 projetos externos |
 | Automações VP REQUISICOES | ✅ 4 automações ativas |
+| **Space Overview (ClickUp)** | ✅ Dashboard por Espaço com Pastas, Listas, Progresso Geral |
+| **Badge numérico nas listas** | ✅ Tarefas abertas ao lado do nome da lista na sidebar |
+| **Favoritos (localStorage)** | ✅ ★ nas listas/pastas, seção Favoritos na sidebar |
+| **Command Palette Ctrl+K** | ✅ Busca Espaços + Listas + Tarefas com contexto |
+
+---
+
+## Sessão 06/06/2026 — Análise de discrepâncias VP Click vs ClickUp
+
+**Referência:** Engenharia reversa do ClickUp (conta `cadastroswebapp@gmail.com`) salva em:
+`C:\Users\gelso\Projetos_Sites\09_VP_CLICK\_estudo_clickup\2ª Investigação\estrutura.md`
+
+### Funcionalidades implementadas nesta sessão
+
+#### 1. Space Overview (commit `686828d`)
+- Ao clicar em um Espaço na sidebar, o VP Click agora exibe um **dashboard de overview** em vez de ir direto para a lista de tarefas
+- Idêntico ao comportamento do ClickUp
+- **Widgets:** Progresso Geral (barra + contadores), Pastas (com progresso %), Listas (barras individuais X/Y), Resumo (3 KPIs)
+- **Aba "Overview"** exclusiva no view bar quando o scope é um Espaço
+- Implementado no componente `SpaceOverview` em `src/App.tsx`
+
+#### 2. Badge numérico nas listas da sidebar
+- Contador de tarefas **em aberto** ao lado do nome de cada lista na sidebar
+- Idêntico ao ClickUp: número sempre visível, some no hover (para não cobrir os botões de ação)
+- Lógica: tasks onde status NÃO inclui "conclu", "aprovado", "fechado", "done", "cancel"
+- `listTaskCounts: Map<listId, number>` calculado por `useMemo` em `App.tsx`
+
+#### 3. Favoritos funcionais (localStorage)
+- Botão ★ aparece no hover das listas e pastas da sidebar
+- Clique alterna o estado de favorito (amarelo = favoritado)
+- Favoritos persistidos em `localStorage['vp_favorites']`
+- Seção "FAVORITOS" na sidebar mostra os itens salvos com navegação direta
+- Menu dropdown das listas/pastas também inclui opção de favoritar/desfavoritar
+
+#### 4. Command Palette aprimorado (Ctrl+K)
+- **Antes:** Mostrava apenas 10 tarefas sem filtro, apenas navegação de views
+- **Agora:** Busca por texto em Espaços, Listas e Tarefas com auto-filtro do `cmdk`
+- Contexto exibido (pasta/espaço onde cada item está)
+- Atalhos de ação visíveis ("Ctrl+N" para nova tarefa)
+- Seções: Espaços, Listas, Ações, Tarefas
+
+### Discrepâncias restantes (roadmap futuro)
+
+| Feature | Prioridade | Complexidade |
+|---------|------------|--------------|
+| Lista direto no Space (sem Folder obrigatório) | Alta | Arquitetural |
+| Inbox persistente de notificações (4 abas) | Alta | Média |
+| Seção "Todas as tarefas" global | Média | Baixa |
+| Equipes / Workload | Baixa | Alta |
+| Metas / OKRs | Baixa | Alta |
+| Quadros brancos | Baixa | Alta |
+| Formulários públicos | Baixa | Média |
 
 ---
 
 *Relatório atualizado após conclusão e validação de build (`npm run build` sem erros).*
+*Última atualização: 06/06/2026 — commit `686828d`*

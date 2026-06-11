@@ -49,6 +49,37 @@ export const TableView: React.FC<TableViewProps> = ({
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_WIDTHS);
   const resizingRef = useRef<{ colId: string; startX: number; startWidth: number } | null>(null);
 
+  // ── Filtros e ordenação ──────────────────────────────────────────────────
+  const [filterStatus, setFilterStatus] = useState<string[]>([]);
+  const [filterPriority, setFilterPriority] = useState<string[]>([]);
+  const [sortField, setSortField] = useState<'dueDate' | 'priority' | 'title' | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [showFilterMenu, setShowFilterMenu] = useState(false);
+  const [showSortMenu, setShowSortMenu] = useState(false);
+
+  const allStatuses = useMemo(() => [...new Set(tasks.map(t => t.status).filter(Boolean))], [tasks]);
+  const PRIORITY_ORDER: Record<string, number> = { URGENTE: 0, ALTA: 1, MEDIA: 2, BAIXA: 3 };
+
+  const displayedTasks = useMemo(() => {
+    let result = tasks;
+    if (filterStatus.length > 0) result = result.filter(t => filterStatus.includes(t.status));
+    if (filterPriority.length > 0) result = result.filter(t => filterPriority.includes(t.priority));
+    if (sortField === 'dueDate') result = [...result].sort((a, b) => {
+      const av = a.dueDate || '9999', bv = b.dueDate || '9999';
+      return sortDir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+    if (sortField === 'priority') result = [...result].sort((a, b) => {
+      const av = PRIORITY_ORDER[a.priority] ?? 99, bv = PRIORITY_ORDER[b.priority] ?? 99;
+      return sortDir === 'asc' ? av - bv : bv - av;
+    });
+    if (sortField === 'title') result = [...result].sort((a, b) =>
+      sortDir === 'asc' ? a.title.localeCompare(b.title) : b.title.localeCompare(a.title)
+    );
+    return result;
+  }, [tasks, filterStatus, filterPriority, sortField, sortDir]);
+
+  const activeFilterCount = filterStatus.length + filterPriority.length;
+
   const columns = useMemo(() => {
     const base = [
       { id: 'title', label: 'Nome da Tarefa' },
@@ -101,13 +132,74 @@ export const TableView: React.FC<TableViewProps> = ({
     <div className="flex flex-col h-full bg-background overflow-hidden">
       {/* Table Header Controls */}
       <div className="flex items-center justify-between p-4 border-b">
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm">
-            <Filter className="w-4 h-4 mr-2" /> Filtros
-          </Button>
-          <Button variant="outline" size="sm">
-            <ArrowUpDown className="w-4 h-4 mr-2" /> Ordenar
-          </Button>
+        <div className="flex items-center gap-2 relative">
+          {/* Filtros */}
+          <div className="relative">
+            <Button variant="outline" size="sm" onClick={() => { setShowFilterMenu(p => !p); setShowSortMenu(false); }}
+              className={activeFilterCount > 0 ? 'border-primary text-primary' : ''}>
+              <Filter className="w-4 h-4 mr-2" />
+              Filtros
+              {activeFilterCount > 0 && <span className="ml-1.5 bg-primary text-white text-[10px] font-bold rounded-full w-4 h-4 flex items-center justify-center">{activeFilterCount}</span>}
+            </Button>
+            {showFilterMenu && (
+              <div className="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-30 w-64 p-3 space-y-3">
+                <div>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">Status</p>
+                  <div className="flex flex-wrap gap-1">
+                    {allStatuses.map(s => (
+                      <button key={s} onClick={() => setFilterStatus(p => p.includes(s) ? p.filter(x => x !== s) : [...p, s])}
+                        className={`text-[11px] px-2 py-0.5 rounded-full border font-medium transition-all ${filterStatus.includes(s) ? 'bg-primary/10 border-primary text-primary' : 'border-gray-200 text-gray-500 hover:border-gray-300'}`}>
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">Prioridade</p>
+                  <div className="flex flex-wrap gap-1">
+                    {['URGENTE', 'ALTA', 'MEDIA', 'BAIXA'].map(p => (
+                      <button key={p} onClick={() => setFilterPriority(prev => prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p])}
+                        className={`text-[11px] px-2 py-0.5 rounded-full border font-medium transition-all ${filterPriority.includes(p) ? 'bg-primary/10 border-primary text-primary' : 'border-gray-200 text-gray-500 hover:border-gray-300'}`}>
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {activeFilterCount > 0 && (
+                  <button onClick={() => { setFilterStatus([]); setFilterPriority([]); }} className="text-[11px] text-red-400 hover:text-red-600 font-semibold w-full text-right">Limpar filtros</button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Ordenar */}
+          <div className="relative">
+            <Button variant="outline" size="sm" onClick={() => { setShowSortMenu(p => !p); setShowFilterMenu(false); }}
+              className={sortField ? 'border-primary text-primary' : ''}>
+              <ArrowUpDown className="w-4 h-4 mr-2" /> Ordenar
+              {sortField && <span className="ml-1.5 text-[10px] font-semibold opacity-70">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+            </Button>
+            {showSortMenu && (
+              <div className="absolute top-full left-0 mt-1 bg-white border rounded-xl shadow-lg z-30 w-48 py-1">
+                {([['title', 'Nome'], ['dueDate', 'Prazo'], ['priority', 'Prioridade']] as const).map(([field, label]) => (
+                  <button key={field} onClick={() => {
+                    if (sortField === field) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+                    else { setSortField(field); setSortDir('asc'); }
+                    setShowSortMenu(false);
+                  }} className={`w-full text-left px-4 py-2 text-sm hover:bg-gray-50 flex items-center justify-between ${sortField === field ? 'font-bold text-primary' : 'text-gray-700'}`}>
+                    {label}
+                    {sortField === field && <span>{sortDir === 'asc' ? '↑' : '↓'}</span>}
+                  </button>
+                ))}
+                {sortField && <button onClick={() => { setSortField(null); setShowSortMenu(false); }} className="w-full text-left px-4 py-2 text-[11px] text-red-400 hover:text-red-600 font-semibold">Remover ordenação</button>}
+              </div>
+            )}
+          </div>
+
+          {/* Clique fora fecha os menus */}
+          {(showFilterMenu || showSortMenu) && (
+            <div className="fixed inset-0 z-20" onClick={() => { setShowFilterMenu(false); setShowSortMenu(false); }} />
+          )}
         </div>
         <div className="flex items-center gap-2">
           <DropdownMenu>
@@ -165,7 +257,7 @@ export const TableView: React.FC<TableViewProps> = ({
             </tr>
           </thead>
           <tbody>
-            {tasks.map((task, rowIndex) => (
+            {displayedTasks.map((task, rowIndex) => (
               <tr
                 key={task.id}
                 className="group hover:bg-muted/30 transition-colors cursor-pointer"

@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag } from "lucide-react";
+import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
-  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag
+  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -20,6 +20,11 @@ import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChar
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { TaskDependencies } from './components/TaskDependencies';
+import { NotificationBell } from './components/NotificationBell';
+import { TeamsModal } from './components/TeamsModal';
+import { MentionTextarea } from './components/MentionTextarea';
+import { AIPanel } from './components/AIPanel';
+import { MentionText, notifyMentions, notifyAssignment } from './lib/mentions';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
@@ -53,6 +58,17 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+import { Checkbox } from "@/components/ui/checkbox";
+
 // --- SSO CONFIGURATION ---
 const CENTRAL_URL = "https://ubdkoqxfwcraftesgmbw.supabase.co";
 const CENTRAL_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViZGtvcXhmd2NyYWZ0ZXNnbWJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUwNjUwMjcsImV4cCI6MjA5MDY0MTAyN30.s1A15nFQVne94gbz0511L2IYvHdTcgYeL0H8YU80iI8";
@@ -70,6 +86,21 @@ interface NavigationScope {
   id: string | null;
   name: string;
 }
+
+interface DuplicateTaskOptions {
+  title: string;
+  listId: string;
+  includeDescription: boolean;
+  includeAssignees: boolean;
+  includeDates: boolean;
+  includePriority: boolean;
+  includeSubtasks: boolean;
+  includeChecklists: boolean;
+  includeTags: boolean;
+  includeCustomFields: boolean;
+}
+
+type DuplicateTaskBooleanOption = Exclude<keyof DuplicateTaskOptions, 'title' | 'listId'>;
 
 // --- Theme presets (HSL tokens) ---
 type ThemePresetId = "claro" | "grafite" | "oceano" | "floresta" | "ameixa";
@@ -181,6 +212,73 @@ const THEME_PRESETS: Record<ThemePresetId, { label: string; vars: Record<string,
   },
 };
 
+// ── CommentItem: comentário com edição/exclusão inline ────────────────────
+function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, formatDate }: {
+  item: any;
+  users: any[];
+  teams: any[];
+  isOwn: boolean;
+  taskId: string;
+  onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
+  onDelete: (taskId: string, commentId: string) => Promise<void>;
+  formatDate: (d: string) => string;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [editText, setEditText] = React.useState(item.text);
+  const [saving, setSaving] = React.useState(false);
+  const author = users.find((u: any) => u.id === item.userId);
+
+  const handleSave = async () => {
+    if (!editText.trim() || editText === item.text) { setEditing(false); return; }
+    setSaving(true);
+    await onEdit(taskId, item.id, editText.trim());
+    setSaving(false);
+    setEditing(false);
+  };
+
+  return (
+    <div className="relative group/comment">
+      <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
+        <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
+      </div>
+      <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-bold text-gray-900">{author?.name}</span>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-gray-300">{formatDate(item.date)}{item.updatedAt ? ' · editado' : ''}</span>
+            {isOwn && !editing && (
+              <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                <button onClick={() => { setEditText(item.text); setEditing(true); }} className="text-[10px] text-gray-400 hover:text-blue-500 font-semibold px-1.5 py-0.5 rounded hover:bg-blue-50 transition-all">Editar</button>
+                <button onClick={() => onDelete(taskId, item.id)} className="text-[10px] text-gray-400 hover:text-red-500 font-semibold px-1.5 py-0.5 rounded hover:bg-red-50 transition-all">Excluir</button>
+              </div>
+            )}
+          </div>
+        </div>
+        {editing ? (
+          <div className="space-y-2">
+            <textarea
+              value={editText}
+              onChange={e => setEditText(e.target.value)}
+              className="w-full text-sm p-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white"
+              rows={3}
+              autoFocus
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === 'Escape') setEditing(false); }}
+            />
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setEditing(false)} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
+              <button onClick={handleSave} disabled={saving || !editText.trim()} className="text-xs bg-orange-500 text-white font-bold px-3 py-1 rounded-lg hover:brightness-110 disabled:opacity-50">{saving ? '...' : 'Salvar'}</button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-gray-600 leading-relaxed">
+            <MentionText text={item.text} users={users || []} teams={teams} />
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // --- Global Context Mock-up ---
 const FALLBACK_USER: User = {
   id: 'loading',
@@ -211,6 +309,36 @@ export default function App() {
 
       console.log("SSO: Usuário central validado:", centralUser.email);
 
+      // Busca o perfil completo na porta de entrada (vpsistema) com o token do
+      // próprio usuário — é de lá que herdamos nome, avatar e nível.
+      let centralProfile: { name?: string; avatar_url?: string; level?: string } | null = null;
+      try {
+        const centralAsUser = createClient(CENTRAL_URL, CENTRAL_ANON, {
+          global: { headers: { Authorization: `Bearer ${token}` } },
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const { data } = await centralAsUser
+          .from('profiles')
+          .select('name, avatar_url, level')
+          .eq('id', centralUser.id)
+          .maybeSingle();
+        centralProfile = data;
+      } catch (profileErr) {
+        console.warn('SSO: não foi possível ler o perfil do vpsistema, usando metadados do Auth.', profileErr);
+      }
+
+      const centralName = centralProfile?.name
+        || centralUser.user_metadata?.name
+        || centralUser.email?.split('@')[0]
+        || 'Usuário';
+      const centralAvatar = centralProfile?.avatar_url || centralUser.user_metadata?.avatar || null;
+      const centralLevel = centralProfile?.level || centralUser.user_metadata?.level;
+      const mappedRole = centralLevel === 'Administrador'
+        ? UserRole.ADMIN
+        : (centralLevel === 'Lider' || centralLevel === 'Gestor')
+          ? UserRole.GESTOR
+          : UserRole.COLABORADOR;
+
       const { data: users, error: userError } = await supabaseAdmin
         .from('profiles')
         .select('*')
@@ -223,13 +351,38 @@ export default function App() {
         const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
           email: centralUser.email!,
           email_confirm: true,
-          user_metadata: { name: centralUser.user_metadata?.name || centralUser.email?.split('@')[0] }
+          user_metadata: { name: centralName, avatar: centralAvatar, role: mappedRole }
         });
 
-        if (createError) throw createError;
-        targetUserId = newUser.user?.id;
+        if (createError) {
+          // Usuário já existe no Auth mas sem perfil — recupera o id pelo email
+          const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+          const existingAuthUser = list?.users?.find((u: any) => u.email === centralUser.email);
+          if (!existingAuthUser) throw createError;
+          targetUserId = existingAuthUser.id;
+        } else {
+          targetUserId = newUser.user?.id;
+        }
+
+        // Cria o perfil já herdando a identidade do vpsistema; o papel inicial
+        // vem do nível de lá e pode ser ajustado depois no painel do VPClick.
+        const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
+          id: targetUserId,
+          name: centralName,
+          email: centralUser.email,
+          avatar: centralAvatar || `https://picsum.photos/seed/${targetUserId}/100`,
+          role: mappedRole,
+          is_active: true,
+        }, { onConflict: 'id' });
+        if (profileError) console.error('SSO: erro ao criar perfil herdado:', profileError);
       } else {
         targetUserId = users[0].id;
+        // Identidade (nome/avatar) segue sincronizada com a porta de entrada;
+        // papel e acessos continuam sendo configurados dentro do VPClick.
+        const identity: Record<string, string> = { name: centralName };
+        if (centralAvatar) identity.avatar = centralAvatar;
+        const { error: syncError } = await supabaseAdmin.from('profiles').update(identity).eq('id', targetUserId);
+        if (syncError) console.error('SSO: erro ao sincronizar identidade:', syncError);
       }
 
       const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
@@ -288,8 +441,18 @@ export default function App() {
         .getPublicUrl(data.path);
 
       return publicUrl;
-    } catch (err) {
+    } catch (err: any) {
       console.error('Erro no upload:', err);
+      const msg: string = err?.message || '';
+      if (msg.includes('Bucket not found')) {
+        toast.error(`Falha no upload: o bucket "${bucket}" não existe no Storage. Avise o administrador (migration 08).`);
+      } else if (msg.includes('row-level security') || msg.includes('violates') || err?.statusCode === '403' || err?.status === 403) {
+        toast.error('Falha no upload: sem permissão no Storage. Avise o administrador (políticas do bucket).');
+      } else if (msg.includes('exceeded') || msg.includes('too large') || err?.statusCode === '413') {
+        toast.error('Falha no upload: arquivo muito grande para o limite do bucket.');
+      } else {
+        toast.error(`Falha no upload do arquivo${msg ? `: ${msg}` : '.'}`);
+      }
       return null;
     }
   }, []);
@@ -376,6 +539,47 @@ export default function App() {
       return true;
     }
     return false;
+  }, [currentUser]);
+
+  const editTaskComment = useCallback(async (taskId: string, commentId: string, newText: string) => {
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from('task_comments')
+      .update({ text: newText, updated_at: now })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao editar comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).map(c => c.id === commentId ? { ...c, text: newText, updatedAt: now } : c),
+    }));
+  }, []);
+
+  const deleteTaskComment = useCallback(async (taskId: string, commentId: string) => {
+    const { error } = await supabase
+      .from('task_comments')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao excluir comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).filter(c => c.id !== commentId),
+    }));
+    toast.success('Comentário excluído.');
+  }, []);
+
+  // isWatching vem do call site para evitar referência circular com tasks
+  const toggleWatcher = useCallback(async (taskId: string, isWatching: boolean) => {
+    if (!currentUser || currentUser.id === 'loading') return;
+    if (isWatching) {
+      const { error } = await supabase.from('task_watchers').delete().eq('task_id', taskId).eq('user_id', currentUser.id);
+      if (error) { toast.error('Erro ao parar de observar.'); return; }
+      setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: (t.watcherIds || []).filter(id => id !== currentUser.id) }));
+    } else {
+      const { error } = await supabase.from('task_watchers').insert({ task_id: taskId, user_id: currentUser.id });
+      if (error) { toast.error('Erro ao observar tarefa.'); return; }
+      setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: [...(t.watcherIds || []), currentUser.id] }));
+      toast.success('Você está observando esta tarefa.');
+    }
   }, [currentUser]);
 
   const saveTaskActivity = useCallback(async (taskId: string, type: string, oldValue?: string, newValue?: string) => {
@@ -594,6 +798,8 @@ export default function App() {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [workspaceTags, setWorkspaceTags] = useState<WorkspaceTag[]>([]);
   const [filterTags, setFilterTags] = useState<string[]>([]);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
 
   useEffect(() => {
     // localStorage.removeItem("vp_docs"); // Clean up old mock data if needed
@@ -646,6 +852,8 @@ export default function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [isSharedTaskView, setIsSharedTaskView] = useState(false);
   const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
+  const [taskToDuplicate, setTaskToDuplicate] = useState<Task | null>(null);
+  const [isDuplicatingTask, setIsDuplicatingTask] = useState(false);
 
   // New State for Creation Modals
   const [isSpaceModalOpen, setIsSpaceModalOpen] = useState(false);
@@ -656,11 +864,17 @@ export default function App() {
 
   // User Menu State
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [showGlobalAI, setShowGlobalAI] = useState(false);
   const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState(false);
 
   // Admin - carregado do Supabase
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [userAccess, setUserAccess] = useState<Record<string, { spaceIds: string[]; folderIds: string[] }>>({});
+
+  // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
+  const [dashboardTasks, setDashboardTasks] = useState<Task[]>([]);
+  const [dashboardLists, setDashboardLists] = useState<{ id: string; name: string }[]>([]);
+  const [isDashboardLoading, setIsDashboardLoading] = useState(false);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -788,6 +1002,19 @@ export default function App() {
         setUserAccess(nextAccess);
       }
 
+      // Carregar Equipes e membros
+      const { data: teamsData } = await supabase.from('teams').select('*').order('name');
+      const { data: teamMembersData } = await supabase.from('team_members').select('*');
+      if (teamsData) {
+        setTeams(teamsData.map((t: any) => ({
+          id: t.id,
+          name: t.name,
+          description: t.description || '',
+          color: t.color || '#8b5cf6',
+          memberIds: (teamMembersData || []).filter((m: any) => m.team_id === t.id).map((m: any) => m.user_id),
+        })));
+      }
+
       // Carregar Status Groups e Options
       const { data: groupsData } = await supabase.from('task_status_groups').select('*');
       const { data: optionsData } = await supabase.from('task_status_options').select('*').order('order_index');
@@ -813,16 +1040,21 @@ export default function App() {
   }, []);
 
   const loadAllUsers = useCallback(async () => {
-    const { data } = await supabase.from('profiles').select('*');
+    const { data } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('is_active', true);           // exclui usuários inativados
     if (data && data.length > 0) {
-      const users: User[] = data.map((d: any) => ({
-        id: d.id,
-        name: d.name,
-        email: d.email,
-        avatar: d.avatar || `https://picsum.photos/seed/${d.id}/100`,
-        role: d.role as UserRole,
-        theme: d.theme,
-      }));
+      const users: User[] = data
+        .filter((d: any) => !d.email?.includes('@vpclick.test')) // exclui contas CI/teste
+        .map((d: any) => ({
+          id: d.id,
+          name: d.name,
+          email: d.email,
+          avatar: d.avatar || `https://picsum.photos/seed/${d.id}/100`,
+          role: d.role as UserRole,
+          theme: d.theme,
+        }));
 
       // Ensure the logged-in user is always in the list even if they have no profile
       if (currentUser.id !== 'loading' && !users.some(u => u.id === currentUser.id)) {
@@ -931,16 +1163,18 @@ export default function App() {
       // Fetch sub-entities in parallel
       const results = await Promise.all([
         supabaseAdmin.from('task_attachments').select('*').in('task_id', taskIds),
-        supabaseAdmin.from('task_comments').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_comments').select('*').in('task_id', taskIds).is('deleted_at', null),
         supabaseAdmin.from('task_extension_logs').select('*').in('task_id', taskIds),
         supabaseAdmin.from('task_checklists').select('*').in('task_id', taskIds),
         supabaseAdmin.from('task_activities').select('*').in('task_id', taskIds),
+        supabaseAdmin.from('task_watchers').select('task_id, user_id').in('task_id', taskIds),
       ]);
       const attData = results[0].data;
       const commData = results[1].data;
       const logData = results[2].data;
       const checkData = results[3].data;
       const actData = results[4].data;
+      const watchData = results[5].data;
 
       setTasks(data.map((d: any) => {
         const tAttachments = (attData || []).filter((a: any) => a.task_id === d.id).map((a: any) => ({
@@ -956,7 +1190,8 @@ export default function App() {
           id: c.id,
           userId: c.user_id,
           text: c.text,
-          timestamp: c.created_at
+          timestamp: c.created_at,
+          updatedAt: c.updated_at || undefined,
         }));
 
         const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
@@ -1003,7 +1238,9 @@ export default function App() {
           listId: d.list_id,
           projectId: d.project_id,
           parentId: d.parent_id,
-          createdAt: d.created_at
+          createdAt: d.created_at,
+          tags: d.tags || [],
+          watcherIds: (watchData || []).filter((w: any) => w.task_id === d.id).map((w: any) => w.user_id),
         };
       }));
     }
@@ -1013,7 +1250,86 @@ export default function App() {
     loadTasks();
   }, [loadTasks]);
 
-  const updateTask = useCallback(async (updatedTask: Task) => {
+  // ── Dashboard global: carrega TODAS as tarefas sem filtro de escopo ─────────
+  const loadDashboardTasks = useCallback(async () => {
+    if (!session) return;
+    setIsDashboardLoading(true);
+    try {
+      // Paginação manual: Supabase limita 1000 linhas por request por padrão
+      let allData: any[] = [];
+      let from = 0;
+      const pageSize = 1000;
+      while (true) {
+        const { data: page, error: pageErr } = await supabaseAdmin
+          .from('tasks')
+          .select('*')
+          .range(from, from + pageSize - 1);
+        if (pageErr || !page || page.length === 0) break;
+        allData = [...allData, ...page];
+        if (page.length < pageSize) break;
+        from += pageSize;
+      }
+      const data = allData;
+      if (data.length > 0) {
+        // Atividades + listas em paralelo (evita IN com milhares de IDs)
+        const [actResult, listsResult] = await Promise.all([
+          supabaseAdmin
+            .from('task_activities')
+            .select('id,task_id,user_id,type,old_value,new_value,created_at')
+            .order('created_at', { ascending: false })
+            .limit(200),
+          supabaseAdmin.from('lists').select('id,name'),
+        ]);
+        const actData = actResult.data;
+        if (listsResult.data) setDashboardLists(listsResult.data);
+
+        const actMap = new Map<string, any[]>();
+        (actData || []).forEach((a: any) => {
+          if (!actMap.has(a.task_id)) actMap.set(a.task_id, []);
+          actMap.get(a.task_id)!.push(a);
+        });
+
+        setDashboardTasks(data.map((d: any) => ({
+          id: d.id,
+          title: d.title,
+          description: d.description || '',
+          status: d.status as string,
+          priority: d.priority as TaskPriority,
+          mainAssigneeId: d.main_assignee_id,
+          secondaryAssigneeIds: d.secondary_assignee_ids || [],
+          startDate: d.start_date,
+          dueDate: d.due_date,
+          extensionCount: d.extension_count || 0,
+          extensionHistory: [],
+          checklists: [],
+          comments: [],
+          attachments: [],
+          activities: (actMap.get(d.id) || []).map((a: any) => ({
+            id: a.id, taskId: a.task_id, userId: a.user_id,
+            type: a.type, oldValue: a.old_value, newValue: a.new_value, createdAt: a.created_at
+          })),
+          listId: d.list_id,
+          projectId: d.project_id,
+          parentId: d.parent_id,
+          createdAt: d.created_at,
+          tags: d.tags || []
+        })));
+      }
+    } catch (err) {
+      console.error('Erro ao carregar tarefas para Dashboard:', err);
+    } finally {
+      setIsDashboardLoading(false);
+    }
+  }, [session]);
+
+  // Recarrega dados do Dashboard sempre que a view muda para Dashboard
+  useEffect(() => {
+    if (activeView === 'Dashboard') {
+      loadDashboardTasks();
+    }
+  }, [activeView, loadDashboardTasks]);
+
+  const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
       const { error } = await supabase
         .from('tasks')
@@ -1035,13 +1351,16 @@ export default function App() {
 
       if (!error) {
         setTasks(prev => prev.map(t => t.id === updatedTask.id ? { ...t, ...updatedTask } : t));
+        return true;
       } else {
         console.error('Erro ao atualizar tarefa:', error);
         toast.error('Erro ao salvar tarefa: ' + error.message);
+        return false;
       }
     } catch (err) {
       console.error('Erro inesperado ao atualizar tarefa:', err);
       toast.error('Erro inesperado ao salvar tarefa.');
+      return false;
     }
   }, []);
 
@@ -1279,7 +1598,7 @@ export default function App() {
 
   const handleAdminUpdateAccess = async (userId: string, spaceIds: string[], folderIds: string[]) => {
     // Insere ou atualiza o acesso do usuário usando o padrão OnConflict
-    const { error } = await supabase
+    const saveAccess = () => supabase
       .from('user_access')
       .upsert({
         user_id: userId,
@@ -1287,6 +1606,25 @@ export default function App() {
         folder_ids: folderIds,
         updated_at: new Date().toISOString()
       }, { onConflict: 'user_id' });
+
+    let { error } = await saveAccess();
+
+    // 23503 = FK violada: o usuário existe no Auth mas ainda não tem linha em
+    // profiles (criado pelo admin e nunca logou). Cria o perfil e tenta de novo.
+    if (error?.code === '23503') {
+      const user = adminUsers.find(u => u.id === userId);
+      if (user) {
+        const { error: profileError } = await supabase.from('profiles').upsert({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          avatar: user.avatar,
+          role: user.role,
+          is_active: true,
+        }, { onConflict: 'id' });
+        if (!profileError) ({ error } = await saveAccess());
+      }
+    }
 
     if (error) {
       console.error('Erro ao atualizar acessos:', error);
@@ -1314,15 +1652,32 @@ export default function App() {
   };
 
   const handleAdminUpdateUserAvatar = async (userId: string, avatarUrl: string) => {
-    const { error } = await supabase.from('profiles').update({ avatar: avatarUrl }).eq('id', userId);
-    if (!error) {
-      setAdminUsers(prev => prev.map(u => u.id === userId ? { ...u, avatar: avatarUrl } : u));
-      if (currentUser.id === userId) {
-        setCurrentUser(prev => ({ ...prev, avatar: avatarUrl }));
-      }
-    } else {
+    const { data, error } = await supabase.from('profiles').update({ avatar: avatarUrl }).eq('id', userId).select();
+    if (error) {
       console.error('Erro ao atualizar avatar:', error);
       throw error;
+    }
+    if (!data || data.length === 0) {
+      // Nenhuma linha atualizada: o perfil ainda não existe em profiles
+      // (usuário criado pelo admin e que nunca logou). Cria já com o avatar.
+      const user = adminUsers.find(u => u.id === userId);
+      if (!user) throw new Error('Usuário não encontrado.');
+      const { error: upsertError } = await supabase.from('profiles').upsert({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatar: avatarUrl,
+        role: user.role,
+        is_active: true,
+      }, { onConflict: 'id' });
+      if (upsertError) {
+        console.error('Erro ao criar perfil com avatar:', upsertError);
+        throw upsertError;
+      }
+    }
+    setAdminUsers(prev => prev.map(u => u.id === userId ? { ...u, avatar: avatarUrl } : u));
+    if (currentUser.id === userId) {
+      setCurrentUser(prev => ({ ...prev, avatar: avatarUrl }));
     }
   };
 
@@ -1353,6 +1708,20 @@ export default function App() {
         avatar: user.avatar || `https://picsum.photos/seed/${data.user.id}/100`,
         role: (user.role as UserRole) || UserRole.COLABORADOR
       };
+      // Garante a linha em profiles na hora (FKs de user_access/teams dependem
+      // dela) em vez de esperar o trigger do Auth ou o primeiro login.
+      const { error: profileError } = await supabase.from('profiles').upsert({
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        avatar: newUser.avatar,
+        role: newUser.role,
+        is_active: true,
+      }, { onConflict: 'id' });
+      if (profileError) {
+        console.error('Erro ao criar perfil do novo usuário:', profileError);
+        toast.error('Usuário criado no Auth, mas houve erro ao criar o perfil: ' + profileError.message);
+      }
       setAdminUsers(prev => [newUser, ...prev]);
       setUserAccess(prev => ({ ...prev, [newUser.id]: { spaceIds: [], folderIds: [] } }));
       return newUser;
@@ -1427,7 +1796,21 @@ export default function App() {
                     if (!task) return;
                     supabase.from('tasks').update({ tags: (task.tags ?? []).filter(tg => tg !== tag) }).eq('id', tid);
                   },
-                  onSendNotification: (message) => toast.info(message),
+                  onSendNotification: (message, userId) => {
+                    toast.info(message);
+                    // Grava no sino: do destinatário configurado ou do responsável da tarefa
+                    const targetId = userId || prevTask.mainAssigneeId;
+                    if (targetId) {
+                      supabase.from('notifications').insert({
+                        user_id: targetId,
+                        actor_id: currentUser.id,
+                        type: 'automation',
+                        title: `Automação: ${message}`,
+                        body: `Tarefa "${prevTask.title}"`,
+                        task_id: prevTask.id,
+                      }).then(({ error }) => { if (error) console.error('Erro ao notificar automação:', error); });
+                    }
+                  },
                   onCreateTask: (taskData) => {
                     supabase.from('tasks').insert({
                       title: taskData.title ?? 'Nova tarefa',
@@ -1794,6 +2177,226 @@ export default function App() {
     }
   };
 
+  const handleDuplicateTask = async (sourceTask: Task, options: DuplicateTaskOptions) => {
+    if (!sourceTask || isDuplicatingTask) return;
+    const title = options.title.trim();
+    if (!title) {
+      toast.error('Informe um nome para a nova tarefa.');
+      return;
+    }
+    if (!options.listId) {
+      toast.error('Selecione uma lista de destino.');
+      return;
+    }
+
+    setIsDuplicatingTask(true);
+    try {
+      const clonePayload = {
+        title,
+        description: options.includeDescription ? (sourceTask.description || '') : '',
+        status: sourceTask.status,
+        priority: options.includePriority ? sourceTask.priority : TaskPriority.MEDIA,
+        main_assignee_id: options.includeAssignees ? sourceTask.mainAssigneeId : currentUser.id,
+        secondary_assignee_ids: options.includeAssignees ? (sourceTask.secondaryAssigneeIds || []) : [],
+        start_date: options.includeDates ? (sourceTask.startDate || null) : null,
+        due_date: options.includeDates ? (sourceTask.dueDate || null) : null,
+        list_id: options.listId,
+        project_id: sourceTask.projectId || null,
+        parent_id: null,
+        extension_count: 0,
+        tags: options.includeTags ? (sourceTask.tags || []) : [],
+      };
+
+      const { data: created, error } = await supabaseAdmin
+        .from('tasks')
+        .insert(clonePayload)
+        .select()
+        .single();
+
+      if (error || !created) {
+        throw error || new Error('A tarefa duplicada não foi retornada pelo banco.');
+      }
+
+      const duplicatedTask: Task = {
+        id: created.id,
+        title: created.title,
+        description: created.description || '',
+        status: created.status,
+        priority: created.priority as TaskPriority,
+        mainAssigneeId: created.main_assignee_id,
+        secondaryAssigneeIds: created.secondary_assignee_ids || [],
+        startDate: created.start_date,
+        dueDate: created.due_date,
+        extensionCount: created.extension_count || 0,
+        extensionHistory: [],
+        checklists: [],
+        comments: [],
+        attachments: [],
+        activities: [],
+        listId: created.list_id,
+        projectId: created.project_id,
+        parentId: created.parent_id,
+        createdAt: created.created_at,
+        tags: created.tags || [],
+      };
+
+      const stateTasksToAdd: Task[] = [duplicatedTask];
+      const fieldValuesToAdd: CustomFieldValue[] = [];
+
+      if (options.includeChecklists && (sourceTask.checklists || []).length > 0) {
+        const checklistRows = sourceTask.checklists.map((item) => ({
+          task_id: duplicatedTask.id,
+          text: item.text,
+          completed: item.completed,
+        }));
+        const { data: checklistData, error: checklistError } = await supabase
+          .from('task_checklists')
+          .insert(checklistRows)
+          .select();
+
+        if (checklistError) throw checklistError;
+        duplicatedTask.checklists = (checklistData || []).map((item: any) => ({
+          id: item.id,
+          text: item.text,
+          completed: item.completed,
+        }));
+      }
+
+      if (options.includeCustomFields) {
+        const originalValues = fieldValues.filter((value) => value.entityId === sourceTask.id);
+        if (originalValues.length > 0) {
+          const customValueRows = originalValues.map((value) => ({
+            field_id: value.fieldId,
+            entity_id: duplicatedTask.id,
+            value: value.value,
+          }));
+          const { error: customValuesError } = await supabase
+            .from('custom_field_values')
+            .insert(customValueRows);
+
+          if (customValuesError) throw customValuesError;
+          fieldValuesToAdd.push(...originalValues.map((value) => ({
+            ...value,
+            entityId: duplicatedTask.id,
+          })));
+        }
+      }
+
+      if (options.includeSubtasks) {
+        const subtasks = tasks.filter((task) => task.parentId === sourceTask.id);
+        for (const subtask of subtasks) {
+          const { data: createdSubtask, error: subtaskError } = await supabaseAdmin
+            .from('tasks')
+            .insert({
+              title: subtask.title,
+              description: options.includeDescription ? (subtask.description || '') : '',
+              status: subtask.status,
+              priority: options.includePriority ? subtask.priority : TaskPriority.MEDIA,
+              main_assignee_id: options.includeAssignees ? subtask.mainAssigneeId : currentUser.id,
+              secondary_assignee_ids: options.includeAssignees ? (subtask.secondaryAssigneeIds || []) : [],
+              start_date: options.includeDates ? (subtask.startDate || null) : null,
+              due_date: options.includeDates ? (subtask.dueDate || null) : null,
+              list_id: options.listId,
+              project_id: subtask.projectId || sourceTask.projectId || null,
+              parent_id: duplicatedTask.id,
+              extension_count: 0,
+              tags: options.includeTags ? (subtask.tags || []) : [],
+            })
+            .select()
+            .single();
+
+          if (subtaskError || !createdSubtask) {
+            throw subtaskError || new Error(`Não foi possível duplicar a subtarefa "${subtask.title}".`);
+          }
+
+          const duplicatedSubtask: Task = {
+            id: createdSubtask.id,
+            title: createdSubtask.title,
+            description: createdSubtask.description || '',
+            status: createdSubtask.status,
+            priority: createdSubtask.priority as TaskPriority,
+            mainAssigneeId: createdSubtask.main_assignee_id,
+            secondaryAssigneeIds: createdSubtask.secondary_assignee_ids || [],
+            startDate: createdSubtask.start_date,
+            dueDate: createdSubtask.due_date,
+            extensionCount: createdSubtask.extension_count || 0,
+            extensionHistory: [],
+            checklists: [],
+            comments: [],
+            attachments: [],
+            activities: [],
+            listId: createdSubtask.list_id,
+            projectId: createdSubtask.project_id,
+            parentId: createdSubtask.parent_id,
+            createdAt: createdSubtask.created_at,
+            tags: createdSubtask.tags || [],
+          };
+
+          if (options.includeChecklists && (subtask.checklists || []).length > 0) {
+            const { data: subChecklistData, error: subChecklistError } = await supabase
+              .from('task_checklists')
+              .insert(subtask.checklists.map((item) => ({
+                task_id: duplicatedSubtask.id,
+                text: item.text,
+                completed: item.completed,
+              })))
+              .select();
+
+            if (subChecklistError) throw subChecklistError;
+            duplicatedSubtask.checklists = (subChecklistData || []).map((item: any) => ({
+              id: item.id,
+              text: item.text,
+              completed: item.completed,
+            }));
+          }
+
+          if (options.includeCustomFields) {
+            const subtaskValues = fieldValues.filter((value) => value.entityId === subtask.id);
+            if (subtaskValues.length > 0) {
+              const { error: subtaskValuesError } = await supabase
+                .from('custom_field_values')
+                .insert(subtaskValues.map((value) => ({
+                  field_id: value.fieldId,
+                  entity_id: duplicatedSubtask.id,
+                  value: value.value,
+                })));
+
+              if (subtaskValuesError) throw subtaskValuesError;
+              fieldValuesToAdd.push(...subtaskValues.map((value) => ({
+                ...value,
+                entityId: duplicatedSubtask.id,
+              })));
+            }
+          }
+
+          stateTasksToAdd.push(duplicatedSubtask);
+        }
+      }
+
+      await supabase.from('task_activities').insert({
+        task_id: duplicatedTask.id,
+        user_id: currentUser.id,
+        type: 'TASK_DUPLICATED',
+        old_value: sourceTask.id,
+        new_value: sourceTask.title,
+      });
+
+      setTasks(prev => [...stateTasksToAdd, ...prev]);
+      if (fieldValuesToAdd.length > 0) {
+        setFieldValues(prev => [...prev, ...fieldValuesToAdd]);
+      }
+      setTaskToDuplicate(null);
+      setSelectedTaskId(duplicatedTask.id);
+      toast.success(`Tarefa "${duplicatedTask.title}" duplicada com sucesso.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('Erro ao duplicar tarefa:', err);
+      toast.error('Erro ao duplicar tarefa: ' + message);
+    } finally {
+      setIsDuplicatingTask(false);
+    }
+  };
+
   const openFolderModal = (spaceId: string) => {
     setTargetSpaceId(spaceId);
     setIsFolderModalOpen(true);
@@ -1807,8 +2410,10 @@ export default function App() {
     // A seleção de lista na sidebar seta activeListId explicitamente.
     setActiveListId(null);
 
-    // Automatically switch to List view if navigating to a Space or Folder, unless already on Kanban
-    if (type !== 'global' && activeView === 'Dashboard') {
+    // Navegação de escopo: espaço → Space Overview (Dashboard); pasta → List; global → Dashboard
+    if (type === 'space' && activeView === 'Dashboard') {
+      // Mantém Dashboard → SpaceOverview renderiza o overview do espaço
+    } else if (type === 'folder' && activeView === 'Dashboard') {
       setActiveView('List');
     } else if (type === 'global') {
       setActiveView('Dashboard');
@@ -1857,6 +2462,65 @@ export default function App() {
     }
     return result;
   }, [tasks, activeScope, lists, folders, currentUser, userAccess]);
+
+  // ── Badge counts: tarefas abertas por lista (ClickUp-style) ──────────────
+  const listTaskCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const t of tasks) {
+      if (!t.listId) continue;
+      const s = (t.status || '').toLowerCase();
+      const isDone = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+      if (!isDone) {
+        map.set(t.listId, (map.get(t.listId) || 0) + 1);
+      }
+    }
+    return map;
+  }, [tasks]);
+
+  // ── Progress map: { done, total } por lista (Space Overview) ────────────
+  const listProgressMap = useMemo(() => {
+    const map = new Map<string, { done: number; total: number }>();
+    for (const t of tasks) {
+      if (!t.listId) continue;
+      const s = (t.status || '').toLowerCase();
+      const isDone = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+      const cur = map.get(t.listId) || { done: 0, total: 0 };
+      map.set(t.listId, { done: cur.done + (isDone ? 1 : 0), total: cur.total + 1 });
+    }
+    return map;
+  }, [tasks]);
+
+  // ── Favorites (Supabase-synced, localStorage como seed inicial) ──────────
+  const [favorites, setFavorites] = useState<{ type: 'list' | 'folder' | 'space'; id: string; name: string }[]>(() => {
+    try { return JSON.parse(localStorage.getItem('vp_favorites') || '[]'); } catch { return []; }
+  });
+
+  // Carrega favoritos do Supabase ao autenticar (sobrescreve localStorage)
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    supabase.from('user_favorites').select('type, item_id, item_name').eq('user_id', session.user.id)
+      .then(({ data }) => {
+        if (!data) return;
+        const favs = data.map((r: any) => ({ type: r.type as 'list' | 'folder' | 'space', id: r.item_id, name: r.item_name }));
+        setFavorites(favs);
+        localStorage.setItem('vp_favorites', JSON.stringify(favs));
+      });
+  }, [session?.user?.id]);
+
+  const toggleFavorite = async (type: 'list' | 'folder' | 'space', id: string, name: string) => {
+    const exists = favorites.some(f => f.type === type && f.id === id);
+    const next = exists
+      ? favorites.filter(f => !(f.type === type && f.id === id))
+      : [...favorites, { type, id, name }];
+    setFavorites(next);
+    localStorage.setItem('vp_favorites', JSON.stringify(next));
+    if (!session?.user?.id) return;
+    if (exists) {
+      await supabase.from('user_favorites').delete().eq('user_id', session.user.id).eq('type', type).eq('item_id', id);
+    } else {
+      await supabase.from('user_favorites').upsert({ user_id: session.user.id, type, item_id: id, item_name: name }, { onConflict: 'user_id,type,item_id' });
+    }
+  };
 
   // Filter Tasks based on Hierarchy + Search + Filters (for List/Kanban)
   const filteredTasks = useMemo(() => {
@@ -1970,6 +2634,10 @@ export default function App() {
           onDeleteDoc={handleDeleteDoc}
           onMoveList={handleMoveList}
           onMoveFolder={handleMoveFolder}
+          listTaskCounts={listTaskCounts}
+          listProgressMap={listProgressMap}
+          favorites={favorites}
+          onToggleFavorite={toggleFavorite}
         />
 
         {/* Main Content */}
@@ -2042,6 +2710,24 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-4 relative">
+              <button
+                onClick={() => setShowGlobalAI(true)}
+                title="IA do VP Click — modo Raio-X"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-purple-600 hover:bg-purple-50 font-bold text-sm rounded-lg transition-colors"
+              >
+                ✨ <span className="hidden md:inline">IA</span>
+              </button>
+              {showGlobalAI && (
+                <div className="fixed inset-0 z-[95] bg-black/20" onClick={() => setShowGlobalAI(false)}>
+                  <AIPanel onClose={() => setShowGlobalAI(false)} />
+                </div>
+              )}
+              <NotificationBell
+                currentUser={currentUser}
+                users={adminUsers}
+                onOpenTask={(taskId) => setSelectedTaskId(taskId)}
+              />
+
               <div className="hidden sm:flex flex-col items-end">
                 <span className="text-sm font-semibold">{currentUser.name}</span>
                 <span className="text-xs text-gray-500 uppercase tracking-wider">{currentUser.role}</span>
@@ -2073,6 +2759,14 @@ export default function App() {
                     >
                       <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                       Configurações
+                    </button>
+
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setIsTeamsModalOpen(true); setIsUserMenuOpen(false); }}
+                      className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
+                    >
+                      <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                      Equipes
                     </button>
 
                     {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
@@ -2124,12 +2818,17 @@ export default function App() {
               </div>
             ) : activeView !== 'Admin' ? (
               <>
+                {activeScope.type === 'space' && (
+                  <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Overview" />
+                )}
                 <ViewTab active={activeView === 'List'} onClick={() => setActiveView('List')} label="Lista" />
                 <ViewTab active={activeView === 'Kanban'} onClick={() => setActiveView('Kanban')} label="Kanban" />
                 <ViewTab active={activeView === 'Calendar'} onClick={() => setActiveView('Calendar')} label="Calendário" />
                 <ViewTab active={activeView === 'Gantt'} onClick={() => setActiveView('Gantt')} label="Gantt" />
                 <ViewTab active={activeView === 'Table'} onClick={() => setActiveView('Table')} label="Tabela" />
-                <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Dashboards" />
+                {activeScope.type !== 'space' && (
+                  <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Dashboards" />
+                )}
                 {activeListId && (
                   <button
                     onClick={() => { setAutomationListId(activeListId); setIsAutomationModalOpen(true); }}
@@ -2192,6 +2891,7 @@ export default function App() {
                   setIsTaskModalOpen(true);
                 }}
                 onDeleteTask={handleDeleteTask}
+                onDuplicateTask={setTaskToDuplicate}
                 lists={lists}
                 activeListId={activeListId}
                 hiddenStandardColumnKeysByList={hiddenStandardColumnKeysByList}
@@ -2230,6 +2930,7 @@ export default function App() {
                 onSelectTask={setSelectedTaskId}
                 onStatusChange={handleStatusChange}
                 onDeleteTask={handleDeleteTask}
+                onDuplicateTask={setTaskToDuplicate}
                 onCreateTask={handleCreateTask}
                 onQuickCreate={(prefill?: any) => {
                   setPrefilledTaskData(prefill || null);
@@ -2243,8 +2944,30 @@ export default function App() {
               />
             )}
             {activeView === 'Dashboard' && (
-              // We pass scopeTasks here so the Dashboard reflects the Space/Folder metrics, ignoring search query for stats
-              <DashboardView tasks={scopeTasks} users={adminUsers} statusGroups={statusGroups} activeListId={activeListId} lists={lists} />
+              activeScope.type === 'space' && activeScope.id ? (
+                <SpaceOverview
+                  space={spaces.find((s: Space) => s.id === activeScope.id)!}
+                  folders={folders.filter((f: Folder) => f.spaceId === activeScope.id)}
+                  lists={lists}
+                  listProgressMap={listProgressMap}
+                  tasks={scopeTasks}
+                  onNavigateFolder={(id: string, name: string) => handleNavigate('folder', id, name)}
+                  onNavigateList={(listId: string) => { setActiveListId(listId); setActiveView('List'); }}
+                  onCreateFolder={() => openFolderModal(activeScope.id!)}
+                />
+              ) : (
+                // Dashboard global: usa dashboardTasks (todas as tarefas, sem filtro de escopo)
+                // Fallback para scopeTasks enquanto carrega pela primeira vez
+                <DashboardView
+                  tasks={dashboardTasks.length > 0 ? dashboardTasks : scopeTasks}
+                  users={adminUsers}
+                  statusGroups={statusGroups}
+                  activeListId={activeListId}
+                  lists={lists}
+                  allLists={dashboardLists.length > 0 ? dashboardLists : lists}
+                  isLoading={isDashboardLoading && dashboardTasks.length === 0}
+                />
+              )
             )}
             {activeView === 'Calendar' && (
               <CalendarView 
@@ -2316,6 +3039,7 @@ export default function App() {
             fieldValues={fieldValues}
             onUpdateFieldValue={handleUpdateFieldValue}
             onDelete={() => handleDeleteTask(selectedTask.id)}
+            onDuplicate={() => setTaskToDuplicate(selectedTask)}
             onSelectTask={setSelectedTaskId}
             onQuickCreate={(prefill?: any) => {
               setPrefilledTaskData(prefill || null);
@@ -2325,17 +3049,30 @@ export default function App() {
             saveAttachment={saveTaskAttachment}
             removeAttachment={removeTaskAttachment}
             saveComment={saveTaskComment}
+            editComment={editTaskComment}
+            deleteComment={deleteTaskComment}
+            toggleWatcher={toggleWatcher}
             saveExtensionLog={saveExtensionLog}
             saveTaskActivity={saveTaskActivity}
             uploadFile={uploadFile}
             statusGroups={statusGroups}
             lists={lists}
             workspaceId={workspace.id}
+            teams={teams}
             onTagsChange={(taskId: string, tags: string[]) =>
               setTasks(prev => prev.map(t => t.id === taskId ? { ...t, tags } : t))
             }
           />
         )}
+
+        <TeamsModal
+          isOpen={isTeamsModalOpen}
+          onClose={() => setIsTeamsModalOpen(false)}
+          teams={teams}
+          setTeams={setTeams}
+          users={adminUsers}
+          currentUser={currentUser}
+        />
 
         {/* Create Task Modal */}
         {isTaskModalOpen && (
@@ -2357,6 +3094,19 @@ export default function App() {
             statusGroups={statusGroups}
           />
         )}
+
+        <DuplicateTaskModal
+          task={taskToDuplicate}
+          lists={lists}
+          isOpen={!!taskToDuplicate}
+          isSubmitting={isDuplicatingTask}
+          onClose={() => {
+            if (!isDuplicatingTask) setTaskToDuplicate(null);
+          }}
+          onDuplicate={(options) => {
+            if (taskToDuplicate) handleDuplicateTask(taskToDuplicate, options);
+          }}
+        />
 
         {/* Custom Fields Manager */}
         {isFieldManagerOpen && (
@@ -2449,46 +3199,86 @@ export default function App() {
         )}
       </div>
         <CommandDialog open={isCommandOpen} onOpenChange={setIsCommandOpen}>
-          <CommandInput placeholder="Digite um comando ou busque uma tarefa..." />
+          <CommandInput placeholder="Pesquisar tarefas, listas, espaços ou executar um comando..." />
           <CommandList>
             <CommandEmpty>Nenhum resultado encontrado.</CommandEmpty>
-            <CommandGroup heading="Navegação Direta">
-              <CommandItem onSelect={() => { setActiveView('List'); setIsCommandOpen(false); }}>
-                <Icons.List className="mr-2 h-4 w-4" />
-                <span>Ir para Lista</span>
+
+            {/* Espaços */}
+            <CommandGroup heading="Espaços">
+              {spaces.map((s: Space) => (
+                <CommandItem key={`space-${s.id}`} value={`espaço ${s.name}`} onSelect={() => { handleNavigate('space', s.id, s.name); setIsCommandOpen(false); }}>
+                  <div className="w-4 h-4 rounded flex items-center justify-center shrink-0 font-bold text-[9px] text-white mr-2" style={{ backgroundColor: s.color || '#6366f1' }}>{s.name.charAt(0)}</div>
+                  <span>{s.name}</span>
+                  <span className="ml-auto text-xs text-muted-foreground">Espaço</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+            <CommandSeparator />
+
+            {/* Listas */}
+            <CommandGroup heading="Listas">
+              {lists.slice(0, 20).map((l: List) => {
+                const folder = folders.find((f: Folder) => f.id === l.folderId);
+                return (
+                  <CommandItem key={`list-${l.id}`} value={`lista ${l.name} ${folder?.name || ''}`} onSelect={() => { setActiveListId(l.id); setActiveView('List'); setIsCommandOpen(false); }}>
+                    <Icons.List className="mr-2 h-4 w-4 text-muted-foreground shrink-0" />
+                    <span>{l.name}</span>
+                    {folder && <span className="ml-2 text-xs text-muted-foreground truncate">em {folder.name}</span>}
+                    <span className="ml-auto text-xs text-muted-foreground">Lista</span>
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+            <CommandSeparator />
+
+            {/* Ações rápidas */}
+            <CommandGroup heading="Ações">
+              <CommandItem value="criar nova tarefa" onSelect={() => { setIsTaskModalOpen(true); setIsCommandOpen(false); }}>
+                <Icons.Plus className="mr-2 h-4 w-4" />
+                <span>Criar Nova Tarefa</span>
+                <span className="ml-auto text-xs text-muted-foreground">Ctrl+N</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Kanban'); setIsCommandOpen(false); }}>
+              <CommandItem value="minhas tarefas" onSelect={() => { handleNavigate('global', null, 'Minhas Tarefas'); setActiveView('List'); setIsCommandOpen(false); }}>
+                <Icons.Check className="mr-2 h-4 w-4" />
+                <span>Minhas Tarefas</span>
+              </CommandItem>
+              <CommandItem value="dashboard geral" onSelect={() => { handleNavigate('global', null, 'Dashboard'); setActiveView('Dashboard'); setIsCommandOpen(false); }}>
+                <Icons.Home className="mr-2 h-4 w-4" />
+                <span>Dashboard Geral</span>
+              </CommandItem>
+              <CommandItem value="view kanban quadro" onSelect={() => { setActiveView('Kanban'); setIsCommandOpen(false); }}>
                 <Icons.Columns className="mr-2 h-4 w-4" />
                 <span>Ir para Kanban</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Gantt'); setIsCommandOpen(false); }}>
+              <CommandItem value="view gantt cronograma" onSelect={() => { setActiveView('Gantt'); setIsCommandOpen(false); }}>
                 <Icons.GanttIcon className="mr-2 h-4 w-4" />
                 <span>Ir para Gantt</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Calendar'); setIsCommandOpen(false); }}>
+              <CommandItem value="view calendario" onSelect={() => { setActiveView('Calendar'); setIsCommandOpen(false); }}>
                 <Icons.Calendar className="mr-2 h-4 w-4" />
                 <span>Ir para Calendário</span>
               </CommandItem>
-              <CommandItem onSelect={() => { setActiveView('Admin'); setIsCommandOpen(false); }}>
-                <Icons.Shield className="mr-2 h-4 w-4" />
-                <span>Configurações Admin</span>
-              </CommandItem>
-            </CommandGroup>
-            <CommandSeparator />
-            <CommandGroup heading="Ações Rápidas">
-              <CommandItem onSelect={() => { setIsTaskModalOpen(true); setIsCommandOpen(false); }}>
-                <Icons.Plus className="mr-2 h-4 w-4" />
-                <span>Criar Nova Tarefa</span>
-              </CommandItem>
-            </CommandGroup>
-            <CommandSeparator />
-            <CommandGroup heading="Tarefas Ativas">
-              {tasks.slice(0, 10).map((t: Task) => (
-                <CommandItem key={t.id} onSelect={() => { setSelectedTaskId(t.id); setIsCommandOpen(false); }}>
-                  <div className={`w-2 h-2 rounded-full mr-2 ${t.priority === TaskPriority.URGENTE ? 'bg-red-500' : 'bg-blue-400'}`} />
-                  <span>{t.title}</span>
+              {(currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.GESTOR) && (
+                <CommandItem value="admin administracao configuracoes" onSelect={() => { openAdminPanel(); setIsCommandOpen(false); }}>
+                  <Icons.Shield className="mr-2 h-4 w-4" />
+                  <span>Painel Admin</span>
                 </CommandItem>
-              ))}
+              )}
+            </CommandGroup>
+            <CommandSeparator />
+
+            {/* Tarefas */}
+            <CommandGroup heading="Tarefas">
+              {tasks.slice(0, 15).map((t: Task) => {
+                const list = lists.find((l: List) => l.id === t.listId);
+                return (
+                  <CommandItem key={`task-${t.id}`} value={`tarefa ${t.title} ${list?.name || ''}`} onSelect={() => { setSelectedTaskId(t.id); setIsCommandOpen(false); }}>
+                    <div className={`w-2 h-2 rounded-full mr-2 shrink-0 ${t.priority === TaskPriority.URGENTE ? 'bg-red-500' : t.priority === TaskPriority.ALTA ? 'bg-orange-400' : 'bg-blue-400'}`} />
+                    <span className="truncate flex-1">{t.title}</span>
+                    {list && <span className="ml-2 text-xs text-muted-foreground shrink-0">{list.name}</span>}
+                  </CommandItem>
+                );
+              })}
             </CommandGroup>
           </CommandList>
         </CommandDialog>
@@ -2514,6 +3304,191 @@ function linkifyHtml(html: string): string {
       );
     })
     .join('');
+}
+
+// ── Space Overview — dashboard do espaço (estilo ClickUp) ─────────────────
+function SpaceOverview({ space, folders, lists, listProgressMap, tasks, onNavigateFolder, onNavigateList, onCreateFolder }: {
+  space: Space;
+  folders: Folder[];
+  lists: List[];
+  listProgressMap: Map<string, { done: number; total: number }>;
+  tasks: Task[];
+  onNavigateFolder: (id: string, name: string) => void;
+  onNavigateList: (listId: string) => void;
+  onCreateFolder: () => void;
+}) {
+  if (!space) return null;
+
+  const totalTasks = tasks.length;
+  const doneTasks = tasks.filter(t => {
+    const s = (t.status || '').toLowerCase();
+    return s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+  }).length;
+  const openTasks = totalTasks - doneTasks;
+  const progressPct = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
+
+  // Recent lists (last 5 with tasks)
+  const listsWithTasks = lists
+    .filter(l => folders.some(f => f.id === l.folderId))
+    .filter(l => (listProgressMap.get(l.id)?.total || 0) > 0)
+    .slice(0, 6);
+
+  // All lists in this space (via folders)
+  const folderIds = new Set(folders.map(f => f.id));
+  const spaceLists = lists.filter(l => folderIds.has(l.folderId));
+
+  return (
+    <div className="flex-1 overflow-y-auto p-6 bg-muted">
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-6">
+        {space.icon ? (
+          (() => { const IconComponent = (Icons as any)[space.icon] || Icons.Layout; return <IconComponent className="w-8 h-8" style={{ color: space.color }} />; })()
+        ) : (
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg text-white shadow-sm" style={{ backgroundColor: space.color || '#6366f1' }}>
+            {space.name.charAt(0).toUpperCase()}
+          </div>
+        )}
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">{space.name}</h1>
+          <p className="text-sm text-muted-foreground">{folders.length} pasta{folders.length !== 1 ? 's' : ''} · {spaceLists.length} lista{spaceLists.length !== 1 ? 's' : ''} · {totalTasks} tarefa{totalTasks !== 1 ? 's' : ''}</p>
+        </div>
+      </div>
+
+      {/* Progress bar geral */}
+      {totalTasks > 0 && (
+        <div className="mb-6 bg-card rounded-xl p-4 border border-border shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-sm font-medium text-foreground">Progresso Geral</span>
+            <span className="text-sm text-muted-foreground">{doneTasks}/{totalTasks} concluídas ({progressPct}%)</span>
+          </div>
+          <div className="h-2.5 bg-muted rounded-full overflow-hidden">
+            <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${progressPct}%` }} />
+          </div>
+          <div className="flex gap-4 mt-3 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" />{doneTasks} concluídas</span>
+            <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400 inline-block" />{openTasks} em aberto</span>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Pastas */}
+        <div className="bg-card rounded-xl border border-border shadow-sm p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <Icons.Folder className="w-4 h-4 text-muted-foreground" />
+              Pastas
+            </h2>
+            <button
+              onClick={onCreateFolder}
+              className="text-xs text-primary hover:underline flex items-center gap-1"
+            >
+              <Icons.Plus className="w-3 h-3" /> Adicionar pasta
+            </button>
+          </div>
+          {folders.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-4 text-center">Nenhuma pasta criada</p>
+          ) : (
+            <div className="space-y-1">
+              {folders.map(folder => {
+                const folderLists = lists.filter(l => l.folderId === folder.id);
+                const folderTotalTasks = folderLists.reduce((sum, l) => sum + (listProgressMap.get(l.id)?.total || 0), 0);
+                const folderDoneTasks = folderLists.reduce((sum, l) => sum + (listProgressMap.get(l.id)?.done || 0), 0);
+                const folderPct = folderTotalTasks > 0 ? Math.round((folderDoneTasks / folderTotalTasks) * 100) : 0;
+                return (
+                  <div
+                    key={folder.id}
+                    className="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-muted cursor-pointer group transition-colors"
+                    onClick={() => onNavigateFolder(folder.id, folder.name)}
+                  >
+                    <Icons.Folder className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <span className="text-sm font-medium text-foreground flex-1 group-hover:text-primary transition-colors">{folder.name}</span>
+                    <span className="text-xs text-muted-foreground">{folderLists.length} lista{folderLists.length !== 1 ? 's' : ''}</span>
+                    {folderTotalTasks > 0 && (
+                      <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                        <div className="w-12 h-1.5 bg-muted rounded-full overflow-hidden">
+                          <div className="h-full bg-primary rounded-full" style={{ width: `${folderPct}%` }} />
+                        </div>
+                        <span>{folderPct}%</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Listas com progresso */}
+        <div className="bg-card rounded-xl border border-border shadow-sm p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-foreground flex items-center gap-2">
+              <Icons.List className="w-4 h-4 text-muted-foreground" />
+              Listas
+            </h2>
+          </div>
+          {spaceLists.length === 0 ? (
+            <p className="text-xs text-muted-foreground py-4 text-center">Nenhuma lista criada</p>
+          ) : (
+            <div className="space-y-2">
+              {spaceLists.slice(0, 8).map(list => {
+                const prog = listProgressMap.get(list.id) || { done: 0, total: 0 };
+                const pct = prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
+                const folder = folders.find(f => f.id === list.folderId);
+                return (
+                  <div
+                    key={list.id}
+                    className="cursor-pointer group hover:bg-muted rounded-lg px-3 py-2 transition-colors"
+                    onClick={() => onNavigateList(list.id)}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Icons.List className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                      <span className="text-sm font-medium text-foreground flex-1 truncate group-hover:text-primary transition-colors">{list.name}</span>
+                      {folder && <span className="text-[10px] text-muted-foreground shrink-0">{folder.name}</span>}
+                      <span className="text-xs text-muted-foreground shrink-0">{prog.done}/{prog.total}</span>
+                    </div>
+                    {prog.total > 0 ? (
+                      <div className="flex items-center gap-2 ml-5">
+                        <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+                          <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="text-[10px] text-muted-foreground w-7 text-right">{pct}%</span>
+                      </div>
+                    ) : (
+                      <div className="ml-5 h-1.5 bg-muted/50 rounded-full" />
+                    )}
+                  </div>
+                );
+              })}
+              {spaceLists.length > 8 && (
+                <p className="text-xs text-muted-foreground text-center pt-1">+ {spaceLists.length - 8} mais listas</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Estatísticas rápidas */}
+        <div className="bg-card rounded-xl border border-border shadow-sm p-4">
+          <h2 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
+            <svg className="w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="8" width="3" height="6" rx="0.5"/><rect x="6" y="5" width="3" height="9" rx="0.5"/><rect x="11" y="2" width="3" height="12" rx="0.5"/></svg>
+            Resumo
+          </h2>
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Total', value: totalTasks, color: 'text-foreground' },
+              { label: 'Em aberto', value: openTasks, color: 'text-blue-500' },
+              { label: 'Concluídas', value: doneTasks, color: 'text-green-500' },
+            ].map(stat => (
+              <div key={stat.label} className="text-center bg-muted/50 rounded-lg py-3">
+                <div className={`text-2xl font-bold ${stat.color}`}>{stat.value}</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5">{stat.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function DocView({ doc, onUpdate, currentUser, uploadFile }: {
@@ -2918,7 +3893,9 @@ function Sidebar({
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder,
   onDeleteList, onRenameList,
   docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc,
-  onMoveList, onMoveFolder
+  onMoveList, onMoveFolder,
+  listTaskCounts, listProgressMap,
+  favorites, onToggleFavorite
 }: any) {
   const compactLogo = "https://verticalparts.com.br/wp-content/uploads/2026/01/grp__NM__bg__NM__logo_compacto-1.png";
   const isNonLightTheme = themePreset !== "claro";
@@ -2931,6 +3908,34 @@ function Sidebar({
   const [secMinhasTarefasOpen, setSecMinhasTarefasOpen] = useState(false);
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
   const [secEspacosOpen, setSecEspacosOpen] = useState(true);
+
+  // Largura redimensionável da sidebar (arrastar borda direita; duplo clique restaura)
+  const SIDEBAR_DEFAULT_W = 240;
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem('vp_sidebar_width'));
+    return saved >= 200 && saved <= 520 ? saved : SIDEBAR_DEFAULT_W;
+  });
+  const startSidebarResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarWidth;
+    let lastW = startW;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    const onMove = (ev: MouseEvent) => {
+      lastW = Math.min(520, Math.max(200, startW + ev.clientX - startX));
+      setSidebarWidth(lastW);
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      localStorage.setItem('vp_sidebar_width', String(lastW));
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
 
   // Drag-and-drop state
   const [dragItem, setDragItem] = useState<{ type: 'list' | 'folder'; id: string } | null>(null);
@@ -3033,7 +4038,17 @@ function Sidebar({
 
       {/* ══ EXPANDED PANEL (colapsável) ══ */}
       {!isCollapsed && (
-        <div className="w-60 flex flex-col bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
+        <div style={{ width: sidebarWidth }} className="relative shrink-0 flex flex-col bg-sidebar border-r border-sidebar-border text-sidebar-foreground">
+          {/* Alça de redimensionamento (segurar e arrastar; duplo clique restaura) */}
+          <div
+            onMouseDown={startSidebarResize}
+            onDoubleClick={() => {
+              setSidebarWidth(SIDEBAR_DEFAULT_W);
+              localStorage.setItem('vp_sidebar_width', String(SIDEBAR_DEFAULT_W));
+            }}
+            title="Arraste para redimensionar · duplo clique restaura"
+            className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize z-20 hover:bg-orange-400/50 active:bg-orange-500/60 transition-colors"
+          />
 
           {/* Header */}
           <div className="flex items-center gap-1 px-2 py-2 border-b border-sidebar-border">
@@ -3121,11 +4136,40 @@ function Sidebar({
                 Favoritos
               </button>
               {secFavoritosOpen && (
-                <div className="px-3 py-2 mb-1">
-                  <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
-                    Adicione à sua barra lateral
-                  </p>
+                <div className="pb-1">
+                  {favorites && favorites.length === 0 && (
+                    <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5 px-4 py-2">
+                      <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                      Passe o mouse sobre uma lista ou pasta e clique ★
+                    </p>
+                  )}
+                  {(favorites || []).map((fav: any) => {
+                    const isActiveList = fav.type === 'list' && activeListId === fav.id;
+                    const isActiveFolder = fav.type === 'folder' && activeScope.type === 'folder' && activeScope.id === fav.id;
+                    const isActiveSpace = fav.type === 'space' && activeScope.type === 'space' && activeScope.id === fav.id;
+                    const isActive = isActiveList || isActiveFolder || isActiveSpace;
+                    return (
+                      <div
+                        key={`${fav.type}-${fav.id}`}
+                        className={`text-[12px] flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors ${isActive ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+                        onClick={() => {
+                          if (fav.type === 'list') { onSetActiveListId?.(fav.id); setTimeout(() => onViewChange?.('List'), 0); }
+                          else if (fav.type === 'folder') { onNavigate('folder', fav.id, fav.name); }
+                          else if (fav.type === 'space') { onNavigate('space', fav.id, fav.name); }
+                        }}
+                      >
+                        {fav.type === 'list' ? <Icons.List /> : fav.type === 'folder' ? <Icons.Folder /> : <Icons.Layout />}
+                        <span className="truncate flex-1">{fav.name}</span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); onToggleFavorite?.(fav.type, fav.id, fav.name); }}
+                          className="opacity-0 group-hover:opacity-100 text-yellow-400 transition-opacity"
+                          title="Remover dos favoritos"
+                        >
+                          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -3270,6 +4314,14 @@ function Sidebar({
                                     <Icons.Folder />
                                     <span className="truncate flex-1">{folder.name}</span>
                                     <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-sidebar/90 rounded px-0.5 absolute right-1">
+                                      {/* Star: favorites */}
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('folder', folder.id, folder.name); }}
+                                        className={`p-1 transition-colors ${favorites?.some((f: any) => f.type === 'folder' && f.id === folder.id) ? 'text-yellow-400' : 'text-sidebar-foreground/40 hover:text-yellow-400'}`}
+                                        title="Favoritar"
+                                      >
+                                        <svg className="w-3 h-3" fill={favorites?.some((f: any) => f.type === 'folder' && f.id === folder.id) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                                      </button>
                                       <DropdownMenu>
                                         <DropdownMenuTrigger asChild>
                                           <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground" title="Ações">
@@ -3277,6 +4329,10 @@ function Sidebar({
                                           </button>
                                         </DropdownMenuTrigger>
                                         <DropdownMenuContent align="end" sideOffset={6}>
+                                          <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('folder', folder.id, folder.name); }}>
+                                            {favorites?.some((f: any) => f.type === 'folder' && f.id === folder.id) ? '★ Remover dos favoritos' : '☆ Adicionar aos favoritos'}
+                                          </DropdownMenuItem>
+                                          <DropdownMenuSeparator />
                                           <DropdownMenuSub>
                                             <DropdownMenuSubTrigger className="text-xs">Criar novo</DropdownMenuSubTrigger>
                                             <DropdownMenuSubContent>
@@ -3319,12 +4375,30 @@ function Sidebar({
                                           >
                                             <Icons.List />
                                             <span className="truncate flex-1">{list.name}</span>
+                                            {/* Badge: open task count */}
+                                            {listTaskCounts?.get(list.id) ? (
+                                              <span className="text-[10px] font-medium text-sidebar-foreground/50 bg-sidebar-accent/70 rounded px-1 min-w-[16px] text-center group-hover:hidden shrink-0">
+                                                {listTaskCounts.get(list.id)}
+                                              </span>
+                                            ) : null}
                                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-sidebar/90 rounded px-0.5 absolute right-1">
+                                              {/* Star: favorites */}
+                                              <button
+                                                onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('list', list.id, list.name); }}
+                                                className={`p-1 transition-colors ${favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? 'text-yellow-400' : 'text-sidebar-foreground/40 hover:text-yellow-400'}`}
+                                                title="Favoritar"
+                                              >
+                                                <svg className="w-3 h-3" fill={favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
+                                              </button>
                                               <DropdownMenu>
                                                 <DropdownMenuTrigger asChild>
                                                   <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground"><MoreHorizontal className="h-3 w-3" /></button>
                                                 </DropdownMenuTrigger>
                                                 <DropdownMenuContent align="end" sideOffset={6}>
+                                                  <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('list', list.id, list.name); }}>
+                                                    {favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? '★ Remover dos favoritos' : '☆ Adicionar aos favoritos'}
+                                                  </DropdownMenuItem>
+                                                  <DropdownMenuSeparator />
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
                                                   <DropdownMenuItem className="text-xs text-red-600 focus:text-red-600" onClick={(e) => { e.stopPropagation(); onDeleteList(list.id); }}>Excluir lista</DropdownMenuItem>
                                                 </DropdownMenuContent>
@@ -3478,11 +4552,197 @@ function ConfirmModal({ message, onConfirm, onClose }: { message: string; onConf
   );
 }
 
+function DuplicateTaskModal({
+  task,
+  lists,
+  isOpen,
+  isSubmitting,
+  onClose,
+  onDuplicate,
+}: {
+  task: Task | null;
+  lists: List[];
+  isOpen: boolean;
+  isSubmitting: boolean;
+  onClose: () => void;
+  onDuplicate: (options: DuplicateTaskOptions) => void;
+}) {
+  const [options, setOptions] = useState<DuplicateTaskOptions>({
+    title: '',
+    listId: '',
+    includeDescription: true,
+    includeAssignees: true,
+    includeDates: true,
+    includePriority: true,
+    includeSubtasks: true,
+    includeChecklists: true,
+    includeTags: true,
+    includeCustomFields: true,
+  });
+
+  useEffect(() => {
+    if (!task) return;
+    setOptions({
+      title: `Cópia de ${task.title}`,
+      listId: task.listId,
+      includeDescription: true,
+      includeAssignees: true,
+      includeDates: true,
+      includePriority: true,
+      includeSubtasks: true,
+      includeChecklists: true,
+      includeTags: true,
+      includeCustomFields: true,
+    });
+  }, [task]);
+
+  const toggle = (key: DuplicateTaskBooleanOption, value: boolean) => {
+    setOptions((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!task || isSubmitting || !options.title.trim() || !options.listId) return;
+    onDuplicate({ ...options, title: options.title.trim() });
+  };
+
+  const copyItems: Array<{ key: DuplicateTaskBooleanOption; label: string; description: string }> = [
+    { key: 'includeDescription', label: 'Descrição', description: 'Copia o texto principal da tarefa.' },
+    { key: 'includeAssignees', label: 'Responsáveis', description: 'Mantém responsável principal e acompanhantes.' },
+    { key: 'includeDates', label: 'Datas', description: 'Mantém início e prazo da tarefa original.' },
+    { key: 'includePriority', label: 'Prioridade', description: 'Mantém a prioridade atual.' },
+    { key: 'includeSubtasks', label: 'Subtarefas', description: 'Cria cópias independentes das subtarefas diretas.' },
+    { key: 'includeChecklists', label: 'Checklists', description: 'Copia itens de ação e seus estados.' },
+    { key: 'includeTags', label: 'Etiquetas', description: 'Mantém as tags aplicadas.' },
+    { key: 'includeCustomFields', label: 'Campos personalizados', description: 'Copia valores preenchidos nos campos customizados.' },
+  ];
+
+  return (
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-2xl p-0 overflow-hidden">
+        <form onSubmit={handleSubmit}>
+          <DialogHeader className="px-6 pt-6 pb-4 border-b bg-gray-50/60">
+            <DialogTitle className="flex items-center gap-2 text-xl">
+              <Copy className="w-5 h-5 text-blue-500" />
+              Duplicar tarefa
+            </DialogTitle>
+            <DialogDescription>
+              Crie uma nova tarefa independente a partir da tarefa atual. Alterações na cópia não mudam a original.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="p-6 space-y-6">
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-gray-700" htmlFor="duplicate-task-title">
+                Nome da nova tarefa
+              </label>
+              <input
+                id="duplicate-task-title"
+                autoFocus
+                value={options.title}
+                onChange={(event) => setOptions((prev) => ({ ...prev, title: event.target.value }))}
+                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-900 outline-none transition-all focus:border-blue-400 focus:ring-4 focus:ring-blue-100"
+                placeholder="Digite o nome da tarefa duplicada"
+              />
+              {task && (
+                <p className="text-xs text-gray-400">
+                  Original: <span className="font-medium text-gray-500">{task.title}</span>
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-gray-700" htmlFor="duplicate-task-list">
+                Lista de destino
+              </label>
+              <select
+                id="duplicate-task-list"
+                value={options.listId}
+                onChange={(event) => setOptions((prev) => ({ ...prev, listId: event.target.value }))}
+                className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm font-medium text-gray-900 outline-none transition-all focus:border-blue-400 focus:ring-4 focus:ring-blue-100"
+              >
+                {lists.map((list) => (
+                  <option key={list.id} value={list.id}>{list.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="text-sm font-semibold text-gray-700 mb-3">O que copiar</p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {copyItems.map((item) => (
+                  <label
+                    key={item.key}
+                    className="flex items-start gap-3 rounded-xl border border-gray-200 bg-white p-3 hover:border-blue-200 hover:bg-blue-50/30 transition-colors cursor-pointer"
+                  >
+                    <Checkbox
+                      checked={Boolean(options[item.key])}
+                      onCheckedChange={(checked) => toggle(item.key, checked === true)}
+                      className="mt-0.5"
+                    />
+                    <span>
+                      <span className="block text-sm font-semibold text-gray-800">{item.label}</span>
+                      <span className="block text-xs text-gray-500 leading-snug">{item.description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+              Comentários e anexos não são copiados automaticamente. Assim a nova tarefa nasce limpa, sem duplicar histórico ou arquivos da original.
+            </div>
+          </div>
+
+          <DialogFooter className="px-6 py-4 border-t bg-gray-50/80">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isSubmitting}
+              className="px-4 py-2 rounded-lg border border-gray-200 bg-white text-sm font-semibold text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancelar
+            </button>
+            <button
+              type="submit"
+              disabled={isSubmitting || !options.title.trim() || !options.listId}
+              className="px-5 py-2 rounded-lg bg-[var(--primary-color)] text-[#2c3e50] text-sm font-black hover:brightness-95 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isSubmitting ? 'Duplicando...' : 'Duplicar tarefa'}
+            </button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function getTaskHealth(task: Task) {
   const status = (task.status || '').toLowerCase();
+
+  // ── 1. Terminal / concluído ───────────────────────────────────────────────
   if (status.includes('conclu') || status.includes('aprovado') || status.includes('fechado')) {
     return { emoji: '🎉', label: 'Missão cumprida!', bg: 'bg-green-100', text: 'text-green-800', border: 'border-green-200' };
   }
+
+  // ── 2. Cancelado / Reprovado — terminal, não conta como atraso ───────────
+  if (status.includes('cancel') || status.includes('reprova')) {
+    return { emoji: '🚫', label: 'Cancelado / Reprovado', bg: 'bg-gray-100', text: 'text-gray-500', border: 'border-gray-200' };
+  }
+
+  // ── 3. Aguardando / Bloqueado / Pendente — em espera, NÃO é atraso ───────
+  if (
+    status.includes('aguardando') ||
+    status.includes('pendente') ||
+    status.includes('enviada') ||
+    status.includes('em espera') ||
+    status.includes('bloqueada') ||
+    status.includes('em analise') ||
+    status.includes('em análise')
+  ) {
+    return { emoji: '⏳', label: 'Aguardando / Em espera', bg: 'bg-purple-50', text: 'text-purple-700', border: 'border-purple-200' };
+  }
+
   if (!task.dueDate) return null;
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -3513,6 +4773,7 @@ function ListView({
   context,
   onQuickCreate,
   onDeleteTask,
+  onDuplicateTask,
   lists,
   statusGroups,
   activeListId,
@@ -4183,16 +5444,28 @@ function ListView({
                               <td className="px-2 py-3" />
 
                               <td className="px-4 py-3">
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    onDeleteTask(t.id);
-                                  }}
-                                  className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                                  title="Excluir Tarefa"
-                                >
-                                  <Icons.Trash />
-                                </button>
+                                <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onDuplicateTask?.(t);
+                                    }}
+                                    className="p-1.5 text-gray-300 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                                    title="Duplicar Tarefa"
+                                  >
+                                    <Copy className="w-4 h-4" />
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onDeleteTask(t.id);
+                                    }}
+                                    className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Excluir Tarefa"
+                                  >
+                                    <Icons.Trash />
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );
@@ -4289,7 +5562,7 @@ function ListView({
   );
 }
 
-function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, workspaceTags }: any) {
+function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDuplicateTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, workspaceTags }: any) {
   // Refs para não causar re-render durante drag (re-renders destroem o HTML5 DnD)
   const draggingTaskIdRef = useRef<string | null>(null);
   const currentDragOverColRef = useRef<HTMLElement | null>(null);
@@ -4506,6 +5779,13 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreat
                         </svg>
                       </button>
                       <button
+                        onClick={(e) => { e.stopPropagation(); onDuplicateTask?.(task); }}
+                        className="p-1 rounded text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
+                        title="Duplicar tarefa"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                      <button
                         onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
                         className="p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
                         title="Excluir"
@@ -4657,7 +5937,26 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onCreat
   );
 }
 
-function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any) {
+function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLists, isLoading }: any) {
+  // Loading state: mostra skeleton enquanto carrega dados globais pela primeira vez
+  if (isLoading) {
+    return (
+      <div className="flex flex-col gap-6 animate-pulse">
+        <div className="h-8 bg-gray-100 rounded-lg w-48 ml-auto" />
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-28 bg-gray-100 rounded-xl" />
+          ))}
+        </div>
+        <div className="h-40 bg-gray-100 rounded-xl" />
+        <div className="grid grid-cols-3 gap-6">
+          <div className="h-72 bg-gray-100 rounded-xl col-span-2" />
+          <div className="h-72 bg-gray-100 rounded-xl" />
+        </div>
+      </div>
+    );
+  }
+
   // Resolve CSS custom property so Recharts SVG fill works correctly
   const primaryChartColor = useMemo(() => {
     const val = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim();
@@ -4673,7 +5972,8 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
     cutoff.setDate(cutoff.getDate() - (period === '7d' ? 7 : period === '30d' ? 30 : 90));
     cutoff.setHours(0, 0, 0, 0);
     return tasks.filter((t: Task) => {
-      const ref = t.dueDate || t.startDate;
+      // Usa dueDate → startDate → createdAt como referência de data; sem data = sempre inclui
+      const ref = t.dueDate || t.startDate || t.createdAt;
       if (!ref) return true;
       return new Date(ref) >= cutoff;
     });
@@ -4691,13 +5991,15 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
   // --- Health buckets (dynamic, using getTaskHealth) ---
   const healthBuckets = useMemo(() => {
     const buckets: Record<string, { label: string; emoji: string; color: string; bg: string; count: number }> = {
-      done:    { label: 'Missão cumprida',     emoji: '🎉', color: '#10b981', bg: '#d1fae5', count: 0 },
-      ok:      { label: 'Tranquilo, em dia',   emoji: '😄', color: '#3b82f6', bg: '#dbeafe', count: 0 },
-      warning: { label: 'Atenção ao prazo',    emoji: '😅', color: '#f59e0b', bg: '#fef9c3', count: 0 },
-      urgent:  { label: 'Cuidado, últimos dias', emoji: '😰', color: '#f97316', bg: '#ffedd5', count: 0 },
-      late:    { label: 'Atrasado! Corra',     emoji: '😡', color: '#ef4444', bg: '#fee2e2', count: 0 },
-      waiting: { label: 'Aguardando início',   emoji: '⏰', color: '#6b7280', bg: '#f3f4f6', count: 0 },
-      nodate:  { label: 'Sem prazo definido',  emoji: '—',  color: '#d1d5db', bg: '#f9fafb', count: 0 },
+      done:      { label: 'Missão cumprida',        emoji: '🎉', color: '#10b981', bg: '#d1fae5', count: 0 },
+      ok:        { label: 'Tranquilo, em dia',      emoji: '😄', color: '#3b82f6', bg: '#dbeafe', count: 0 },
+      warning:   { label: 'Atenção ao prazo',       emoji: '😅', color: '#f59e0b', bg: '#fef9c3', count: 0 },
+      urgent:    { label: 'Cuidado, últimos dias',  emoji: '😰', color: '#f97316', bg: '#ffedd5', count: 0 },
+      late:      { label: 'Atrasado! Corra',        emoji: '😡', color: '#ef4444', bg: '#fee2e2', count: 0 },
+      waiting:   { label: 'Aguardando início',      emoji: '⏰', color: '#6b7280', bg: '#f3f4f6', count: 0 },
+      blocked:   { label: 'Aguardando / Em espera', emoji: '⏳', color: '#8b5cf6', bg: '#ede9fe', count: 0 },
+      cancelled: { label: 'Cancelado / Reprovado',  emoji: '🚫', color: '#9ca3af', bg: '#f3f4f6', count: 0 },
+      nodate:    { label: 'Sem prazo definido',      emoji: '—',  color: '#d1d5db', bg: '#f9fafb', count: 0 },
     };
 
     filteredTasks.forEach((t: Task) => {
@@ -4709,6 +6011,8 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
       else if (h.emoji === '😰') buckets.urgent.count++;
       else if (h.emoji === '😡') buckets.late.count++;
       else if (h.emoji === '⏰') buckets.waiting.count++;
+      else if (h.emoji === '⏳') buckets.blocked.count++;
+      else if (h.emoji === '🚫') buckets.cancelled.count++;
       else buckets.nodate.count++;
     });
 
@@ -4717,16 +6021,21 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
 
   const totalWithHealth = filteredTasks.length || 1;
 
-  // --- Status distribution ---
+  // --- Status distribution (grupos consolidados — evita torta com 13 fatias) ---
+  const STATUS_GROUPS_DASH = [
+    { name: '✅ Concluído',    color: '#10b981', test: (s: string) => s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') },
+    { name: '⏳ Aguardando',   color: '#8b5cf6', test: (s: string) => s.includes('aguardando') || s.includes('pendente') || s.includes('enviada') || s.includes('em espera') || s.includes('bloqueada') || s.includes('em analise') || s.includes('em análise') },
+    { name: '📋 A Fazer',      color: '#6b7280', test: (s: string) => s.includes('a fazer') || s.includes('semana') || s.includes('backlog') || s.includes('todo') },
+    { name: '🔄 Em Andamento', color: '#3b82f6', test: (s: string) => s.includes('andamento') || s.includes('progresso') || s.includes('revisão') || s.includes('revisao') || s.includes('em revisão') },
+    { name: '🚫 Cancelado',    color: '#ef4444', test: (s: string) => s.includes('cancel') || s.includes('reprova') },
+  ];
   const statusData = useMemo(() => {
-    const statuses = activeListId
-      ? activeStatusOptions.map((o: any) => o.label)
-      : Array.from(new Set(filteredTasks.map((t: Task) => t.status)));
-    return (statuses as string[]).map((status) => ({
-      name: status,
-      value: filteredTasks.filter((t: Task) => t.status === status).length
-    })).filter((d: any) => d.value > 0);
-  }, [filteredTasks, activeListId, activeStatusOptions]);
+    return STATUS_GROUPS_DASH.map(g => ({
+      name: g.name,
+      value: filteredTasks.filter((t: Task) => g.test((t.status || '').toLowerCase())).length,
+      color: g.color,
+    })).filter(d => d.value > 0);
+  }, [filteredTasks]);
 
   // --- User performance ---
   const userPerformance = useMemo(() =>
@@ -4744,24 +6053,34 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
         };
       })
       .filter((u: any) => u.total > 0)
-      .sort((a: any, b: any) => b.total - a.total)
+      // Ranking por desempenho: quem mais concluiu (primário) → maior taxa (desempate)
+      .sort((a: any, b: any) => {
+        if (b.concluidas !== a.concluidas) return b.concluidas - a.concluidas;
+        const taxaA = a.total > 0 ? a.concluidas / a.total : 0;
+        const taxaB = b.total > 0 ? b.concluidas / b.total : 0;
+        return taxaB - taxaA;
+      })
   , [filteredTasks, users]);
 
   // --- Priority breakdown ---
+  const PRIORITY_CFG = [
+    { key: 'URGENTE',        label: '🔴 Urgente',       color: '#ef4444' },
+    { key: 'ALTA',           label: '🟠 Alta',           color: '#f97316' },
+    { key: 'MÉDIA',          label: '🟡 Média',          color: '#f59e0b' },
+    { key: 'BAIXA',          label: '🔵 Baixa',          color: '#3b82f6' },
+    { key: 'SEM PRIORIDADE', label: '⚪ Sem prioridade', color: '#9ca3af' },
+  ];
   const priorityData = useMemo(() => {
-    const map: Record<string, { color: string; count: number }> = {
-      'URGENTE': { color: '#ef4444', count: 0 },
-      'ALTA':    { color: '#f97316', count: 0 },
-      'MÉDIA':   { color: '#f59e0b', count: 0 },
-      'BAIXA':   { color: '#3b82f6', count: 0 },
-      'SEM PRIORIDADE': { color: '#6b7280', count: 0 },
-    };
+    const counts: Record<string, number> = {};
+    PRIORITY_CFG.forEach(c => { counts[c.key] = 0; });
     filteredTasks.forEach((t: Task) => {
       const p = (t.priority || 'SEM PRIORIDADE').toUpperCase();
-      if (map[p]) map[p].count++;
-      else map['SEM PRIORIDADE'].count++;
+      if (counts[p] !== undefined) counts[p]++;
+      else counts['SEM PRIORIDADE']++;
     });
-    return Object.entries(map).map(([name, v]) => ({ name, ...v })).filter(d => d.count > 0);
+    return PRIORITY_CFG
+      .map(c => ({ name: c.label, color: c.color, count: counts[c.key] }))
+      .filter(d => d.count > 0);
   }, [filteredTasks]);
 
   // --- KPI values ---
@@ -4770,10 +6089,46 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
   const atrasadas = healthBuckets.find(b => b.emoji === '😡')?.count || 0;
   const emDia = healthBuckets.find(b => b.emoji === '😄')?.count || 0;
   const criticas = healthBuckets.find(b => b.emoji === '😰')?.count || 0;
+  const aguardando = healthBuckets.find(b => b.emoji === '⏳')?.count || 0;
   const prorrogadas = tasks.filter((t: Task) => (t.extensionCount || 0) > 0).length;
   const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
 
-  const PIE_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#6b7280', '#a855f7', '#06b6d4'];
+  // --- Resumo por lista (todos os projetos) — usa allLists (dados globais) ---
+  const listSummary = useMemo(() => {
+    // Prefere allLists (carregado globalmente) → cai no lists local como fallback
+    const availLists = (allLists && allLists.length > 0) ? allLists : (lists || []);
+    const map = new Map<string, { name: string; total: number; done: number }>();
+    filteredTasks.forEach((t: Task) => {
+      if (!t.listId) return;
+      const list = availLists.find((l: any) => l.id === t.listId);
+      if (!list) return;
+      const cur = map.get(t.listId) || { name: list.name, total: 0, done: 0 };
+      map.set(t.listId, {
+        name: list.name,
+        total: cur.total + 1,
+        done: cur.done + (isConcluido(t.status) ? 1 : 0)
+      });
+    });
+    return Array.from(map.values())
+      .filter(l => l.total > 0)
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
+  }, [filteredTasks, lists, allLists]);
+
+  // --- Atividade recente (últimas mudanças de status — usa tasks completo, não filtrado por período) ---
+  const recentActivity = useMemo(() => {
+    const acts: { taskTitle: string; type: string; newValue: string; createdAt: string }[] = [];
+    tasks.forEach((t: Task) => {
+      (t.activities || []).forEach((a: any) => {
+        if (a.type === 'status_changed') {
+          acts.push({ taskTitle: t.title, type: a.type, newValue: a.newValue, createdAt: a.createdAt });
+        }
+      });
+    });
+    return acts
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 8);
+  }, [tasks]);
 
   return (
     <div className="flex flex-col gap-6" onClick={(e) => e.stopPropagation()}>
@@ -4793,12 +6148,12 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
       {/* ── Row 1: KPI Cards ── */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {[
-          { emoji: '📋', title: 'Total', value: total, sub: 'tarefas', bg: 'bg-blue-50', text: 'text-blue-700' },
+          { emoji: '📋', title: 'Total', value: total, sub: 'tarefas no workspace', bg: 'bg-blue-50', text: 'text-blue-700' },
           { emoji: '🎉', title: 'Concluídas', value: concluidas, sub: `${taxaConclusao}% do total`, bg: 'bg-green-50', text: 'text-green-700' },
-          { emoji: '😡', title: 'Atrasadas', value: atrasadas, sub: 'precisam de atenção', bg: 'bg-red-50', text: 'text-red-700' },
+          { emoji: '😡', title: 'Atrasadas', value: atrasadas, sub: 'passaram do prazo', bg: 'bg-red-50', text: 'text-red-700' },
           { emoji: '😄', title: 'Em Dia', value: emDia, sub: 'dentro do prazo', bg: 'bg-sky-50', text: 'text-sky-700' },
-          { emoji: '😰', title: 'Críticas', value: criticas, sub: 'últimos dias de prazo', bg: 'bg-orange-50', text: 'text-orange-700' },
-          { emoji: '⚠️', title: 'Prorrogadas', value: prorrogadas, sub: 'tiveram extensão', bg: 'bg-yellow-50', text: 'text-yellow-700' },
+          { emoji: '⏳', title: 'Aguardando', value: aguardando, sub: 'em espera / bloqueadas', bg: 'bg-purple-50', text: 'text-purple-700' },
+          { emoji: '⚠️', title: 'Prorrogadas', value: prorrogadas, sub: 'tiveram extensão de prazo', bg: 'bg-yellow-50', text: 'text-yellow-700' },
         ].map(k => (
           <div key={k.title} className={`${k.bg} rounded-xl p-4 border border-white shadow-sm flex flex-col gap-1 hover:scale-[1.03] transition-transform`}>
             <span className="text-2xl">{k.emoji}</span>
@@ -4840,13 +6195,19 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
       {/* ── Row 3: Performance + Status ── */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="bg-white p-6 rounded-xl border shadow-sm lg:col-span-2">
-          <h3 className="font-bold text-gray-700 mb-5 flex items-center gap-2">👥 Performance por Usuário</h3>
+          <h3 className="font-bold text-gray-700 mb-5 flex items-center gap-2">
+            👥 Performance por Usuário
+            <span className="ml-auto text-xs text-gray-400 font-normal">{userPerformance.length} membro{userPerformance.length !== 1 ? 's' : ''} ativos</span>
+          </h3>
+          {userPerformance.length === 0 ? (
+            <div className="h-[260px] flex items-center justify-center text-sm text-gray-400">Nenhum usuário com tarefas no período.</div>
+          ) : (
           <div className="h-[260px]">
             <ResponsiveContainer width="100%" height="100%">
-              <ReBarChart data={userPerformance} barGap={4}>
+              <ReBarChart data={userPerformance} barGap={4} barCategoryGap={userPerformance.length === 1 ? '60%' : '20%'}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
                 <XAxis dataKey="name" fontSize={11} stroke="#94a3b8" />
-                <YAxis fontSize={11} stroke="#94a3b8" />
+                <YAxis fontSize={11} stroke="#94a3b8" allowDecimals={false} />
                 <Tooltip
                   cursor={{ fill: '#f8fafc' }}
                   formatter={(val: any, name: string) => [val, name === 'total' ? 'Total' : name === 'concluidas' ? 'Concluídas' : 'Atrasadas']}
@@ -4857,13 +6218,16 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
               </ReBarChart>
             </ResponsiveContainer>
           </div>
-          <div className="flex items-center gap-5 mt-3 justify-center">
-            {[[primaryChartColor, 'Total'], ['#10b981', 'Concluídas'], ['#ef4444', 'Atrasadas']].map(([c, l]) => (
-              <div key={l} className="flex items-center gap-1.5 text-xs text-gray-500">
-                <div className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: c }} />{l}
-              </div>
-            ))}
-          </div>
+          )}
+          {userPerformance.length > 0 && (
+            <div className="flex items-center gap-5 mt-3 justify-center">
+              {[[primaryChartColor, 'Total'], ['#10b981', 'Concluídas'], ['#ef4444', 'Atrasadas']].map(([c, l]) => (
+                <div key={l} className="flex items-center gap-1.5 text-xs text-gray-500">
+                  <div className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: c }} />{l}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="bg-white p-6 rounded-xl border shadow-sm">
@@ -4872,8 +6236,8 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={statusData} innerRadius={55} outerRadius={80} paddingAngle={3} dataKey="value">
-                  {statusData.map((_: any, i: number) => (
-                    <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                  {statusData.map((d: any, i: number) => (
+                    <Cell key={i} fill={d.color} />
                   ))}
                 </Pie>
                 <Tooltip formatter={(val: any, name: string) => [val, name]} />
@@ -4881,15 +6245,21 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
             </ResponsiveContainer>
           </div>
           <div className="mt-3 flex flex-col gap-1.5">
-            {statusData.map((d: any, i: number) => (
-              <div key={d.name} className="flex items-center justify-between text-xs text-gray-600">
-                <div className="flex items-center gap-1.5">
-                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: PIE_COLORS[i % PIE_COLORS.length] }} />
-                  <span className="truncate max-w-[120px]">{d.name}</span>
+            {statusData.map((d: any) => {
+              const pct = total > 0 ? Math.round((d.value / total) * 100) : 0;
+              return (
+                <div key={d.name} className="flex items-center justify-between text-xs text-gray-600">
+                  <div className="flex items-center gap-1.5">
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: d.color }} />
+                    <span className="truncate max-w-[130px]">{d.name}</span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-gray-400">{pct}%</span>
+                    <span className="font-bold w-8 text-right">{d.value}</span>
+                  </div>
                 </div>
-                <span className="font-bold">{d.value}</span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
@@ -4898,28 +6268,37 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-white p-6 rounded-xl border shadow-sm">
           <h3 className="font-bold text-gray-700 mb-5">🔥 Distribuição por Prioridade</h3>
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-4">
             {priorityData.map(p => {
-              const pct = Math.round((p.count / totalWithHealth) * 100);
+              const pct = Math.round((p.count / (total || 1)) * 100);
               return (
-                <div key={p.name} className="flex items-center gap-3">
-                  <span className="text-xs font-semibold text-gray-600 w-32 shrink-0">{p.name}</span>
-                  <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-                    <div className="h-full rounded-full" style={{ width: `${Math.max(pct, 3)}%`, backgroundColor: p.color }} />
+                <div key={p.name} className="flex flex-col gap-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-gray-700">{p.name}</span>
+                    <span className="text-gray-400">{pct}% · <span className="font-bold text-gray-700">{p.count}</span> tarefas</span>
                   </div>
-                  <span className="text-xs font-bold text-gray-700 w-10 text-right shrink-0">{p.count}</span>
+                  <div className="w-full bg-gray-100 rounded-full h-5 overflow-hidden">
+                    <div className="h-full rounded-full flex items-center justify-end pr-2 transition-all duration-500"
+                      style={{ width: `${Math.max(pct, 3)}%`, backgroundColor: p.color }}>
+                      {pct > 10 && <span className="text-[10px] font-bold text-white">{pct}%</span>}
+                    </div>
+                  </div>
                 </div>
               );
             })}
           </div>
+          {/* Nota de contexto */}
+          <p className="text-[10px] text-gray-400 mt-5 text-center">Baseado em {total} tarefas do workspace</p>
         </div>
 
         <div className="bg-white p-6 rounded-xl border shadow-sm">
-          <h3 className="font-bold text-gray-700 mb-5">🏆 Ranking da Equipe</h3>
+          <h3 className="font-bold text-gray-700 mb-1">🏆 Ranking da Equipe</h3>
+          <p className="text-[10px] text-gray-400 mb-4">Ordenado por tarefas concluídas</p>
           <div className="flex flex-col gap-2">
             {userPerformance.slice(0, 7).map((u: any, i: number) => {
               const taxa = u.total > 0 ? Math.round((u.concluidas / u.total) * 100) : 0;
               const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}º`;
+              const barColor = taxa >= 80 ? '#10b981' : taxa >= 50 ? '#3b82f6' : taxa >= 30 ? '#f59e0b' : '#ef4444';
               return (
                 <div key={u.fullName} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 transition-colors">
                   <span className="text-base w-7 text-center shrink-0">{medal}</span>
@@ -4927,10 +6306,10 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-semibold text-gray-800 truncate">{u.fullName}</p>
                     <div className="flex items-center gap-2 mt-0.5">
-                      <div className="flex-1 bg-gray-100 rounded-full h-1.5">
-                        <div className="h-full rounded-full bg-green-500" style={{ width: `${taxa}%` }} />
+                      <div className="flex-1 bg-gray-100 rounded-full h-2">
+                        <div className="h-full rounded-full transition-all duration-500" style={{ width: `${taxa}%`, backgroundColor: barColor }} />
                       </div>
-                      <span className="text-[10px] text-gray-500 shrink-0">{taxa}%</span>
+                      <span className="text-[10px] font-bold shrink-0" style={{ color: barColor }}>{taxa}%</span>
                     </div>
                   </div>
                   <div className="text-right shrink-0">
@@ -4943,6 +6322,71 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists }: any)
           </div>
         </div>
       </div>
+
+      {/* ── Row 5: Resumo por Lista + Atividade Recente ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        {/* Resumo por lista/projeto */}
+        <div className="bg-white p-6 rounded-xl border shadow-sm">
+          <h3 className="font-bold text-gray-700 mb-5">📁 Resumo por Lista / Projeto</h3>
+          {listSummary.length === 0 ? (
+            <p className="text-sm text-gray-400 text-center py-8">Nenhuma tarefa com lista atribuída.</p>
+          ) : (
+            <div className="flex flex-col gap-3">
+              {listSummary.map(l => {
+                const pct = l.total > 0 ? Math.round((l.done / l.total) * 100) : 0;
+                return (
+                  <div key={l.name} className="flex items-center gap-3">
+                    <span className="text-xs font-medium text-gray-600 w-36 shrink-0 truncate" title={l.name}>{l.name}</span>
+                    <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{ width: `${Math.max(pct, 2)}%`, backgroundColor: pct === 100 ? '#10b981' : pct >= 60 ? '#3b82f6' : pct >= 30 ? '#f59e0b' : '#ef4444' }}
+                      />
+                    </div>
+                    <span className="text-xs font-bold text-gray-700 w-10 text-right shrink-0">{pct}%</span>
+                    <span className="text-[10px] text-gray-400 w-14 text-right shrink-0">{l.done}/{l.total}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Atividade recente */}
+        <div className="bg-white p-6 rounded-xl border shadow-sm">
+          <h3 className="font-bold text-gray-700 mb-5">⚡ Atividade Recente</h3>
+          {recentActivity.length === 0 ? (
+            <p className="text-sm text-gray-400 text-center py-8">Nenhuma atividade registrada no período.</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {recentActivity.map((a, i) => {
+                const statusColor = (a.newValue || '').toLowerCase().includes('conclu') ? '#10b981'
+                  : (a.newValue || '').toLowerCase().includes('andamento') ? '#3b82f6'
+                  : (a.newValue || '').toLowerCase().includes('cancel') ? '#6b7280'
+                  : '#f59e0b';
+                const dt = new Date(a.createdAt);
+                const label = dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+                return (
+                  <div key={i} className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-50 transition-colors">
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
+                    <p className="flex-1 text-xs text-gray-700 truncate" title={a.taskTitle}>{a.taskTitle}</p>
+                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 text-white" style={{ backgroundColor: statusColor }}>
+                      {a.newValue}
+                    </span>
+                    <span className="text-[10px] text-gray-400 shrink-0">{label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Fonte dos dados */}
+      <p className="text-center text-[10px] text-gray-300 pb-2">
+        Dashboard global · {total} tarefas · dados em tempo real do Supabase
+      </p>
     </div>
   );
 }
@@ -5320,6 +6764,7 @@ function TaskDetailModal(props: any) {
     fieldValues,
     onUpdateFieldValue,
     onDelete,
+    onDuplicate,
     tasks,
     onSelectTask,
     onQuickCreate,
@@ -5327,6 +6772,9 @@ function TaskDetailModal(props: any) {
     saveAttachment,
     removeAttachment: removeTaskAttachment,
     saveComment,
+    editComment,
+    deleteComment,
+    toggleWatcher,
     saveExtensionLog,
     saveTaskActivity,
     uploadFile,
@@ -5334,6 +6782,7 @@ function TaskDetailModal(props: any) {
     lists,
     workspaceId,
     onTagsChange,
+    teams = [],
   } = props;
 
   const currentList = lists?.find((l: any) => l.id === task.listId);
@@ -5365,8 +6814,11 @@ function TaskDetailModal(props: any) {
   const [newDueDate, setNewDueDate] = useState(task.dueDate);
   const [extensionReason, setExtensionReason] = useState('');
   const [isExtending, setIsExtending] = useState(false);
+  const [isSavingExtension, setIsSavingExtension] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [newComment, setNewComment] = useState('');
+  const [showAIPanel, setShowAIPanel] = useState(false);
+  const [newChecklistText, setNewChecklistText] = useState('');
   const [description, setDescription] = useState(task.description || '');
   const [isEditingDescription, setIsEditingDescription] = useState(false);
 
@@ -5438,9 +6890,25 @@ function TaskDetailModal(props: any) {
       if (saveTaskActivity) {
         await saveTaskActivity(task.id, 'RESPONSIBLE_ADDED', '', users.find((u: any) => u.id === userId)?.name);
       }
+      notifyAssignment({ userIds: [userId], actor: currentUser, taskId: task.id, taskTitle: task.title });
     }
 
     onUpdate({ ...task, secondaryAssigneeIds: nextSecondaryIds });
+  };
+
+  // Atribui uma Equipe inteira como responsáveis adicionais (estilo ClickUp Teams)
+  const handleAssignTeam = async (team: Team) => {
+    const current = new Set<string>(task.secondaryAssigneeIds || []);
+    const newIds = team.memberIds.filter((id: string) => id !== task.mainAssigneeId && !current.has(id));
+    if (newIds.length === 0) {
+      toast.info(`Todos da equipe ${team.name} já estão na tarefa.`);
+      return;
+    }
+    if (saveTaskActivity) {
+      await saveTaskActivity(task.id, 'TEAM_ASSIGNED', '', team.name);
+    }
+    notifyAssignment({ userIds: newIds, actor: currentUser, taskId: task.id, taskTitle: task.title, teamName: team.name });
+    onUpdate({ ...task, secondaryAssigneeIds: [...(task.secondaryAssigneeIds || []), ...newIds] });
   };
 
   const handleSetMainAssignee = async (userId: string) => {
@@ -5459,41 +6927,71 @@ function TaskDetailModal(props: any) {
       nextSecondaryIds.push(task.mainAssigneeId);
     }
 
+    notifyAssignment({ userIds: [userId], actor: currentUser, taskId: task.id, taskTitle: task.title });
     onUpdate({ ...task, mainAssigneeId: userId, secondaryAssigneeIds: nextSecondaryIds });
   };
 
   const handleSaveDueDate = async () => {
+    if (!newDueDate) {
+      toast.warning('Selecione uma nova data de vencimento.');
+      return;
+    }
     if (newDueDate === task.dueDate) {
-      setIsExtending(false);
+      toast.warning('A nova data é igual à data atual. Escolha uma data diferente.');
+      return;
+    }
+    if (!extensionReason.trim()) {
+      toast.warning('Informe uma justificativa para alterar o prazo.');
       return;
     }
 
-    const log: ExtensionLog = {
-      id: Math.random().toString(36).substr(2, 9),
-      oldDate: task.dueDate,
-      newDate: newDueDate,
-      reason: extensionReason || 'Sem motivo detalhado',
-      updatedBy: currentUser.id,
-      timestamp: new Date().toISOString()
-    };
+    setIsSavingExtension(true);
+    try {
+      const log: ExtensionLog = {
+        id: Math.random().toString(36).substr(2, 9),
+        oldDate: task.dueDate,
+        newDate: newDueDate,
+        reason: extensionReason.trim(),
+        updatedBy: currentUser.id,
+        timestamp: new Date().toISOString()
+      };
 
-    if (saveExtensionLog) {
-      await saveExtensionLog(task.id, log);
+      // Salva o log de extensão — falha silenciosa não bloqueia o update da tarefa
+      if (saveExtensionLog) {
+        try {
+          await saveExtensionLog(task.id, log);
+        } catch (logErr) {
+          console.warn('Falha ao salvar log de extensão (não crítico):', logErr);
+        }
+      }
+
+      // Atualiza a tarefa com nova data e contador
+      const ok = await onUpdate({
+        ...task,
+        dueDate: newDueDate,
+        extensionCount: (task.extensionCount || 0) + 1,
+        extensionHistory: [log, ...(task.extensionHistory || [])]
+      });
+
+      // updateTask retorna false em caso de erro (e já mostra toast de erro)
+      if (ok !== false) {
+        toast.success('Prazo alterado com sucesso!');
+        setIsExtending(false);
+        setExtensionReason('');
+      }
+    } catch (err: any) {
+      console.error('Erro ao alterar prazo:', err);
+      toast.error('Erro ao alterar prazo: ' + (err?.message || 'tente novamente.'));
+    } finally {
+      setIsSavingExtension(false);
     }
-
-    onUpdate({
-      ...task,
-      dueDate: newDueDate,
-      extensionCount: (task.extensionCount || 0) + 1,
-      extensionHistory: [log, ...(task.extensionHistory || [])]
-    });
-    setIsExtending(false);
-    setExtensionReason('');
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
+    // Permite selecionar o mesmo arquivo novamente após uma falha
+    event.target.value = '';
 
     for (const file of Array.from(files)) {
       if (uploadFile && saveAttachment) {
@@ -5506,6 +7004,7 @@ function TaskDetailModal(props: any) {
             type: file.type,
             size: file.size
           });
+          toast.success(`Anexo "${file.name}" enviado.`);
         }
       }
     }
@@ -5529,9 +7028,19 @@ function TaskDetailModal(props: any) {
     if (!newComment.trim()) return;
 
     if (saveComment) {
-      const success = await saveComment(task.id, newComment);
+      const text = newComment;
+      const success = await saveComment(task.id, text);
       if (success) {
         setNewComment('');
+        // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
+        notifyMentions({
+          text,
+          taskId: task.id,
+          taskTitle: task.title,
+          actor: currentUser,
+          users: users || [],
+          teams,
+        });
       }
     }
   };
@@ -5553,7 +7062,33 @@ function TaskDetailModal(props: any) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={(e) => e.stopPropagation()}>
-      <div className="bg-white w-full max-w-[1280px] h-[90vh] flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+      <div className="relative bg-white w-full max-w-[1280px] h-[90vh] flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+        {showAIPanel && (
+          <AIPanel
+            context={[
+              `Título: ${task.title}`,
+              `Status: ${task.status} | Prioridade: ${task.priority}`,
+              task.startDate ? `Início: ${new Date(task.startDate).toLocaleDateString('pt-BR')}` : '',
+              task.dueDate ? `Prazo: ${new Date(task.dueDate).toLocaleDateString('pt-BR')}` : '',
+              `Responsável: ${users?.find((u: User) => u.id === task.mainAssigneeId)?.name || 'Sem responsável'}`,
+              (task.secondaryAssigneeIds || []).length > 0
+                ? `Acompanhantes: ${(task.secondaryAssigneeIds || []).map((id: string) => users?.find((u: User) => u.id === id)?.name).filter(Boolean).join(', ')}`
+                : '',
+              task.extensionCount ? `Prorrogações de prazo: ${task.extensionCount}x` : '',
+              `\nDescrição:\n${task.description || '(sem descrição)'}`,
+              tasks.filter((t: any) => t.parentId === task.id).length > 0
+                ? `\nSubtarefas:\n${tasks.filter((t: any) => t.parentId === task.id).map((s: any) => `- [${s.status}] ${s.title}`).join('\n')}`
+                : '',
+              (task.checklists || []).length > 0
+                ? `\nItens de ação:\n${(task.checklists || []).map((c: ChecklistItem) => `- [${c.completed ? 'x' : ' '}] ${c.text}`).join('\n')}`
+                : '',
+              (task.comments || []).length > 0
+                ? `\nComentários (do mais antigo ao mais novo):\n${(task.comments || []).map((c: any) => `${users?.find((u: User) => u.id === c.userId)?.name || 'Alguém'}: ${c.text}`).join('\n')}`
+                : '',
+            ].filter(Boolean).join('\n')}
+            onClose={() => setShowAIPanel(false)}
+          />
+        )}
         <div className="p-4 border-b shrink-0 flex items-center justify-between bg-white px-8">
           <div className="flex items-center gap-4">
             <div className="text-gray-400 p-1 hover:bg-gray-100 rounded cursor-pointer">
@@ -5576,6 +7111,15 @@ function TaskDetailModal(props: any) {
             >
               <LinkIcon className="w-4 h-4" /> Compartilhar
             </button>
+            {!isReadOnly && onDuplicate && (
+              <button
+                onClick={() => onDuplicate(task)}
+                className="flex items-center gap-2 px-3 py-1.5 hover:bg-blue-50 text-gray-500 hover:text-blue-600 text-sm font-medium rounded-lg transition-all"
+                title="Duplicar tarefa"
+              >
+                <Copy className="w-4 h-4" /> Duplicar
+              </button>
+            )}
             {!isReadOnly && onDelete && (
               <button onClick={onDelete} className="p-2 hover:bg-red-50 text-red-400 rounded-lg transition-colors" title="Excluir Tarefa">
                 <Icons.Trash />
@@ -5597,8 +7141,11 @@ function TaskDetailModal(props: any) {
                   <Icons.Check className="w-3 h-3" /> Tarefa
                 </div>
                 <span className="text-gray-300 text-sm font-medium">{task.id.slice(0, 8)}</span>
-                <button className="flex items-center gap-1.5 px-3 py-1 text-purple-600 font-bold text-xs hover:bg-purple-50 rounded transition-colors ml-2">
-                  <Icons.Plus className="w-3 h-3" /> Pergunte à IA
+                <button
+                  onClick={() => setShowAIPanel(v => !v)}
+                  className={`flex items-center gap-1.5 px-3 py-1 font-bold text-xs rounded transition-colors ml-2 ${showAIPanel ? 'bg-purple-100 text-purple-700' : 'text-purple-600 hover:bg-purple-50'}`}
+                >
+                  ✨ Pergunte à IA
                 </button>
               </div>
 
@@ -5703,6 +7250,21 @@ function TaskDetailModal(props: any) {
                             {(task.secondaryAssigneeIds || []).includes(u.id) && <Icons.Check className="w-4 h-4 ml-auto text-green-500" />}
                           </DropdownMenuItem>
                         ))}
+                        {teams.length > 0 && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Equipes</div>
+                            {teams.map((team: Team) => (
+                              <DropdownMenuItem key={team.id} onClick={() => handleAssignTeam(team)} className="flex items-center gap-3 py-2">
+                                <span className="w-6 h-6 rounded-full flex items-center justify-center text-white shrink-0" style={{ backgroundColor: team.color }}>
+                                  <Icons.Users className="w-3.5 h-3.5" />
+                                </span>
+                                <span className="text-sm text-gray-600">{team.name}</span>
+                                <span className="ml-auto text-[10px] text-gray-400">{team.memberIds.length} {team.memberIds.length === 1 ? 'membro' : 'membros'}</span>
+                              </DropdownMenuItem>
+                            ))}
+                          </>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
 
@@ -5895,15 +7457,79 @@ function TaskDetailModal(props: any) {
               )}
               {detailActiveTab === 'checklist' && (
                 <div className="space-y-4">
-                  <h3 className="text-sm font-bold text-gray-900 mb-4">Itens de ação</h3>
+                  <h3 className="text-sm font-bold text-gray-900 mb-4">
+                    Itens de ação ({(task.checklists || []).filter((i: ChecklistItem) => i.completed).length}/{(task.checklists || []).length})
+                  </h3>
                   {(task.checklists || []).map((item: ChecklistItem) => (
-                    <div key={item.id} className="flex items-center gap-4 p-4 hover:bg-gray-50 rounded-xl transition-all border border-transparent hover:border-gray-100">
-                      <div className="w-5 h-5 rounded border-2 border-gray-300 flex items-center justify-center cursor-pointer">
+                    <div key={item.id} className="group flex items-center gap-4 p-4 hover:bg-gray-50 rounded-xl transition-all border border-transparent hover:border-gray-100">
+                      <div
+                        onClick={async () => {
+                          if (isReadOnly) return;
+                          const completed = !item.completed;
+                          const { error } = await supabase.from('task_checklists').update({ completed }).eq('id', item.id);
+                          if (!error) {
+                            onUpdate({
+                              ...task,
+                              checklists: (task.checklists || []).map((c: ChecklistItem) => c.id === item.id ? { ...c, completed } : c),
+                            });
+                          }
+                        }}
+                        className="w-5 h-5 rounded border-2 border-gray-300 flex items-center justify-center cursor-pointer hover:border-orange-400 transition-colors"
+                      >
                         {item.completed && <div className="w-3 h-3 bg-orange-500 rounded-sm"></div>}
                       </div>
-                      <span className={`text-sm ${item.completed ? 'line-through text-gray-300 font-medium' : 'text-gray-700 font-medium'}`}>{item.text}</span>
+                      <span className={`text-sm flex-1 ${item.completed ? 'line-through text-gray-300 font-medium' : 'text-gray-700 font-medium'}`}>{item.text}</span>
+                      {!isReadOnly && (
+                        <button
+                          onClick={async () => {
+                            const { error } = await supabase.from('task_checklists').delete().eq('id', item.id);
+                            if (!error) {
+                              onUpdate({
+                                ...task,
+                                checklists: (task.checklists || []).filter((c: ChecklistItem) => c.id !== item.id),
+                              });
+                            }
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-50 text-red-400 rounded-lg transition-all"
+                          title="Excluir item"
+                        >
+                          <Icons.Trash />
+                        </button>
+                      )}
                     </div>
                   ))}
+                  {!isReadOnly && (
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        const text = newChecklistText.trim();
+                        if (!text) return;
+                        const { data, error } = await supabase
+                          .from('task_checklists')
+                          .insert({ task_id: task.id, text })
+                          .select()
+                          .single();
+                        if (!error && data) {
+                          setNewChecklistText('');
+                          onUpdate({
+                            ...task,
+                            checklists: [...(task.checklists || []), { id: data.id, text: data.text, completed: false }],
+                          });
+                        }
+                      }}
+                      className="flex items-center gap-3 pt-2"
+                    >
+                      <input
+                        value={newChecklistText}
+                        onChange={(e) => setNewChecklistText(e.target.value)}
+                        placeholder="Novo item de ação... (Enter para adicionar)"
+                        className="flex-1 px-4 py-2.5 text-sm border rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-200"
+                      />
+                      <button type="submit" disabled={!newChecklistText.trim()} className="px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:opacity-40 text-white text-sm font-bold rounded-xl transition-colors">
+                        Adicionar
+                      </button>
+                    </form>
+                  )}
                 </div>
               )}
               {detailActiveTab === 'attachments' && (
@@ -5958,15 +7584,50 @@ function TaskDetailModal(props: any) {
                 />
               )}
               {detailActiveTab === 'watchers' && (
-                <div className="space-y-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-sm font-bold text-gray-900">Observadores</h3>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    {(task.watchers || []).length === 0 && (
-                      <p className="col-span-2 text-center py-8 text-sm text-gray-400 font-medium italic">Nenhum observador definido.</p>
-                    )}
-                  </div>
+                <div className="space-y-4">
+                  {(() => {
+                    const amWatching = (task.watcherIds || []).includes(currentUser.id);
+                    return (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-sm font-bold text-gray-900">Observadores</h3>
+                          <button
+                            onClick={() => toggleWatcher(task.id, amWatching)}
+                            className={`text-xs font-bold px-3 py-1.5 rounded-lg transition-all ${
+                              amWatching
+                                ? 'bg-orange-100 text-orange-600 hover:bg-orange-200'
+                                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                            }`}
+                          >
+                            {amWatching ? '✓ Observando' : '+ Observar'}
+                          </button>
+                        </div>
+                        <p className="text-[11px] text-gray-400">Observadores recebem notificações de comentários e mudanças nesta tarefa.</p>
+                        {(task.watcherIds || []).length === 0 ? (
+                          <p className="text-center py-8 text-sm text-gray-400 italic">Nenhum observador ainda.</p>
+                        ) : (
+                          <div className="space-y-2">
+                            {(task.watcherIds || []).map((uid: string) => {
+                              const watcher = users.find((u: any) => u.id === uid);
+                              if (!watcher) return null;
+                              return (
+                                <div key={uid} className="flex items-center gap-3 p-2 rounded-xl hover:bg-gray-50">
+                                  <img src={watcher.avatar} className="w-8 h-8 rounded-full" alt="" />
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-semibold text-gray-800 truncate">{watcher.name}</p>
+                                    <p className="text-[11px] text-gray-400 truncate">{watcher.email}</p>
+                                  </div>
+                                  {uid === currentUser.id && (
+                                    <button onClick={() => toggleWatcher(task.id, true)} className="text-[10px] text-red-400 hover:text-red-600 font-semibold">Sair</button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -6000,19 +7661,19 @@ function TaskDetailModal(props: any) {
                   }
 
                   if (item.unifiedType === 'COMMENT') {
+                    const isOwn = item.userId === currentUser.id;
                     return (
-                      <div key={item.id} className="relative">
-                        <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
-                          <img src={users.find((u: any) => u.id === item.userId)?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
-                        </div>
-                        <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs font-bold text-gray-900">{users.find((u: any) => u.id === item.userId)?.name}</span>
-                            <span className="text-[10px] text-gray-300">{formatDate(item.date)}</span>
-                          </div>
-                          <p className="text-sm text-gray-600 leading-relaxed">{item.text}</p>
-                        </div>
-                      </div>
+                      <CommentItem
+                        key={item.id}
+                        item={item}
+                        users={users}
+                        teams={teams}
+                        isOwn={isOwn}
+                        taskId={task.id}
+                        onEdit={editComment}
+                        onDelete={deleteComment}
+                        formatDate={formatDate}
+                      />
                     );
                   }
 
@@ -6022,7 +7683,8 @@ function TaskDetailModal(props: any) {
                       'PRIORITY_CHANGE': 'bg-cyan-50/30 border-cyan-50 text-cyan-600 circle-cyan-400',
                       'MAIN_RESPONSIBLE_CHANGE': 'bg-purple-50/30 border-purple-50 text-purple-600 circle-purple-400',
                       'RESPONSIBLE_ADDED': 'bg-green-50/30 border-green-50 text-green-600 circle-green-400',
-                      'RESPONSIBLE_REMOVED': 'bg-red-50/30 border-red-50 text-red-600 circle-red-400'
+                      'RESPONSIBLE_REMOVED': 'bg-red-50/30 border-red-50 text-red-600 circle-red-400',
+                      'TEAM_ASSIGNED': 'bg-purple-50/30 border-purple-50 text-purple-600 circle-purple-400'
                     };
 
                     const style = typeStyles[item.type] || 'bg-gray-50/30 border-gray-50 text-gray-600 circle-gray-400';
@@ -6051,6 +7713,9 @@ function TaskDetailModal(props: any) {
                             )}
                             {item.type === 'RESPONSIBLE_REMOVED' && (
                               <>removeu <span className={`font-bold ${textAccentClass}`}>{item.oldValue}</span> dos responsáveis adicionais</>
+                            )}
+                            {item.type === 'TEAM_ASSIGNED' && (
+                              <>atribuiu a equipe <span className={`font-bold ${textAccentClass}`}>{item.newValue}</span> à tarefa</>
                             )}
                           </p>
                         </div>
@@ -6083,13 +7748,15 @@ function TaskDetailModal(props: any) {
             <div className="p-6 border-t bg-white shrink-0">
               <input type="file" ref={fileInputRef} className="hidden" multiple onChange={handleFileUpload} />
               <div className="bg-gray-50 rounded-2xl p-4 border border-gray-100 shadow-inner">
-                <textarea
-                  placeholder="Escreva um comentário..."
+                <MentionTextarea
+                  placeholder="Escreva um comentário... use @ para mencionar pessoas ou Equipes"
                   value={newComment}
-                  onChange={(e) => setNewComment(e.target.value)}
+                  onChange={setNewComment}
+                  onSubmit={handleAddComment}
+                  users={users || []}
+                  teams={teams}
                   className="w-full bg-transparent border-none focus:ring-0 text-sm p-0 resize-none min-h-[60px] custom-scrollbar text-gray-700"
-                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAddComment(); } }}
-                ></textarea>
+                />
                 <div className="flex items-center justify-between mt-3">
                   <div className="flex items-center gap-3 text-gray-400">
                     <div onClick={() => fileInputRef.current?.click()} className="cursor-pointer hover:text-gray-600 transition-colors">
@@ -6151,10 +7818,15 @@ function TaskDetailModal(props: any) {
                 </button>
                 <button
                   onClick={handleSaveDueDate}
-                  disabled={newDueDate === task.dueDate || !extensionReason.trim()}
-                  className="flex-[2] py-3 bg-orange-500 text-white font-black rounded-2xl shadow-xl shadow-orange-100 hover:brightness-110 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100"
+                  disabled={isSavingExtension || !newDueDate || newDueDate === task.dueDate || !extensionReason.trim()}
+                  className="flex-[2] py-3 bg-orange-500 text-white font-black rounded-2xl shadow-xl shadow-orange-100 hover:brightness-110 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100 flex items-center justify-center gap-2"
                 >
-                  Salvar Novo Prazo
+                  {isSavingExtension ? (
+                    <>
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      Salvando...
+                    </>
+                  ) : 'Salvar Novo Prazo'}
                 </button>
               </div>
             </div>
