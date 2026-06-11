@@ -23,6 +23,7 @@ import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
 import { MentionTextarea } from './components/MentionTextarea';
+import { AIPanel } from './components/AIPanel';
 import { MentionText, notifyMentions, notifyAssignment } from './lib/mentions';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
@@ -1567,7 +1568,21 @@ export default function App() {
                     if (!task) return;
                     supabase.from('tasks').update({ tags: (task.tags ?? []).filter(tg => tg !== tag) }).eq('id', tid);
                   },
-                  onSendNotification: (message) => toast.info(message),
+                  onSendNotification: (message, userId) => {
+                    toast.info(message);
+                    // Grava no sino: do destinatário configurado ou do responsável da tarefa
+                    const targetId = userId || prevTask.mainAssigneeId;
+                    if (targetId) {
+                      supabase.from('notifications').insert({
+                        user_id: targetId,
+                        actor_id: currentUser.id,
+                        type: 'automation',
+                        title: `Automação: ${message}`,
+                        body: `Tarefa "${prevTask.title}"`,
+                        task_id: prevTask.id,
+                      }).then(({ error }) => { if (error) console.error('Erro ao notificar automação:', error); });
+                    }
+                  },
                   onCreateTask: (taskData) => {
                     supabase.from('tasks').insert({
                       title: taskData.title ?? 'Nova tarefa',
@@ -6499,6 +6514,8 @@ function TaskDetailModal(props: any) {
   const [isSavingExtension, setIsSavingExtension] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [newComment, setNewComment] = useState('');
+  const [showAIPanel, setShowAIPanel] = useState(false);
+  const [newChecklistText, setNewChecklistText] = useState('');
   const [description, setDescription] = useState(task.description || '');
   const [isEditingDescription, setIsEditingDescription] = useState(false);
 
@@ -6739,7 +6756,33 @@ function TaskDetailModal(props: any) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4" onClick={(e) => e.stopPropagation()}>
-      <div className="bg-white w-full max-w-[1280px] h-[90vh] flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+      <div className="relative bg-white w-full max-w-[1280px] h-[90vh] flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-300">
+        {showAIPanel && (
+          <AIPanel
+            context={[
+              `Título: ${task.title}`,
+              `Status: ${task.status} | Prioridade: ${task.priority}`,
+              task.startDate ? `Início: ${new Date(task.startDate).toLocaleDateString('pt-BR')}` : '',
+              task.dueDate ? `Prazo: ${new Date(task.dueDate).toLocaleDateString('pt-BR')}` : '',
+              `Responsável: ${users?.find((u: User) => u.id === task.mainAssigneeId)?.name || 'Sem responsável'}`,
+              (task.secondaryAssigneeIds || []).length > 0
+                ? `Acompanhantes: ${(task.secondaryAssigneeIds || []).map((id: string) => users?.find((u: User) => u.id === id)?.name).filter(Boolean).join(', ')}`
+                : '',
+              task.extensionCount ? `Prorrogações de prazo: ${task.extensionCount}x` : '',
+              `\nDescrição:\n${task.description || '(sem descrição)'}`,
+              tasks.filter((t: any) => t.parentId === task.id).length > 0
+                ? `\nSubtarefas:\n${tasks.filter((t: any) => t.parentId === task.id).map((s: any) => `- [${s.status}] ${s.title}`).join('\n')}`
+                : '',
+              (task.checklists || []).length > 0
+                ? `\nItens de ação:\n${(task.checklists || []).map((c: ChecklistItem) => `- [${c.completed ? 'x' : ' '}] ${c.text}`).join('\n')}`
+                : '',
+              (task.comments || []).length > 0
+                ? `\nComentários (do mais antigo ao mais novo):\n${(task.comments || []).map((c: any) => `${users?.find((u: User) => u.id === c.userId)?.name || 'Alguém'}: ${c.text}`).join('\n')}`
+                : '',
+            ].filter(Boolean).join('\n')}
+            onClose={() => setShowAIPanel(false)}
+          />
+        )}
         <div className="p-4 border-b shrink-0 flex items-center justify-between bg-white px-8">
           <div className="flex items-center gap-4">
             <div className="text-gray-400 p-1 hover:bg-gray-100 rounded cursor-pointer">
@@ -6792,8 +6835,11 @@ function TaskDetailModal(props: any) {
                   <Icons.Check className="w-3 h-3" /> Tarefa
                 </div>
                 <span className="text-gray-300 text-sm font-medium">{task.id.slice(0, 8)}</span>
-                <button className="flex items-center gap-1.5 px-3 py-1 text-purple-600 font-bold text-xs hover:bg-purple-50 rounded transition-colors ml-2">
-                  <Icons.Plus className="w-3 h-3" /> Pergunte à IA
+                <button
+                  onClick={() => setShowAIPanel(v => !v)}
+                  className={`flex items-center gap-1.5 px-3 py-1 font-bold text-xs rounded transition-colors ml-2 ${showAIPanel ? 'bg-purple-100 text-purple-700' : 'text-purple-600 hover:bg-purple-50'}`}
+                >
+                  ✨ Pergunte à IA
                 </button>
               </div>
 
@@ -7105,15 +7151,79 @@ function TaskDetailModal(props: any) {
               )}
               {detailActiveTab === 'checklist' && (
                 <div className="space-y-4">
-                  <h3 className="text-sm font-bold text-gray-900 mb-4">Itens de ação</h3>
+                  <h3 className="text-sm font-bold text-gray-900 mb-4">
+                    Itens de ação ({(task.checklists || []).filter((i: ChecklistItem) => i.completed).length}/{(task.checklists || []).length})
+                  </h3>
                   {(task.checklists || []).map((item: ChecklistItem) => (
-                    <div key={item.id} className="flex items-center gap-4 p-4 hover:bg-gray-50 rounded-xl transition-all border border-transparent hover:border-gray-100">
-                      <div className="w-5 h-5 rounded border-2 border-gray-300 flex items-center justify-center cursor-pointer">
+                    <div key={item.id} className="group flex items-center gap-4 p-4 hover:bg-gray-50 rounded-xl transition-all border border-transparent hover:border-gray-100">
+                      <div
+                        onClick={async () => {
+                          if (isReadOnly) return;
+                          const completed = !item.completed;
+                          const { error } = await supabase.from('task_checklists').update({ completed }).eq('id', item.id);
+                          if (!error) {
+                            onUpdate({
+                              ...task,
+                              checklists: (task.checklists || []).map((c: ChecklistItem) => c.id === item.id ? { ...c, completed } : c),
+                            });
+                          }
+                        }}
+                        className="w-5 h-5 rounded border-2 border-gray-300 flex items-center justify-center cursor-pointer hover:border-orange-400 transition-colors"
+                      >
                         {item.completed && <div className="w-3 h-3 bg-orange-500 rounded-sm"></div>}
                       </div>
-                      <span className={`text-sm ${item.completed ? 'line-through text-gray-300 font-medium' : 'text-gray-700 font-medium'}`}>{item.text}</span>
+                      <span className={`text-sm flex-1 ${item.completed ? 'line-through text-gray-300 font-medium' : 'text-gray-700 font-medium'}`}>{item.text}</span>
+                      {!isReadOnly && (
+                        <button
+                          onClick={async () => {
+                            const { error } = await supabase.from('task_checklists').delete().eq('id', item.id);
+                            if (!error) {
+                              onUpdate({
+                                ...task,
+                                checklists: (task.checklists || []).filter((c: ChecklistItem) => c.id !== item.id),
+                              });
+                            }
+                          }}
+                          className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-red-50 text-red-400 rounded-lg transition-all"
+                          title="Excluir item"
+                        >
+                          <Icons.Trash />
+                        </button>
+                      )}
                     </div>
                   ))}
+                  {!isReadOnly && (
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        const text = newChecklistText.trim();
+                        if (!text) return;
+                        const { data, error } = await supabase
+                          .from('task_checklists')
+                          .insert({ task_id: task.id, text })
+                          .select()
+                          .single();
+                        if (!error && data) {
+                          setNewChecklistText('');
+                          onUpdate({
+                            ...task,
+                            checklists: [...(task.checklists || []), { id: data.id, text: data.text, completed: false }],
+                          });
+                        }
+                      }}
+                      className="flex items-center gap-3 pt-2"
+                    >
+                      <input
+                        value={newChecklistText}
+                        onChange={(e) => setNewChecklistText(e.target.value)}
+                        placeholder="Novo item de ação... (Enter para adicionar)"
+                        className="flex-1 px-4 py-2.5 text-sm border rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-200"
+                      />
+                      <button type="submit" disabled={!newChecklistText.trim()} className="px-4 py-2.5 bg-orange-500 hover:bg-orange-600 disabled:opacity-40 text-white text-sm font-bold rounded-xl transition-colors">
+                        Adicionar
+                      </button>
+                    </form>
+                  )}
                 </div>
               )}
               {detailActiveTab === 'attachments' && (
