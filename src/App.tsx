@@ -491,22 +491,41 @@ export default function App() {
   }, []);
 
   const removeTaskAttachment = useCallback(async (taskId: string, attachmentId: string) => {
-    const { error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('task_attachments')
       .delete()
-      .eq('id', attachmentId);
+      .eq('id', attachmentId)
+      .select();
 
-    if (!error) {
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            attachments: (t.attachments || []).filter(a => a.id !== attachmentId)
-          };
-        }
-        return t;
-      }));
+    if (error) {
+      console.error('Erro ao excluir anexo:', error);
+      toast.error(`Falha ao excluir o anexo: ${error.message}`);
+      return;
     }
+    if (!data || data.length === 0) {
+      toast.error('Falha ao excluir o anexo: registro não encontrado.');
+      return;
+    }
+
+    // Remove o arquivo físico do Storage (a URL pública contém bucket + caminho)
+    const url: string = (data[0] as any)?.url || '';
+    const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (match) {
+      const storagePath = decodeURIComponent(match[2]);
+      const { error: storageError } = await supabaseAdmin.storage.from(match[1]).remove([storagePath]);
+      if (storageError) console.error('Erro ao remover arquivo do Storage:', storageError);
+    }
+
+    setTasks(prev => prev.map(t => {
+      if (t.id === taskId) {
+        return {
+          ...t,
+          attachments: (t.attachments || []).filter(a => a.id !== attachmentId)
+        };
+      }
+      return t;
+    }));
+    toast.success('Anexo excluído.');
   }, []);
 
   const saveTaskComment = useCallback(async (taskId: string, text: string) => {
@@ -3641,19 +3660,31 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
   };
 
   const removeAttachment = async (id: string) => {
-    const { error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('doc_attachments')
       .delete()
-      .eq('id', id);
+      .eq('id', id)
+      .select();
 
-    if (!error) {
-      onUpdate({
-        ...doc,
-        attachments: (doc.attachments || []).filter(a => a.id !== id)
-      });
-    } else {
+    if (error || !data || data.length === 0) {
       console.error('Erro ao remover anexo:', error);
+      toast.error(`Falha ao excluir o anexo${error ? `: ${error.message}` : '.'}`);
+      return;
     }
+
+    const url: string = (data[0] as any)?.url || '';
+    const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (match) {
+      const storagePath = decodeURIComponent(match[2]);
+      const { error: storageError } = await supabaseAdmin.storage.from(match[1]).remove([storagePath]);
+      if (storageError) console.error('Erro ao remover arquivo do Storage:', storageError);
+    }
+
+    onUpdate({
+      ...doc,
+      attachments: (doc.attachments || []).filter(a => a.id !== id)
+    });
+    toast.success('Anexo excluído.');
   };
 
   const formatFileSize = (bytes: number) => {
