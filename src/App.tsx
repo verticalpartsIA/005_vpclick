@@ -3575,7 +3575,8 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
     if (!file) return;
 
     setIsUploading(true);
-    const path = `headers/${doc.id}_${Date.now()}_${file.name}`;
+    const safeName = file.name.replace(/[^\w.\-]/g, '_');
+    const path = `headers/${doc.id}_${Date.now()}_${safeName}`;
     const url = await uploadFile(file, path);
     setIsUploading(false);
 
@@ -3590,7 +3591,8 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
     if (!file) return;
 
     setIsUploading(true);
-    const path = `attachments/${doc.id}/${Date.now()}_${file.name}`;
+    const safeName = file.name.replace(/[^\w.\-]/g, '_');
+    const path = `attachments/${doc.id}/${Date.now()}_${safeName}`;
     const url = await uploadFile(file, path);
     setIsUploading(false);
 
@@ -6995,7 +6997,8 @@ function TaskDetailModal(props: any) {
 
     for (const file of Array.from(files)) {
       if (uploadFile && saveAttachment) {
-        const path = `tasks/${task.id}/${Date.now()}_${file.name}`;
+        const safeName = file.name.replace(/[^\w.\-]/g, '_');
+        const path = `tasks/${task.id}/${Date.now()}_${safeName}`;
         const url = await uploadFile(file, path, 'task-files');
         if (url) {
           await saveAttachment(task.id, {
