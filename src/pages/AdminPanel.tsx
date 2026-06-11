@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { z } from "zod";
 import {
   ChevronDown,
@@ -62,6 +62,8 @@ const ROLE_LABEL: Record<UserRole, string> = {
 // ─── Avatar com initials fallback ─────────────────────────────
 function UserAvatar({ user, size = "md" }: { user: User; size?: "sm" | "md" | "lg" }) {
   const [err, setErr] = useState(false);
+  // Volta a tentar carregar a imagem quando a URL do avatar mudar
+  useEffect(() => { setErr(false); }, [user.avatar]);
   const initials = user.name
     .split(" ")
     .slice(0, 2)
@@ -421,6 +423,8 @@ export default function AdminPanel({
                             className="hidden"
                             onChange={(e) => {
                               if (e.target.files?.[0]) handleAvatarUpload(u.id, e.target.files[0]);
+                              // Permite selecionar o mesmo arquivo novamente
+                              e.target.value = "";
                             }}
                           />
                         </label>

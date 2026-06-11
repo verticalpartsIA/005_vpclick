@@ -242,6 +242,36 @@ export default function App() {
 
       console.log("SSO: Usuário central validado:", centralUser.email);
 
+      // Busca o perfil completo na porta de entrada (vpsistema) com o token do
+      // próprio usuário — é de lá que herdamos nome, avatar e nível.
+      let centralProfile: { name?: string; avatar_url?: string; level?: string } | null = null;
+      try {
+        const centralAsUser = createClient(CENTRAL_URL, CENTRAL_ANON, {
+          global: { headers: { Authorization: `Bearer ${token}` } },
+          auth: { persistSession: false, autoRefreshToken: false },
+        });
+        const { data } = await centralAsUser
+          .from('profiles')
+          .select('name, avatar_url, level')
+          .eq('id', centralUser.id)
+          .maybeSingle();
+        centralProfile = data;
+      } catch (profileErr) {
+        console.warn('SSO: não foi possível ler o perfil do vpsistema, usando metadados do Auth.', profileErr);
+      }
+
+      const centralName = centralProfile?.name
+        || centralUser.user_metadata?.name
+        || centralUser.email?.split('@')[0]
+        || 'Usuário';
+      const centralAvatar = centralProfile?.avatar_url || centralUser.user_metadata?.avatar || null;
+      const centralLevel = centralProfile?.level || centralUser.user_metadata?.level;
+      const mappedRole = centralLevel === 'Administrador'
+        ? UserRole.ADMIN
+        : (centralLevel === 'Lider' || centralLevel === 'Gestor')
+          ? UserRole.GESTOR
+          : UserRole.COLABORADOR;
+
       const { data: users, error: userError } = await supabaseAdmin
         .from('profiles')
         .select('*')
@@ -254,13 +284,38 @@ export default function App() {
         const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
           email: centralUser.email!,
           email_confirm: true,
-          user_metadata: { name: centralUser.user_metadata?.name || centralUser.email?.split('@')[0] }
+          user_metadata: { name: centralName, avatar: centralAvatar, role: mappedRole }
         });
 
-        if (createError) throw createError;
-        targetUserId = newUser.user?.id;
+        if (createError) {
+          // Usuário já existe no Auth mas sem perfil — recupera o id pelo email
+          const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
+          const existingAuthUser = list?.users?.find((u: any) => u.email === centralUser.email);
+          if (!existingAuthUser) throw createError;
+          targetUserId = existingAuthUser.id;
+        } else {
+          targetUserId = newUser.user?.id;
+        }
+
+        // Cria o perfil já herdando a identidade do vpsistema; o papel inicial
+        // vem do nível de lá e pode ser ajustado depois no painel do VPClick.
+        const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
+          id: targetUserId,
+          name: centralName,
+          email: centralUser.email,
+          avatar: centralAvatar || `https://picsum.photos/seed/${targetUserId}/100`,
+          role: mappedRole,
+          is_active: true,
+        }, { onConflict: 'id' });
+        if (profileError) console.error('SSO: erro ao criar perfil herdado:', profileError);
       } else {
         targetUserId = users[0].id;
+        // Identidade (nome/avatar) segue sincronizada com a porta de entrada;
+        // papel e acessos continuam sendo configurados dentro do VPClick.
+        const identity: Record<string, string> = { name: centralName };
+        if (centralAvatar) identity.avatar = centralAvatar;
+        const { error: syncError } = await supabaseAdmin.from('profiles').update(identity).eq('id', targetUserId);
+        if (syncError) console.error('SSO: erro ao sincronizar identidade:', syncError);
       }
 
       const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
@@ -1421,7 +1476,7 @@ export default function App() {
 
   const handleAdminUpdateAccess = async (userId: string, spaceIds: string[], folderIds: string[]) => {
     // Insere ou atualiza o acesso do usuário usando o padrão OnConflict
-    const { error } = await supabase
+    const saveAccess = () => supabase
       .from('user_access')
       .upsert({
         user_id: userId,
@@ -1429,6 +1484,25 @@ export default function App() {
         folder_ids: folderIds,
         updated_at: new Date().toISOString()
       }, { onConflict: 'user_id' });
+
+    let { error } = await saveAccess();
+
+    // 23503 = FK violada: o usuário existe no Auth mas ainda não tem linha em
+    // profiles (criado pelo admin e nunca logou). Cria o perfil e tenta de novo.
+    if (error?.code === '23503') {
+      const user = adminUsers.find(u => u.id === userId);
+      if (user) {
+        const { error: profileError } = await supabase.from('profiles').upsert({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          avatar: user.avatar,
+          role: user.role,
+          is_active: true,
+        }, { onConflict: 'id' });
+        if (!profileError) ({ error } = await saveAccess());
+      }
+    }
 
     if (error) {
       console.error('Erro ao atualizar acessos:', error);
@@ -1456,15 +1530,32 @@ export default function App() {
   };
 
   const handleAdminUpdateUserAvatar = async (userId: string, avatarUrl: string) => {
-    const { error } = await supabase.from('profiles').update({ avatar: avatarUrl }).eq('id', userId);
-    if (!error) {
-      setAdminUsers(prev => prev.map(u => u.id === userId ? { ...u, avatar: avatarUrl } : u));
-      if (currentUser.id === userId) {
-        setCurrentUser(prev => ({ ...prev, avatar: avatarUrl }));
-      }
-    } else {
+    const { data, error } = await supabase.from('profiles').update({ avatar: avatarUrl }).eq('id', userId).select();
+    if (error) {
       console.error('Erro ao atualizar avatar:', error);
       throw error;
+    }
+    if (!data || data.length === 0) {
+      // Nenhuma linha atualizada: o perfil ainda não existe em profiles
+      // (usuário criado pelo admin e que nunca logou). Cria já com o avatar.
+      const user = adminUsers.find(u => u.id === userId);
+      if (!user) throw new Error('Usuário não encontrado.');
+      const { error: upsertError } = await supabase.from('profiles').upsert({
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        avatar: avatarUrl,
+        role: user.role,
+        is_active: true,
+      }, { onConflict: 'id' });
+      if (upsertError) {
+        console.error('Erro ao criar perfil com avatar:', upsertError);
+        throw upsertError;
+      }
+    }
+    setAdminUsers(prev => prev.map(u => u.id === userId ? { ...u, avatar: avatarUrl } : u));
+    if (currentUser.id === userId) {
+      setCurrentUser(prev => ({ ...prev, avatar: avatarUrl }));
     }
   };
 
@@ -1495,6 +1586,20 @@ export default function App() {
         avatar: user.avatar || `https://picsum.photos/seed/${data.user.id}/100`,
         role: (user.role as UserRole) || UserRole.COLABORADOR
       };
+      // Garante a linha em profiles na hora (FKs de user_access/teams dependem
+      // dela) em vez de esperar o trigger do Auth ou o primeiro login.
+      const { error: profileError } = await supabase.from('profiles').upsert({
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email,
+        avatar: newUser.avatar,
+        role: newUser.role,
+        is_active: true,
+      }, { onConflict: 'id' });
+      if (profileError) {
+        console.error('Erro ao criar perfil do novo usuário:', profileError);
+        toast.error('Usuário criado no Auth, mas houve erro ao criar o perfil: ' + profileError.message);
+      }
       setAdminUsers(prev => [newUser, ...prev]);
       setUserAccess(prev => ({ ...prev, [newUser.id]: { spaceIds: [], folderIds: [] } }));
       return newUser;
