@@ -441,8 +441,18 @@ export default function App() {
         .getPublicUrl(data.path);
 
       return publicUrl;
-    } catch (err) {
+    } catch (err: any) {
       console.error('Erro no upload:', err);
+      const msg: string = err?.message || '';
+      if (msg.includes('Bucket not found')) {
+        toast.error(`Falha no upload: o bucket "${bucket}" não existe no Storage. Avise o administrador (migration 08).`);
+      } else if (msg.includes('row-level security') || msg.includes('violates') || err?.statusCode === '403' || err?.status === 403) {
+        toast.error('Falha no upload: sem permissão no Storage. Avise o administrador (políticas do bucket).');
+      } else if (msg.includes('exceeded') || msg.includes('too large') || err?.statusCode === '413') {
+        toast.error('Falha no upload: arquivo muito grande para o limite do bucket.');
+      } else {
+        toast.error(`Falha no upload do arquivo${msg ? `: ${msg}` : '.'}`);
+      }
       return null;
     }
   }, []);
@@ -6980,6 +6990,8 @@ function TaskDetailModal(props: any) {
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
+    // Permite selecionar o mesmo arquivo novamente após uma falha
+    event.target.value = '';
 
     for (const file of Array.from(files)) {
       if (uploadFile && saveAttachment) {
@@ -6992,6 +7004,7 @@ function TaskDetailModal(props: any) {
             type: file.type,
             size: file.size
           });
+          toast.success(`Anexo "${file.name}" enviado.`);
         }
       }
     }
