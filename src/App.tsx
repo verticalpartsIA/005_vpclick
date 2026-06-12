@@ -1551,6 +1551,104 @@ export default function App() {
     });
   };
 
+  const handleDuplicateList = (listId: string, currentName: string) => {
+    setRenameModal({
+      title: 'Duplicar Projeto (Lista)', defaultValue: `${currentName} (cópia)`,
+      onSubmit: async (newName) => {
+        const sourceList = lists.find(l => l.id === listId);
+        if (!sourceList) { toast.error('Lista de origem não encontrada.'); return; }
+
+        const toastId = toast.loading('Duplicando projeto...');
+        try {
+          // 1. Cria a nova lista na mesma pasta, com o mesmo grupo de status
+          const { data: newListData, error: listError } = await supabaseAdmin
+            .from('lists')
+            .insert({ name: newName.trim(), folder_id: sourceList.folderId, status_group_id: sourceList.statusGroupId })
+            .select()
+            .single();
+          if (listError || !newListData) throw listError || new Error('A nova lista não foi retornada.');
+
+          // 2. Busca todas as tarefas da lista direto do banco (estado local pode estar filtrado)
+          const { data: sourceTasks, error: tasksError } = await supabaseAdmin
+            .from('tasks').select('*').eq('list_id', listId);
+          if (tasksError) throw tasksError;
+
+          const idMap = new Map<string, string>();
+          const allTasks = sourceTasks || [];
+          const parents = allTasks.filter((t: any) => !t.parent_id);
+          const children = allTasks.filter((t: any) => t.parent_id);
+
+          const cloneRow = (t: any, parentId: string | null) => ({
+            title: t.title,
+            description: t.description || '',
+            status: t.status,
+            priority: t.priority,
+            main_assignee_id: t.main_assignee_id,
+            secondary_assignee_ids: t.secondary_assignee_ids || [],
+            start_date: t.start_date,
+            due_date: t.due_date,
+            list_id: newListData.id,
+            project_id: t.project_id || null,
+            parent_id: parentId,
+            extension_count: 0,
+            tags: t.tags || [],
+          });
+
+          // 3. Insere tarefas principais em lote (ordem do retorno = ordem do insert)
+          if (parents.length > 0) {
+            const { data: createdParents, error: parentsError } = await supabaseAdmin
+              .from('tasks').insert(parents.map((t: any) => cloneRow(t, null))).select('id');
+            if (parentsError || !createdParents) throw parentsError || new Error('Falha ao duplicar tarefas.');
+            parents.forEach((t: any, i: number) => idMap.set(t.id, createdParents[i].id));
+          }
+
+          // 4. Insere subtarefas apontando para os novos pais
+          const validChildren = children.filter((t: any) => idMap.has(t.parent_id));
+          if (validChildren.length > 0) {
+            const { data: createdChildren, error: childrenError } = await supabaseAdmin
+              .from('tasks').insert(validChildren.map((t: any) => cloneRow(t, idMap.get(t.parent_id)!))).select('id');
+            if (childrenError || !createdChildren) throw childrenError || new Error('Falha ao duplicar subtarefas.');
+            validChildren.forEach((t: any, i: number) => idMap.set(t.id, createdChildren[i].id));
+          }
+
+          const oldTaskIds = Array.from(idMap.keys());
+          if (oldTaskIds.length > 0) {
+            // 5. Copia checklists
+            const { data: checklists } = await supabaseAdmin
+              .from('task_checklists').select('task_id, text, completed').in('task_id', oldTaskIds);
+            if (checklists && checklists.length > 0) {
+              await supabaseAdmin.from('task_checklists').insert(
+                checklists.map((c: any) => ({ task_id: idMap.get(c.task_id)!, text: c.text, completed: c.completed }))
+              );
+            }
+
+            // 6. Copia valores de campos personalizados
+            const { data: customValues } = await supabaseAdmin
+              .from('custom_field_values').select('field_id, entity_id, value').in('entity_id', oldTaskIds);
+            if (customValues && customValues.length > 0) {
+              await supabaseAdmin.from('custom_field_values').insert(
+                customValues.map((v: any) => ({ field_id: v.field_id, entity_id: idMap.get(v.entity_id)!, value: v.value }))
+              );
+            }
+          }
+
+          const newList: List = {
+            id: newListData.id,
+            name: newListData.name,
+            folderId: newListData.folder_id,
+            statusGroupId: newListData.status_group_id
+          };
+          setLists(prev => [...prev, newList]);
+          setActiveListId(newList.id);
+          toast.success(`Projeto duplicado: ${idMap.size} tarefa(s) copiada(s).`, { id: toastId });
+        } catch (err: any) {
+          console.error('Erro ao duplicar projeto:', err);
+          toast.error(`Erro ao duplicar projeto: ${err?.message || 'tente novamente'}`, { id: toastId });
+        }
+      }
+    });
+  };
+
   const handleMoveList = async (listId: string, targetFolderId: string) => {
     const list = lists.find(l => l.id === listId);
     if (!list || list.folderId === targetFolderId) return;
@@ -2646,6 +2744,7 @@ export default function App() {
           onDeleteFolder={handleDeleteFolder}
           onDeleteList={handleDeleteList}
           onRenameList={handleRenameList}
+          onDuplicateList={handleDuplicateList}
           docs={docs}
           activeDocId={activeDocId}
           onSetActiveDocId={setActiveDocId}
@@ -3924,7 +4023,7 @@ function Sidebar({
   spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onNavigate, onViewChange, isCollapsed, onToggle,
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder,
-  onDeleteList, onRenameList,
+  onDeleteList, onRenameList, onDuplicateList,
   docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc,
   onMoveList, onMoveFolder,
   listTaskCounts, listProgressMap,
@@ -4433,6 +4532,7 @@ function Sidebar({
                                                   </DropdownMenuItem>
                                                   <DropdownMenuSeparator />
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
+                                                  <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onDuplicateList?.(list.id, list.name); }}>Duplicar projeto</DropdownMenuItem>
                                                   <DropdownMenuItem className="text-xs text-red-600 focus:text-red-600" onClick={(e) => { e.stopPropagation(); onDeleteList(list.id); }}>Excluir lista</DropdownMenuItem>
                                                 </DropdownMenuContent>
                                               </DropdownMenu>
