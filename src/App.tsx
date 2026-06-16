@@ -5052,11 +5052,16 @@ function ListView({
   );
 
 
+  const sortTasksNaturally = (a: Task, b: Task) =>
+    a.title.localeCompare(b.title, 'pt-BR', { numeric: true, sensitivity: 'base' });
+
   const grouped = useMemo(() => {
     return statusOrder
       .map((status) => ({
         status,
-        tasks: (tasks as Task[]).filter((t) => t.status === status && !t.parentId),
+        tasks: (tasks as Task[])
+          .filter((t) => t.status === status && !t.parentId)
+          .sort(sortTasksNaturally),
       }))
       .filter((g) => g.tasks.length > 0);
   }, [tasks, statusOrder]);
@@ -6954,6 +6959,8 @@ function TaskDetailModal(props: any) {
   const [newChecklistText, setNewChecklistText] = useState('');
   const [description, setDescription] = useState(task.description || '');
   const [isEditingDescription, setIsEditingDescription] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(task.title);
 
   const unifiedTimeline = useMemo(() => {
     const all = [
@@ -7283,7 +7290,33 @@ function TaskDetailModal(props: any) {
                 </button>
               </div>
 
-              <h2 className="text-3xl font-bold text-gray-900 mb-4 leading-tight">{task.title}</h2>
+              {editingTitle && !isReadOnly ? (
+                <input
+                  className="text-3xl font-bold text-gray-900 mb-4 leading-tight w-full border-b-2 border-orange-400 outline-none bg-transparent"
+                  value={titleDraft}
+                  autoFocus
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  onBlur={() => {
+                    setEditingTitle(false);
+                    if (titleDraft.trim() && titleDraft !== task.title) {
+                      onUpdate({ ...task, title: titleDraft.trim() });
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') { e.currentTarget.blur(); }
+                    if (e.key === 'Escape') { setTitleDraft(task.title); setEditingTitle(false); }
+                  }}
+                />
+              ) : (
+                <h2
+                  className={`text-3xl font-bold text-gray-900 mb-4 leading-tight ${!isReadOnly ? 'cursor-text hover:text-orange-700 transition-colors group' : ''}`}
+                  onClick={() => { if (!isReadOnly) { setTitleDraft(task.title); setEditingTitle(true); } }}
+                  title={!isReadOnly ? 'Clique para renomear' : undefined}
+                >
+                  {task.title}
+                  {!isReadOnly && <span className="inline-block ml-2 opacity-0 group-hover:opacity-100 transition-opacity text-sm text-orange-400">✏️</span>}
+                </h2>
+              )}
 
               {/* Health Banner */}
               {(() => {
