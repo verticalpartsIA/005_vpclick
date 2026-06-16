@@ -4036,6 +4036,7 @@ function Sidebar({
 
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
+  const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
   const [secInicioOpen, setSecInicioOpen] = useState(true);
   const [secMinhasTarefasOpen, setSecMinhasTarefasOpen] = useState(false);
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
@@ -4390,6 +4391,31 @@ function Sidebar({
 
                         {isExpanded && (
                           <div className="ml-5 border-l border-sidebar-border pl-2 mt-0.5 space-y-0.5 animate-in slide-in-from-top-1 duration-150">
+                            {selectedFolderIds.length > 0 && (
+                              <div className="flex items-center justify-between px-2 py-1.5 mb-1 bg-red-50 border border-red-200 rounded text-xs">
+                                <span className="text-red-600 font-medium">{selectedFolderIds.length} pasta(s) selecionada(s)</span>
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); setSelectedFolderIds([]); }}
+                                    className="text-gray-500 hover:text-gray-700 font-medium"
+                                  >
+                                    Cancelar
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (window.confirm(`Excluir ${selectedFolderIds.length} pasta(s) e todos os seus projetos?`)) {
+                                        selectedFolderIds.forEach(id => onDeleteFolder(id));
+                                        setSelectedFolderIds([]);
+                                      }
+                                    }}
+                                    className="text-red-600 hover:text-red-700 font-bold"
+                                  >
+                                    Excluir todas
+                                  </button>
+                                </div>
+                              </div>
+                            )}
                             {folders.filter((f: Folder) => f.spaceId === space.id).map((folder: Folder) => {
                               const isFolderExpanded = expandedFolders.includes(folder.id);
                               return (
@@ -4440,6 +4466,19 @@ function Sidebar({
                                       if (!isActiveFolder) onNavigate('folder', folder.id, folder.name);
                                     }}
                                   >
+                                    <input
+                                      type="checkbox"
+                                      className="w-3 h-3 rounded shrink-0 accent-orange-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                      style={selectedFolderIds.length > 0 ? { opacity: 1 } : {}}
+                                      checked={selectedFolderIds.includes(folder.id)}
+                                      onChange={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedFolderIds(prev =>
+                                          e.target.checked ? [...prev, folder.id] : prev.filter(id => id !== folder.id)
+                                        );
+                                      }}
+                                      onClick={(e) => e.stopPropagation()}
+                                    />
                                     <div className={`text-sidebar-foreground/40 transition-transform duration-200 shrink-0 ${isFolderExpanded ? 'rotate-90' : ''}`} aria-hidden>
                                       <Icons.ChevronRight />
                                     </div>
@@ -4532,6 +4571,19 @@ function Sidebar({
                                                   </DropdownMenuItem>
                                                   <DropdownMenuSeparator />
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
+                                                  <DropdownMenuSub>
+                                                    <DropdownMenuSubTrigger className="text-xs">Mover para</DropdownMenuSubTrigger>
+                                                    <DropdownMenuSubContent>
+                                                      {(folders as any[]).filter((f: any) => f.id !== list.folderId).map((f: any) => (
+                                                        <DropdownMenuItem key={f.id} className="text-xs" onClick={(e) => { e.stopPropagation(); onMoveList?.(list.id, f.id); }}>
+                                                          {f.name}
+                                                        </DropdownMenuItem>
+                                                      ))}
+                                                      {(folders as any[]).filter((f: any) => f.id !== list.folderId).length === 0 && (
+                                                        <DropdownMenuItem className="text-xs text-gray-400" disabled>Nenhuma outra pasta</DropdownMenuItem>
+                                                      )}
+                                                    </DropdownMenuSubContent>
+                                                  </DropdownMenuSub>
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onDuplicateList?.(list.id, list.name); }}>Duplicar projeto</DropdownMenuItem>
                                                   <DropdownMenuItem className="text-xs text-red-600 focus:text-red-600" onClick={(e) => { e.stopPropagation(); onDeleteList(list.id); }}>Excluir lista</DropdownMenuItem>
                                                 </DropdownMenuContent>
