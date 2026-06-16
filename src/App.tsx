@@ -1350,7 +1350,7 @@ export default function App() {
 
   const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
-      const { error } = await supabase
+      const { error } = await supabaseAdmin
         .from('tasks')
         .update({
           title: updatedTask.title,
@@ -7299,7 +7299,9 @@ function TaskDetailModal(props: any) {
                   onBlur={() => {
                     setEditingTitle(false);
                     if (titleDraft.trim() && titleDraft !== task.title) {
-                      onUpdate({ ...task, title: titleDraft.trim() });
+                      onUpdate({ ...task, title: titleDraft.trim() }).then((ok: boolean) => {
+                        if (ok) toast.success('Título atualizado.');
+                      });
                     }
                   }}
                   onKeyDown={(e) => {
