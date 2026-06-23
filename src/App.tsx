@@ -5572,7 +5572,12 @@ function ListView({
                                         <input
                                           type="date"
                                           value={currentValue ?? ''}
-                                          onChange={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
+                                          onChange={(e) => {
+                                            if (e.target.value) {
+                                              onUpdateFieldValue(field.id, t.id, e.target.value);
+                                            }
+                                          }}
+                                          onBlur={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
                                           className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
                                         />
                                       ) : field.type === CustomFieldType.RATING ? (
