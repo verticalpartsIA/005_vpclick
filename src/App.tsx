@@ -1429,7 +1429,7 @@ export default function App() {
     setConfirmModal({
       message: `Excluir ${ids.length} tarefa(s) permanentemente?`,
       onConfirm: async () => {
-        const { error } = await supabase.from('tasks').delete().in('id', ids);
+        const { error } = await supabaseAdmin.from('tasks').delete().in('id', ids).select();
         if (!error) {
           setTasks(prev => prev.filter(t => !ids.includes(t.id)));
           toast.success(`${ids.length} tarefa(s) removidas.`);
@@ -1455,7 +1455,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta tarefa permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabase.from('tasks').delete().eq('id', taskId);
+        const { error } = await supabaseAdmin.from('tasks').delete().eq('id', taskId).select();
         if (!error) {
           setTasks(prev => prev.filter(t => t.id !== taskId));
           if (selectedTaskId === taskId) setSelectedTaskId(null);
@@ -1475,7 +1475,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir este espaço e todas as suas pastas e tarefas?',
       onConfirm: async () => {
-        const { error } = await supabase.from('spaces').delete().eq('id', spaceId);
+        const { error } = await supabaseAdmin.from('spaces').delete().eq('id', spaceId).select();
         if (!error) {
           setSpaces(prev => prev.filter(s => s.id !== spaceId));
           setFolders(prev => prev.filter(f => f.spaceId !== spaceId));
@@ -1504,7 +1504,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta pasta e todas as suas tarefas?',
       onConfirm: async () => {
-        const { error } = await supabase.from('folders').delete().eq('id', folderId);
+        const { error } = await supabaseAdmin.from('folders').delete().eq('id', folderId).select();
         if (!error) {
           setFolders(prev => prev.filter(f => f.id !== folderId));
           if (activeScope.type === 'folder' && activeScope.id === folderId) handleNavigate('global', null, 'Dashboard');
@@ -1520,7 +1520,7 @@ export default function App() {
       onConfirm: async () => {
         let errorCount = 0;
         for (const folderId of folderIds) {
-          const { error } = await supabase.from('folders').delete().eq('id', folderId);
+          const { error } = await supabaseAdmin.from('folders').delete().eq('id', folderId).select();
           if (error) { errorCount++; toast.error('Erro ao excluir pasta: ' + error.message); }
           else {
             setFolders(prev => prev.filter(f => f.id !== folderId));
@@ -1551,7 +1551,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta lista e todas as suas tarefas permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabase.from('lists').delete().eq('id', listId);
+        const { error } = await supabaseAdmin.from('lists').delete().eq('id', listId).select();
         if (!error) {
           setLists(prev => prev.filter(l => l.id !== listId));
           setTasks(prev => prev.filter(t => t.listId !== listId));
