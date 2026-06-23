@@ -1425,15 +1425,19 @@ export default function App() {
     }
   };
 
-  const handleBulkDelete = async (ids: string[]) => {
-    if (!window.confirm(`Deletar ${ids.length} tarefa(s) permanentemente?`)) return;
-    const { error } = await supabase.from('tasks').delete().in('id', ids);
-    if (!error) {
-      setTasks(prev => prev.filter(t => !ids.includes(t.id)));
-      toast.success(`${ids.length} tarefa(s) removidas.`);
-    } else {
-      toast.error('Erro ao deletar tarefas: ' + error.message);
-    }
+  const handleBulkDelete = (ids: string[]) => {
+    setConfirmModal({
+      message: `Excluir ${ids.length} tarefa(s) permanentemente?`,
+      onConfirm: async () => {
+        const { error } = await supabase.from('tasks').delete().in('id', ids);
+        if (!error) {
+          setTasks(prev => prev.filter(t => !ids.includes(t.id)));
+          toast.success(`${ids.length} tarefa(s) removidas.`);
+        } else {
+          toast.error('Erro ao deletar tarefas: ' + error.message);
+        }
+      }
+    });
   };
 
   const handleBulkMove = async (ids: string[], listId: string) => {
