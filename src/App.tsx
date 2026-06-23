@@ -1510,6 +1510,25 @@ export default function App() {
     });
   };
 
+  const handleBulkDeleteFolders = (folderIds: string[], onDone: () => void) => {
+    setConfirmModal({
+      message: `Excluir ${folderIds.length} pasta(s) e todos os seus projetos permanentemente?`,
+      onConfirm: async () => {
+        let errorCount = 0;
+        for (const folderId of folderIds) {
+          const { error } = await supabase.from('folders').delete().eq('id', folderId);
+          if (error) { errorCount++; toast.error('Erro ao excluir pasta: ' + error.message); }
+          else {
+            setFolders(prev => prev.filter(f => f.id !== folderId));
+            if (activeScope.type === 'folder' && activeScope.id === folderId) handleNavigate('global', null, 'Dashboard');
+          }
+        }
+        if (errorCount === 0) toast.success(`${folderIds.length} pasta(s) excluída(s).`);
+        onDone();
+      }
+    });
+  };
+
   const handleRenameFolder = (folderId: string, currentName: string) => {
     setRenameModal({
       title: 'Renomear Pasta', defaultValue: currentName,
@@ -4480,10 +4499,7 @@ function Sidebar({
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      if (window.confirm(`Excluir ${selectedFolderIds.length} pasta(s) e todos os seus projetos?`)) {
-                                        selectedFolderIds.forEach(id => onDeleteFolder(id));
-                                        setSelectedFolderIds([]);
-                                      }
+                                      handleBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
                                     }}
                                     className="text-red-600 hover:text-red-700 font-bold"
                                   >
