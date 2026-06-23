@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy } from "lucide-react";
+import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy, ArrowUpDown } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
@@ -817,6 +817,7 @@ export default function App() {
   const [docs, setDocs] = useState<Doc[]>([]);
   const [workspaceTags, setWorkspaceTags] = useState<WorkspaceTag[]>([]);
   const [filterTags, setFilterTags] = useState<string[]>([]);
+  const [sortConfig, setSortConfig] = useState<{ field: 'created' | 'title' | 'priority' | 'dueDate' | 'status'; direction: 'asc' | 'desc' }>({ field: 'created', direction: 'asc' });
   const [teams, setTeams] = useState<Team[]>([]);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
 
@@ -1424,15 +1425,19 @@ export default function App() {
     }
   };
 
-  const handleBulkDelete = async (ids: string[]) => {
-    if (!window.confirm(`Deletar ${ids.length} tarefa(s) permanentemente?`)) return;
-    const { error } = await supabase.from('tasks').delete().in('id', ids);
-    if (!error) {
-      setTasks(prev => prev.filter(t => !ids.includes(t.id)));
-      toast.success(`${ids.length} tarefa(s) removidas.`);
-    } else {
-      toast.error('Erro ao deletar tarefas: ' + error.message);
-    }
+  const handleBulkDelete = (ids: string[]) => {
+    setConfirmModal({
+      message: `Excluir ${ids.length} tarefa(s) permanentemente?`,
+      onConfirm: async () => {
+        const { error } = await supabaseAdmin.from('tasks').delete().in('id', ids).select();
+        if (!error) {
+          setTasks(prev => prev.filter(t => !ids.includes(t.id)));
+          toast.success(`${ids.length} tarefa(s) removidas.`);
+        } else {
+          toast.error('Erro ao deletar tarefas: ' + error.message);
+        }
+      }
+    });
   };
 
   const handleBulkMove = async (ids: string[], listId: string) => {
@@ -1450,7 +1455,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta tarefa permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabase.from('tasks').delete().eq('id', taskId);
+        const { error } = await supabaseAdmin.from('tasks').delete().eq('id', taskId).select();
         if (!error) {
           setTasks(prev => prev.filter(t => t.id !== taskId));
           if (selectedTaskId === taskId) setSelectedTaskId(null);
@@ -1470,7 +1475,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir este espaço e todas as suas pastas e tarefas?',
       onConfirm: async () => {
-        const { error } = await supabase.from('spaces').delete().eq('id', spaceId);
+        const { error } = await supabaseAdmin.from('spaces').delete().eq('id', spaceId).select();
         if (!error) {
           setSpaces(prev => prev.filter(s => s.id !== spaceId));
           setFolders(prev => prev.filter(f => f.spaceId !== spaceId));
@@ -1499,12 +1504,31 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta pasta e todas as suas tarefas?',
       onConfirm: async () => {
-        const { error } = await supabase.from('folders').delete().eq('id', folderId);
+        const { error } = await supabaseAdmin.from('folders').delete().eq('id', folderId).select();
         if (!error) {
           setFolders(prev => prev.filter(f => f.id !== folderId));
           if (activeScope.type === 'folder' && activeScope.id === folderId) handleNavigate('global', null, 'Dashboard');
           toast.success('Pasta excluída.');
         } else { toast.error('Erro ao excluir pasta: ' + error.message); }
+      }
+    });
+  };
+
+  const handleBulkDeleteFolders = (folderIds: string[], onDone: () => void) => {
+    setConfirmModal({
+      message: `Excluir ${folderIds.length} pasta(s) e todos os seus projetos permanentemente?`,
+      onConfirm: async () => {
+        let errorCount = 0;
+        for (const folderId of folderIds) {
+          const { error } = await supabaseAdmin.from('folders').delete().eq('id', folderId).select();
+          if (error) { errorCount++; toast.error('Erro ao excluir pasta: ' + error.message); }
+          else {
+            setFolders(prev => prev.filter(f => f.id !== folderId));
+            if (activeScope.type === 'folder' && activeScope.id === folderId) handleNavigate('global', null, 'Dashboard');
+          }
+        }
+        if (errorCount === 0) toast.success(`${folderIds.length} pasta(s) excluída(s).`);
+        onDone();
       }
     });
   };
@@ -1527,7 +1551,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta lista e todas as suas tarefas permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabase.from('lists').delete().eq('id', listId);
+        const { error } = await supabaseAdmin.from('lists').delete().eq('id', listId).select();
         if (!error) {
           setLists(prev => prev.filter(l => l.id !== listId));
           setTasks(prev => prev.filter(t => t.listId !== listId));
@@ -2667,8 +2691,32 @@ export default function App() {
       result = result.filter(t => filterTags.some(tag => (t.tags ?? []).includes(tag)));
     }
 
+    // Sort
+    const PRIORITY_ORDER: Record<string, number> = { 'Urgente': 4, 'Alta': 3, 'Média': 2, 'Baixa': 1 };
+    const dir = sortConfig.direction === 'asc' ? 1 : -1;
+    result = [...result].sort((a, b) => {
+      switch (sortConfig.field) {
+        case 'title':
+          return dir * a.title.localeCompare(b.title, 'pt-BR', { sensitivity: 'base' });
+        case 'priority': {
+          const pa = PRIORITY_ORDER[a.priority] ?? 0;
+          const pb = PRIORITY_ORDER[b.priority] ?? 0;
+          return dir * (pb - pa);
+        }
+        case 'dueDate': {
+          const da = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+          const db = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+          return dir * (da - db);
+        }
+        case 'status':
+          return dir * (a.status ?? '').localeCompare(b.status ?? '', 'pt-BR', { sensitivity: 'base' });
+        default: // 'created'
+          return dir * ((a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
+      }
+    });
+
     return result;
-  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags]);
+  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig]);
 
   const filteredSpaces = useMemo(() => {
     if (currentUser.role === UserRole.ADMIN) return spaces;
@@ -2825,6 +2873,57 @@ export default function App() {
                   </PopoverContent>
                 </Popover>
               )}
+
+              {/* Sort button */}
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${sortConfig.field !== 'created' ? 'bg-orange-50 border-orange-300 text-orange-600' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'}`}>
+                    <ArrowUpDown className="w-3.5 h-3.5" />
+                    Ordenar
+                    {sortConfig.field !== 'created' && (
+                      <span className="ml-0.5 bg-orange-500 text-white rounded-full w-4 h-4 text-[10px] flex items-center justify-center font-bold">1</span>
+                    )}
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent className="w-52 p-2" align="start">
+                  <p className="text-xs font-medium text-muted-foreground mb-2">Ordenar por</p>
+                  {([
+                    { field: 'created', label: 'Data de criação' },
+                    { field: 'title',   label: 'Nome' },
+                    { field: 'priority', label: 'Prioridade' },
+                    { field: 'dueDate', label: 'Data limite' },
+                    { field: 'status',  label: 'Status' },
+                  ] as const).map(opt => {
+                    const active = sortConfig.field === opt.field;
+                    return (
+                      <button
+                        key={opt.field}
+                        className={`flex items-center justify-between w-full px-2 py-1.5 rounded text-xs transition-colors ${active ? 'bg-orange-50 text-orange-600 font-semibold' : 'hover:bg-muted/50 text-foreground'}`}
+                        onClick={() =>
+                          setSortConfig(prev =>
+                            prev.field === opt.field
+                              ? { ...prev, direction: prev.direction === 'asc' ? 'desc' : 'asc' }
+                              : { field: opt.field, direction: 'asc' }
+                          )
+                        }
+                      >
+                        <span>{opt.label}</span>
+                        {active && (
+                          <span className="text-orange-500 font-bold">{sortConfig.direction === 'asc' ? '↑' : '↓'}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {sortConfig.field !== 'created' && (
+                    <button
+                      className="w-full text-xs text-muted-foreground mt-2 pt-2 border-t hover:text-foreground"
+                      onClick={() => setSortConfig({ field: 'created', direction: 'asc' })}
+                    >
+                      Restaurar ordem padrão
+                    </button>
+                  )}
+                </PopoverContent>
+              </Popover>
             </div>
 
             <div className="flex items-center gap-4 relative">
@@ -4404,10 +4503,7 @@ function Sidebar({
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      if (window.confirm(`Excluir ${selectedFolderIds.length} pasta(s) e todos os seus projetos?`)) {
-                                        selectedFolderIds.forEach(id => onDeleteFolder(id));
-                                        setSelectedFolderIds([]);
-                                      }
+                                      handleBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
                                     }}
                                     className="text-red-600 hover:text-red-700 font-bold"
                                   >
@@ -5572,7 +5668,12 @@ function ListView({
                                         <input
                                           type="date"
                                           value={currentValue ?? ''}
-                                          onChange={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
+                                          onChange={(e) => {
+                                            if (e.target.value) {
+                                              onUpdateFieldValue(field.id, t.id, e.target.value);
+                                            }
+                                          }}
+                                          onBlur={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
                                           className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
                                         />
                                       ) : field.type === CustomFieldType.RATING ? (
