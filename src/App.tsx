@@ -1986,7 +1986,7 @@ export default function App() {
   }, []);
 
   const handleUpdateFieldValue = useCallback(async (fieldId: string, entityId: string, value: any) => {
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('custom_field_values')
       .upsert({
         field_id: fieldId,
@@ -2006,6 +2006,7 @@ export default function App() {
       });
     } else {
       console.error('Erro ao salvar valor do campo:', error);
+      toast.error('Erro ao salvar campo: ' + error.message);
     }
   }, []);
 
@@ -2804,6 +2805,7 @@ export default function App() {
           listProgressMap={listProgressMap}
           favorites={favorites}
           onToggleFavorite={toggleFavorite}
+          onBulkDeleteFolders={handleBulkDeleteFolders}
         />
 
         {/* Main Content */}
@@ -4126,7 +4128,8 @@ function Sidebar({
   docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc,
   onMoveList, onMoveFolder,
   listTaskCounts, listProgressMap,
-  favorites, onToggleFavorite
+  favorites, onToggleFavorite,
+  onBulkDeleteFolders
 }: any) {
   const compactLogo = "https://verticalparts.com.br/wp-content/uploads/2026/01/grp__NM__bg__NM__logo_compacto-1.png";
   const isNonLightTheme = themePreset !== "claro";
@@ -4503,7 +4506,7 @@ function Sidebar({
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
+                                      onBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
                                     }}
                                     className="text-red-600 hover:text-red-700 font-bold"
                                   >
@@ -5673,7 +5676,7 @@ function ListView({
                                               onUpdateFieldValue(field.id, t.id, e.target.value);
                                             }
                                           }}
-                                          onBlur={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
+                                          onBlur={(e) => { if (e.target.value) onUpdateFieldValue(field.id, t.id, e.target.value); }}
                                           className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
                                         />
                                       ) : field.type === CustomFieldType.RATING ? (
