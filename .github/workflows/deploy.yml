@@ -30,14 +30,23 @@ jobs:
       # O Hostinger deste projeto expõe apenas SSH/SFTP na porta 65002 — o deploy
       # antigo usava FTP (porta 21) e falhava sempre com "530 Login incorrect".
       # Enviamos o build por SFTP usando as mesmas credenciais SSH.
-      - name: Deploy via SFTP para Hostinger
-        uses: wlixcc/SFTP-Deploy-Action@v1.2.5
-        with:
-          server: ${{ secrets.HOSTINGER_SSH_HOST }}
-          username: ${{ secrets.HOSTINGER_SSH_USER }}
-          ssh_private_key: ${{ secrets.HOSTINGER_SSH_KEY }}
-          port: 65002
-          local_path: './dist/*'
-          remote_path: '/home/${{ secrets.HOSTINGER_SSH_USER }}/domains/vpclick.vpsistema.com/public_html'
-          sftp_only: true
-          delete_remote_files: false
+      # A chave privada vai no secret HOSTINGER_SSH_KEY_B64 em base64 (linha única),
+      # para não corromper ao copiar/colar do terminal. Decodificamos aqui e
+      # enviamos ./dist via SCP por SSH (porta 65002).
+      - name: Deploy via SSH/SCP para Hostinger
+        env:
+          SSH_HOST: ${{ secrets.HOSTINGER_SSH_HOST }}
+          SSH_USER: ${{ secrets.HOSTINGER_SSH_USER }}
+          SSH_KEY_B64: ${{ secrets.HOSTINGER_SSH_KEY_B64 }}
+        run: |
+          set -e
+          echo "$SSH_KEY_B64" | base64 -d > deploy_key
+          chmod 600 deploy_key
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 65002 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          scp -i deploy_key -P 65002 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            -r dist/* \
+            "$SSH_USER@$SSH_HOST:/home/$SSH_USER/domains/vpclick.vpsistema.com/public_html/"
+          rm -f deploy_key
