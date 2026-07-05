@@ -7,7 +7,7 @@ on:
 
 jobs:
   deploy:
-    name: Build + Deploy Hostinger (FTP)
+    name: Build + Deploy Hostinger (SFTP/SSH)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,16 +27,17 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           VITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
 
-      - name: Deploy via FTP para Hostinger
-        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+      # O Hostinger deste projeto expõe apenas SSH/SFTP na porta 65002 — o deploy
+      # antigo usava FTP (porta 21) e falhava sempre com "530 Login incorrect".
+      # Enviamos o build por SFTP usando as mesmas credenciais SSH.
+      - name: Deploy via SFTP para Hostinger
+        uses: wlixcc/SFTP-Deploy-Action@v1.2.5
         with:
           server: ${{ secrets.HOSTINGER_SSH_HOST }}
           username: ${{ secrets.HOSTINGER_SSH_USER }}
           password: ${{ secrets.HOSTINGER_SSH_PASSWORD }}
-          local-dir: ./dist/
-          server-dir: /domains/vpclick.vpsistema.com/public_html/
-          dangerous-clean-slate: true
-          exclude: |
-            **/.git*
-            **/.git*/**
-            **/node_modules/**
+          port: 65002
+          local_path: './dist/*'
+          remote_path: '/home/${{ secrets.HOSTINGER_SSH_USER }}/domains/vpclick.vpsistema.com/public_html'
+          sftp_only: true
+          delete_remote_files: false
