@@ -40,8 +40,12 @@ jobs:
           SSH_KEY_B64: ${{ secrets.HOSTINGER_SSH_KEY_B64 }}
         run: |
           set -e
-          echo "$SSH_KEY_B64" | base64 -d > deploy_key
+          # Remove quaisquer espaços/quebras de linha que o copy-paste tenha
+          # inserido no base64 antes de decodificar.
+          printf '%s' "$SSH_KEY_B64" | tr -d '[:space:]' | base64 -d > deploy_key
           chmod 600 deploy_key
+          # valida que a chave decodificou para um formato de chave privada
+          head -n1 deploy_key | grep -q 'PRIVATE KEY' || { echo 'ERRO: HOSTINGER_SSH_KEY_B64 não decodificou para uma chave privada válida'; exit 1; }
           mkdir -p ~/.ssh
           ssh-keyscan -p 65002 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
           scp -i deploy_key -P 65002 \
