@@ -1288,6 +1288,30 @@ export default function App() {
     loadTasks();
   }, [loadTasks]);
 
+  // Mantém uma referência sempre atualizada de loadTasks para o realtime não
+  // precisar recriar o canal a cada mudança de escopo.
+  const loadTasksRef = useRef(loadTasks);
+  useEffect(() => { loadTasksRef.current = loadTasks; }, [loadTasks]);
+
+  // Realtime de tarefas e comentários: reflete alterações feitas por outros
+  // usuários/abas sem precisar recarregar a página. As tabelas precisam estar na
+  // publicação `supabase_realtime` (migration 11). Recarrega o escopo atual com
+  // debounce para não disparar múltiplas vezes em rajadas de eventos.
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleReload = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { loadTasksRef.current?.(); }, 1200);
+    };
+    const channel = supabase
+      .channel('tasks-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_comments' }, scheduleReload)
+      .subscribe();
+    return () => { if (timer) clearTimeout(timer); supabase.removeChannel(channel); };
+  }, [session?.user?.id]);
+
   // ── Dashboard global: carrega TODAS as tarefas sem filtro de escopo ─────────
   const loadDashboardTasks = useCallback(async () => {
     if (!session) return;
@@ -2586,6 +2610,20 @@ export default function App() {
     setActiveView('Admin');
   };
 
+  // Conjunto de pastas que o usuário pode ver: acesso a um ESPAÇO implica acesso
+  // a TODAS as pastas daquele espaço (inclusive as criadas depois) — além das
+  // pastas concedidas explicitamente. Isso evita o caso em que o colaborador tem
+  // o espaço liberado mas o vê vazio porque folder_ids não acompanhou.
+  const allowedFolderIdSet = useMemo(() => {
+    if (currentUser.role === UserRole.ADMIN) return null; // null = acesso total
+    const access = userAccess[currentUser.id];
+    if (!access) return new Set<string>();
+    const spaceIds = new Set(access.spaceIds || []);
+    const ids = new Set<string>(access.folderIds || []);
+    folders.forEach(f => { if (spaceIds.has(f.spaceId)) ids.add(f.id); });
+    return ids;
+  }, [folders, userAccess, currentUser]);
+
   // Filter Tasks based on Hierarchy ONLY (for Dashboard)
   const scopeTasks = useMemo(() => {
     let baseTasks = tasks;
@@ -2593,9 +2631,8 @@ export default function App() {
     // Se não for ADMIN, filtramos as tarefas globais pelas pastas permitidas
     // SEMPRE incluímos tarefas onde o usuário é assignee direto (ex: tarefas do VPRequisições)
     if (currentUser.role !== UserRole.ADMIN) {
-      const access = userAccess[currentUser.id];
-      const allowedFolderIds = access?.folderIds || [];
-      const allowedListIds = lists.filter(l => allowedFolderIds.includes(l.folderId)).map(l => l.id);
+      const allowedFolderIds = allowedFolderIdSet ?? new Set<string>();
+      const allowedListIds = lists.filter(l => allowedFolderIds.has(l.folderId)).map(l => l.id);
       const accessibleTasks = tasks.filter(t => allowedListIds.includes(t.listId));
       const assignedTasks = tasks.filter(t =>
         t.mainAssigneeId === currentUser.id ||
@@ -2620,7 +2657,7 @@ export default function App() {
       result = result.filter(t => spaceListIds.includes(t.listId));
     }
     return result;
-  }, [tasks, activeScope, lists, folders, currentUser, userAccess]);
+  }, [tasks, activeScope, lists, folders, currentUser, allowedFolderIdSet]);
 
   // ── Badge counts: tarefas abertas por lista (ClickUp-style) ──────────────
   const listTaskCounts = useMemo(() => {
@@ -2745,10 +2782,9 @@ export default function App() {
 
   const filteredFolders = useMemo(() => {
     if (currentUser.role === UserRole.ADMIN) return folders;
-    const access = userAccess[currentUser.id];
-    if (!access) return [];
-    return folders.filter((f) => access.folderIds.includes(f.id));
-  }, [folders, userAccess, currentUser]);
+    if (!allowedFolderIdSet) return folders;
+    return folders.filter((f) => allowedFolderIdSet.has(f.id));
+  }, [folders, allowedFolderIdSet, currentUser]);
 
   const uiScaleClass = uiScale <= 0.9 ? 'text-xs' : uiScale >= 1.2 ? 'text-base' : 'text-sm';
 
