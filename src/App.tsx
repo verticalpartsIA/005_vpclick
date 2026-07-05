@@ -1180,21 +1180,39 @@ export default function App() {
     if (data && !error) {
       const taskIds = data.map((d: any) => d.id);
 
-      // Fetch sub-entities in parallel
-      const results = await Promise.all([
-        supabaseAdmin.from('task_attachments').select('*').in('task_id', taskIds),
-        supabaseAdmin.from('task_comments').select('*').in('task_id', taskIds).is('deleted_at', null),
-        supabaseAdmin.from('task_extension_logs').select('*').in('task_id', taskIds),
-        supabaseAdmin.from('task_checklists').select('*').in('task_id', taskIds),
-        supabaseAdmin.from('task_activities').select('*').in('task_id', taskIds),
-        supabaseAdmin.from('task_watchers').select('task_id, user_id').in('task_id', taskIds),
+      // Busca uma sub-entidade filtrando por task_id em LOTES.
+      // Um único .in('task_id', [milhares de UUIDs]) gera uma URL de dezenas de
+      // milhares de caracteres e o servidor responde 400 (Bad Request), fazendo
+      // comentários/checklists/anexos/etc sumirem silenciosamente no escopo global.
+      // Quebramos em lotes de 150 IDs (URL segura) e concatenamos os resultados.
+      const fetchInChunks = async (
+        build: (ids: string[]) => Promise<{ data: any[] | null; error: any }>,
+        label: string
+      ): Promise<any[]> => {
+        const CHUNK = 150;
+        const out: any[] = [];
+        for (let i = 0; i < taskIds.length; i += CHUNK) {
+          const slice = taskIds.slice(i, i + CHUNK);
+          if (slice.length === 0) continue;
+          const { data: part, error: partErr } = await build(slice);
+          if (partErr) {
+            console.error(`loadTasks: erro ao carregar ${label} (lote ${i / CHUNK}):`, partErr);
+            continue;
+          }
+          if (part) out.push(...part);
+        }
+        return out;
+      };
+
+      // Lotes rodam em paralelo por tabela
+      const [attData, commData, logData, checkData, actData, watchData] = await Promise.all([
+        fetchInChunks((ids) => supabaseAdmin.from('task_attachments').select('*').in('task_id', ids), 'task_attachments'),
+        fetchInChunks((ids) => supabaseAdmin.from('task_comments').select('*').in('task_id', ids).is('deleted_at', null), 'task_comments'),
+        fetchInChunks((ids) => supabaseAdmin.from('task_extension_logs').select('*').in('task_id', ids), 'task_extension_logs'),
+        fetchInChunks((ids) => supabaseAdmin.from('task_checklists').select('*').in('task_id', ids), 'task_checklists'),
+        fetchInChunks((ids) => supabaseAdmin.from('task_activities').select('*').in('task_id', ids), 'task_activities'),
+        fetchInChunks((ids) => supabaseAdmin.from('task_watchers').select('task_id, user_id').in('task_id', ids), 'task_watchers'),
       ]);
-      const attData = results[0].data;
-      const commData = results[1].data;
-      const logData = results[2].data;
-      const checkData = results[3].data;
-      const actData = results[4].data;
-      const watchData = results[5].data;
 
       setTasks(data.map((d: any) => {
         const tAttachments = (attData || []).filter((a: any) => a.task_id === d.id).map((a: any) => ({
@@ -6761,14 +6779,13 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const availableFolders = useMemo(() => folders.filter((f: Folder) => f.spaceId === selectedSpaceId), [folders, selectedSpaceId]);
   const availableLists = useMemo(() => lists.filter((l: List) => l.folderId === selectedFolderId), [lists, selectedFolderId]);
 
-  // Auto-select primeiro espaço disponível quando nenhum está selecionado
-  useEffect(() => {
-    if (spaces.length > 0 && !selectedSpaceId) {
-      setSelectedSpaceId(spaces[0].id);
-    }
-  }, [spaces, selectedSpaceId]);
+  // NÃO auto-selecionamos o primeiro espaço: no escopo global isso apontava para
+  // um espaço REAL (ex.: SUPRIMENTOS) e o usuário podia criar tarefa em produção
+  // sem perceber. O espaço só é pré-selecionado quando vem de um contexto explícito
+  // (lista/pasta/espaço ativos ou subtarefa) — ver o efeito de inicialização acima.
 
   // Auto-select primeira pasta disponível quando nenhuma está selecionada
+  // (só dispara após um espaço ter sido escolhido deliberadamente)
   useEffect(() => {
     if (availableFolders.length > 0 && !selectedFolderId) {
       setSelectedFolderId(availableFolders[0].id);
