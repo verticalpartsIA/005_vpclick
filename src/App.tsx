@@ -6991,7 +6991,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                       value={mainAssigneeId}
                       onChange={(e) => setMainAssigneeId(e.target.value)}
                     >
-                      {users.map((u: User) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                      {[...users].sort((a: User, b: User) => a.name.localeCompare(b.name, 'pt-BR')).map((u: User) => <option key={u.id} value={u.id}>{u.name}</option>)}
                     </select>
                   </div>
                   <div>
@@ -7602,7 +7602,7 @@ function TaskDetailModal(props: any) {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="w-64 max-h-80 overflow-y-auto">
                         <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Principal</div>
-                        {users.map((u: any) => (
+                        {[...users].sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleSetMainAssignee(u.id)} className="flex items-center gap-3 py-2">
                             <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
                             <span className={`text-sm ${task.mainAssigneeId === u.id ? 'font-bold text-gray-900' : 'text-gray-600'}`}>{u.name}</span>
@@ -7611,7 +7611,7 @@ function TaskDetailModal(props: any) {
                         ))}
                         <DropdownMenuSeparator />
                         <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Adicionais</div>
-                        {users.filter((u: any) => u.id !== task.mainAssigneeId).map((u: any) => (
+                        {users.filter((u: any) => u.id !== task.mainAssigneeId).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleToggleSecondaryAssignee(u.id)} className="flex items-center gap-3 py-2">
                             <div className="relative">
                               <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
