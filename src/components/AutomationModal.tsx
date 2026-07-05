@@ -375,10 +375,20 @@ export const AutomationModal: React.FC<AutomationModalProps> = ({
     }
   };
 
+  // Fecha o modal ao pressionar Escape (consistente com os demais modais do app)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   // ── JSX ───────────────────────────────────────────────────
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+        onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      >
         <div className="bg-card border rounded-xl shadow-2xl w-full max-w-lg mx-4 flex flex-col max-h-[85vh]">
 
           {/* Header */}

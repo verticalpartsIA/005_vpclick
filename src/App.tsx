@@ -4074,8 +4074,14 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
 function SettingsModal({ onClose, themePreset, setThemePreset, uiScale, setUiScale }: any) {
   const themeEntries = Object.entries(THEME_PRESETS) as Array<[ThemePresetId, (typeof THEME_PRESETS)[ThemePresetId]]>;
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4" onClick={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) onClose(); }}>
       <div className="bg-card text-card-foreground rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-in zoom-in duration-200">
         <div className="p-4 border-b flex justify-between items-center bg-muted">
           <h3 className="font-bold flex items-center gap-2">
@@ -8587,8 +8593,14 @@ function CreateSpaceModal({ onClose, onCreate }: any) {
     !['Home', 'Check', 'ChevronRight', 'ChevronUp', 'ChevronDown', 'ChevronLeft', 'Plus', 'Grip', 'MoreHorizontal'].includes(key)
   );
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4" onClick={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) onClose(); }}>
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in duration-200">
         <div className="p-4 border-b flex justify-between items-center bg-gray-50/50">
           <h3 className="font-bold text-gray-800">Criar Novo Espaço</h3>
