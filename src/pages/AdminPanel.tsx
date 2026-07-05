@@ -123,13 +123,15 @@ export default function AdminPanel({
 
   const filteredUsers = useMemo(() => {
     const q = search.toLowerCase().trim();
-    if (!q) return users;
-    return users.filter(
-      (u) =>
-        u.name.toLowerCase().includes(q) ||
-        u.email.toLowerCase().includes(q) ||
-        u.role.toLowerCase().includes(q)
-    );
+    const base = !q
+      ? users
+      : users.filter(
+          (u) =>
+            u.name.toLowerCase().includes(q) ||
+            u.email.toLowerCase().includes(q) ||
+            u.role.toLowerCase().includes(q)
+        );
+    return [...base].sort((a, b) => a.name.localeCompare(b.name, "pt-BR", { sensitivity: "base" }));
   }, [users, search]);
 
   const toggle = (id: string) => setExpandedId((prev) => (prev === id ? null : id));
