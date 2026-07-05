@@ -35,7 +35,7 @@ jobs:
         with:
           server: ${{ secrets.HOSTINGER_SSH_HOST }}
           username: ${{ secrets.HOSTINGER_SSH_USER }}
-          password: ${{ secrets.HOSTINGER_SSH_PASSWORD }}
+          ssh_private_key: ${{ secrets.HOSTINGER_SSH_KEY }}
           port: 65002
           local_path: './dist/*'
           remote_path: '/home/${{ secrets.HOSTINGER_SSH_USER }}/domains/vpclick.vpsistema.com/public_html'
