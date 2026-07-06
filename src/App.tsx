@@ -7209,20 +7209,29 @@ function TaskDetailModal(props: any) {
     );
   }, [customFields, currentUser.role]);
 
+  // Registro de atividade é auxiliar (histórico/auditoria) — nunca deve impedir
+  // a mudança real (status, prioridade, responsável) de acontecer. Antes, uma
+  // falha aqui (rede, RLS, etc.) travava silenciosamente o onUpdate() seguinte:
+  // o usuário clicava numa opção e "nada acontecia", sem nenhum erro visível.
+  const logActivitySafe = async (...args: Parameters<NonNullable<typeof saveTaskActivity>>) => {
+    if (!saveTaskActivity) return;
+    try {
+      await saveTaskActivity(...args);
+    } catch (err) {
+      console.error('Falha ao registrar atividade (não bloqueia a atualização):', err);
+    }
+  };
+
   const handleUpdateStatus = async (status: string) => {
     if (status === task.status) return;
-    if (saveTaskActivity) {
-      await saveTaskActivity(task.id, 'STATUS_CHANGE', task.status, status);
-    }
     onUpdate({ ...task, status });
+    logActivitySafe(task.id, 'STATUS_CHANGE', task.status, status);
   };
 
   const handleUpdatePriority = async (priority: TaskPriority) => {
     if (priority === task.priority) return;
-    if (saveTaskActivity) {
-      await saveTaskActivity(task.id, 'PRIORITY_CHANGE', task.priority, priority);
-    }
     onUpdate({ ...task, priority });
+    logActivitySafe(task.id, 'PRIORITY_CHANGE', task.priority, priority);
   };
 
   const handleToggleSecondaryAssignee = async (userId: string) => {
@@ -7234,14 +7243,10 @@ function TaskDetailModal(props: any) {
 
     if (isSecondary) {
       nextSecondaryIds = nextSecondaryIds.filter(id => id !== userId);
-      if (saveTaskActivity) {
-        await saveTaskActivity(task.id, 'RESPONSIBLE_REMOVED', users.find((u: any) => u.id === userId)?.name);
-      }
+      logActivitySafe(task.id, 'RESPONSIBLE_REMOVED', users.find((u: any) => u.id === userId)?.name);
     } else {
       nextSecondaryIds.push(userId);
-      if (saveTaskActivity) {
-        await saveTaskActivity(task.id, 'RESPONSIBLE_ADDED', '', users.find((u: any) => u.id === userId)?.name);
-      }
+      logActivitySafe(task.id, 'RESPONSIBLE_ADDED', '', users.find((u: any) => u.id === userId)?.name);
       notifyAssignment({ userIds: [userId], actor: currentUser, taskId: task.id, taskTitle: task.title });
     }
 
@@ -7256,11 +7261,9 @@ function TaskDetailModal(props: any) {
       toast.info(`Todos da equipe ${team.name} já estão na tarefa.`);
       return;
     }
-    if (saveTaskActivity) {
-      await saveTaskActivity(task.id, 'TEAM_ASSIGNED', '', team.name);
-    }
     notifyAssignment({ userIds: newIds, actor: currentUser, taskId: task.id, taskTitle: task.title, teamName: team.name });
     onUpdate({ ...task, secondaryAssigneeIds: [...(task.secondaryAssigneeIds || []), ...newIds] });
+    logActivitySafe(task.id, 'TEAM_ASSIGNED', '', team.name);
   };
 
   const handleSetMainAssignee = async (userId: string) => {
@@ -7268,10 +7271,6 @@ function TaskDetailModal(props: any) {
 
     const oldMainName = users.find((u: any) => u.id === task.mainAssigneeId)?.name;
     const newMainName = users.find((u: any) => u.id === userId)?.name;
-
-    if (saveTaskActivity) {
-      await saveTaskActivity(task.id, 'MAIN_RESPONSIBLE_CHANGE', oldMainName, newMainName);
-    }
 
     // Move current main to secondary if not already there, and remove new main from secondary
     let nextSecondaryIds = (task.secondaryAssigneeIds || []).filter(id => id !== userId);
@@ -7281,6 +7280,7 @@ function TaskDetailModal(props: any) {
 
     notifyAssignment({ userIds: [userId], actor: currentUser, taskId: task.id, taskTitle: task.title });
     onUpdate({ ...task, mainAssigneeId: userId, secondaryAssigneeIds: nextSecondaryIds });
+    logActivitySafe(task.id, 'MAIN_RESPONSIBLE_CHANGE', oldMainName, newMainName);
   };
 
   const handleSaveDueDate = async () => {
