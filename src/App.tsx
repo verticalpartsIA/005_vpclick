@@ -882,7 +882,6 @@ export default function App() {
   const [activeScope, setActiveScope] = useState<NavigationScope>({ type: 'global', id: null, name: 'Dashboard' });
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [isSharedTaskView, setIsSharedTaskView] = useState(false);
   const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
   const [taskToDuplicate, setTaskToDuplicate] = useState<Task | null>(null);
   const [isDuplicatingTask, setIsDuplicatingTask] = useState(false);
@@ -1160,13 +1159,14 @@ export default function App() {
 
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Detect taskId in URL on load
+  // Detect taskId in URL on load — abre a tarefa direto (deep link), sem
+  // travar em somente-leitura: quem recebe o link já está autenticado no
+  // app com seu próprio papel/permissão, não é um visitante externo.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const taskId = params.get('taskId');
     if (taskId) {
       setSelectedTaskId(taskId);
-      setIsSharedTaskView(true);
     }
   }, []);
 
@@ -3385,7 +3385,6 @@ export default function App() {
             tasks={tasks}
             onClose={() => {
               setSelectedTaskId(null);
-              setIsSharedTaskView(false);
               const url = new URL(window.location.href);
               url.searchParams.delete('taskId');
               window.history.replaceState({}, '', url.toString());
@@ -3402,7 +3401,6 @@ export default function App() {
               setPrefilledTaskData(prefill || null);
               setIsTaskModalOpen(true);
             }}
-            isReadOnly={isSharedTaskView}
             saveAttachment={saveTaskAttachment}
             removeAttachment={removeTaskAttachment}
             saveComment={saveTaskComment}
