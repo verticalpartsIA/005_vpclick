@@ -458,19 +458,25 @@ export default function App() {
   }, []);
 
   const saveTaskAttachment = useCallback(async (taskId: string, attachment: Partial<Attachment>) => {
-    const { data, error } = await supabase
-      .from('task_attachments')
-      .insert({
-        task_id: taskId,
-        name: attachment.name,
-        url: attachment.url,
-        type: attachment.type,
-        size: attachment.size
-      })
-      .select()
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from('task_attachments')
+        .insert({
+          task_id: taskId,
+          name: attachment.name,
+          url: attachment.url,
+          type: attachment.type,
+          size: attachment.size
+        })
+        .select()
+        .single();
 
-    if (data && !error) {
+      if (error || !data) {
+        console.error('Erro ao salvar anexo:', error);
+        toast.error(`Falha ao salvar o anexo${error ? `: ${error.message}` : '.'}`);
+        return false;
+      }
+
       setTasks(prev => prev.map(t => {
         if (t.id === taskId) {
           return {
@@ -487,6 +493,11 @@ export default function App() {
         }
         return t;
       }));
+      return true;
+    } catch (err: any) {
+      console.error('Erro ao salvar anexo:', err);
+      toast.error(`Falha ao salvar o anexo${err?.message ? `: ${err.message}` : '.'}`);
+      return false;
     }
   }, []);
 
@@ -3882,20 +3893,26 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
   };
 
   const saveAttachmentToDb = async (attachment: Attachment) => {
-    const { data, error } = await supabase
-      .from('doc_attachments')
-      .insert({
-        doc_id: doc.id,
-        name: attachment.name,
-        url: attachment.url,
-        type: attachment.type,
-        size: attachment.size,
-        created_by: currentUser.id
-      })
-      .select()
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from('doc_attachments')
+        .insert({
+          doc_id: doc.id,
+          name: attachment.name,
+          url: attachment.url,
+          type: attachment.type,
+          size: attachment.size,
+          created_by: currentUser.id
+        })
+        .select()
+        .single();
 
-    if (data && !error) {
+      if (error || !data) {
+        console.error('Erro ao salvar anexo:', error);
+        toast.error(`Falha ao salvar o anexo${error ? `: ${error.message}` : '.'}`);
+        return;
+      }
+
       const savedAttachment: Attachment = {
         ...attachment,
         id: data.id,
@@ -3905,9 +3922,9 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
         ...doc,
         attachments: [...(doc.attachments || []), savedAttachment]
       });
-    } else {
-      console.error('Erro ao salvar anexo:', error);
-      alert('Erro ao salvar anexo no banco de dados.');
+    } catch (err: any) {
+      console.error('Erro ao salvar anexo:', err);
+      toast.error(`Falha ao salvar o anexo${err?.message ? `: ${err.message}` : '.'}`);
     }
   };
 
@@ -7347,17 +7364,24 @@ function TaskDetailModal(props: any) {
 
     for (const file of Array.from(files)) {
       if (uploadFile && saveAttachment) {
-        const safeName = file.name.replace(/[^\w.\-]/g, '_');
-        const path = `tasks/${task.id}/${Date.now()}_${safeName}`;
-        const url = await uploadFile(file, path, 'task-files');
-        if (url) {
-          await saveAttachment(task.id, {
-            name: file.name,
-            url,
-            type: file.type,
-            size: file.size
-          });
-          toast.success(`Anexo "${file.name}" enviado.`);
+        try {
+          const safeName = file.name.replace(/[^\w.\-]/g, '_');
+          const path = `tasks/${task.id}/${Date.now()}_${safeName}`;
+          const url = await uploadFile(file, path, 'task-files');
+          if (url) {
+            const saved = await saveAttachment(task.id, {
+              name: file.name,
+              url,
+              type: file.type,
+              size: file.size
+            });
+            if (saved !== false) {
+              toast.success(`Anexo "${file.name}" enviado.`);
+            }
+          }
+        } catch (err: any) {
+          console.error('Erro ao anexar arquivo:', err);
+          toast.error(`Falha ao anexar "${file.name}"${err?.message ? `: ${err.message}` : '.'}`);
         }
       }
     }
