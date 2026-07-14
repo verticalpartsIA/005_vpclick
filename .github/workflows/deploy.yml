@@ -52,11 +52,28 @@ jobs:
           chmod 600 deploy_key
           head -n1 deploy_key | grep -q 'PRIVATE KEY' \
             || { echo 'ERRO: conteúdo do secret não resultou numa chave privada válida'; exit 1; }
+
+          # Mostra a CHAVE PÚBLICA correspondente (seguro de logar). Se o deploy
+          # falhar com "Permission denied (publickey)", é esta chave que precisa
+          # ser autorizada no painel da Hostinger (hPanel → Avançado → Acesso SSH).
+          echo '── Chave pública usada neste deploy ─────────────────────────'
+          ssh-keygen -y -f deploy_key || { echo 'ERRO: chave privada inválida (ssh-keygen não conseguiu derivar a pública)'; exit 1; }
+          echo '──────────────────────────────────────────────────────────────'
+
           mkdir -p ~/.ssh
           ssh-keyscan -p 65002 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
-          scp -i deploy_key -P 65002 \
+          if ! scp -i deploy_key -P 65002 \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=~/.ssh/known_hosts \
             -r dist/* \
-            "$SSH_USER@$SSH_HOST:/home/$SSH_USER/domains/vpclick.vpsistema.com/public_html/"
+            "$SSH_USER@$SSH_HOST:/home/$SSH_USER/domains/vpclick.vpsistema.com/public_html/"; then
+            echo ''
+            echo '❌ DEPLOY FALHOU: o servidor recusou a autenticação SSH.'
+            echo 'CORREÇÃO: copie a chave pública exibida acima (linha começando com ssh-)'
+            echo 'e cadastre no painel da Hostinger: hPanel → Avançado → Acesso SSH → Adicionar chave SSH.'
+            echo 'Depois, rode este workflow de novo (aba Actions → Deploy → Run workflow).'
+            rm -f deploy_key
+            exit 1
+          fi
           rm -f deploy_key
+          echo '✅ Deploy concluído para vpclick.vpsistema.com'
