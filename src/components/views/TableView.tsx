@@ -351,7 +351,12 @@ export const TableView: React.FC<TableViewProps> = ({
                     style={{ width: columnWidths['dueDate'] ?? 150, maxWidth: columnWidths['dueDate'] ?? 150 }}
                   >
                     {task.dueDate && !isNaN(new Date(task.dueDate).getTime())
-                      ? format(new Date(task.dueDate), 'dd MMM yyyy', { locale: ptBR })
+                      ? (() => {
+                          // "YYYY-MM-DD" interpretado como UTC cai no dia anterior
+                          // em fusos atrás de UTC — parseamos como data local.
+                          const [y, m, d] = task.dueDate.split('T')[0].split('-').map(Number);
+                          return format(new Date(y, m - 1, d), 'dd MMM yyyy', { locale: ptBR });
+                        })()
                       : '-'}
                   </td>
                 )}

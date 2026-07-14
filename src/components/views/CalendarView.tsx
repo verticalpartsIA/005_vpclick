@@ -42,7 +42,11 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   const getDayTasks = (day: Date) => {
     return tasks.filter(task => {
       if (!task.dueDate) return false;
-      const taskDate = new Date(task.dueDate);
+      // task.dueDate é "YYYY-MM-DD" (sem hora); `new Date(string)` interpreta
+      // isso como meia-noite UTC, que em fusos atrás de UTC cai no dia
+      // anterior ao comparar com `day` (local). Parseamos manualmente.
+      const [y, m, d] = task.dueDate.split('T')[0].split('-').map(Number);
+      const taskDate = new Date(y, m - 1, d);
       return isSameDay(taskDate, day);
     });
   };

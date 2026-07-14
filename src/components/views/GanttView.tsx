@@ -29,9 +29,16 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
   }, [viewStart]);
 
   const taskBars = useMemo(() => {
+    // task.startDate/dueDate são "YYYY-MM-DD" (sem hora); `new Date(string)`
+    // interpreta isso como meia-noite UTC, que em fusos atrás de UTC cai no
+    // dia anterior ao comparar com `viewStart` (local). Parseamos manualmente.
+    const parseLocalDate = (dateStr: string) => {
+      const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
+      return new Date(y, m - 1, d);
+    };
     return tasks.filter(t => t.startDate || t.dueDate).map(task => {
-      const start = task.startDate ? new Date(task.startDate) : new Date(task.dueDate!);
-      const end = task.dueDate ? new Date(task.dueDate) : new Date(task.startDate!);
+      const start = task.startDate ? parseLocalDate(task.startDate) : parseLocalDate(task.dueDate!);
+      const end = task.dueDate ? parseLocalDate(task.dueDate) : parseLocalDate(task.startDate!);
       
       const left = differenceInDays(start, viewStart) * zoomLevel;
       const duration = Math.max(1, differenceInDays(end, start) + 1);

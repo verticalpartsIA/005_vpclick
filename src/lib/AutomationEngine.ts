@@ -98,7 +98,11 @@ export class AutomationEngine {
       case 'due_date_arrives': {
         if (!task.dueDate) return false;
         const daysAhead = cfg.days_before ?? 0;
-        const due = new Date(task.dueDate);
+        // task.dueDate é "YYYY-MM-DD" (sem hora); `new Date(string)` interpreta
+        // isso como meia-noite UTC, que em fusos atrás de UTC cai no dia
+        // anterior ao ler os componentes locais abaixo. Parseamos manualmente.
+        const [dueY, dueM, dueD] = task.dueDate.split('T')[0].split('-').map(Number);
+        const due = new Date(dueY, dueM - 1, dueD);
         const target = new Date();
         target.setDate(target.getDate() + daysAhead);
         return (

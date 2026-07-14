@@ -5078,6 +5078,16 @@ function DuplicateTaskModal({
   );
 }
 
+// Datas de tarefa (dueDate/startDate) são strings "YYYY-MM-DD" (sem hora).
+// `new Date("YYYY-MM-DD")` interpreta isso como meia-noite UTC, que em fusos
+// atrás de UTC (ex: Brasil) cai no dia anterior ao formatar/comparar em
+// horário local. Parseamos os componentes manualmente para obter a
+// meia-noite local do dia correto.
+function parseLocalDate(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
 function getTaskHealth(task: Task) {
   const status = (task.status || '').toLowerCase();
 
@@ -5107,8 +5117,8 @@ function getTaskHealth(task: Task) {
   if (!task.dueDate) return null;
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const due = new Date(task.dueDate); due.setHours(23, 59, 59, 999);
-  const start = task.startDate ? new Date(task.startDate) : null;
+  const due = parseLocalDate(task.dueDate); due.setHours(23, 59, 59, 999);
+  const start = task.startDate ? parseLocalDate(task.startDate) : null;
 
   if (start && today < start) {
     return { emoji: '⏰', label: 'Preparando para decolar!', bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-200' };
@@ -6104,7 +6114,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDupli
                   .filter(Boolean);
                 const allAssignees = [assignee, ...secondaryAssignees].filter(Boolean);
                 const hasDueDate = task.dueDate && !isNaN(new Date(task.dueDate).getTime());
-                const isOverdue = hasDueDate && new Date(task.dueDate) < new Date();
+                const isOverdue = hasDueDate && parseLocalDate(task.dueDate) < new Date();
                 const priorityFlag = PRIORITY_FLAG[task.priority];
                 const h = getTaskHealth(task);
 
@@ -7450,8 +7460,8 @@ function TaskDetailModal(props: any) {
             context={[
               `Título: ${task.title}`,
               `Status: ${task.status} | Prioridade: ${task.priority}`,
-              task.startDate ? `Início: ${new Date(task.startDate).toLocaleDateString('pt-BR')}` : '',
-              task.dueDate ? `Prazo: ${new Date(task.dueDate).toLocaleDateString('pt-BR')}` : '',
+              task.startDate ? `Início: ${parseLocalDate(task.startDate).toLocaleDateString('pt-BR')}` : '',
+              task.dueDate ? `Prazo: ${parseLocalDate(task.dueDate).toLocaleDateString('pt-BR')}` : '',
               `Responsável: ${users?.find((u: User) => u.id === task.mainAssigneeId)?.name || 'Sem responsável'}`,
               (task.secondaryAssigneeIds || []).length > 0
                 ? `Acompanhantes: ${(task.secondaryAssigneeIds || []).map((id: string) => users?.find((u: User) => u.id === id)?.name).filter(Boolean).join(', ')}`
@@ -7577,8 +7587,8 @@ function TaskDetailModal(props: any) {
                       <p className={`text-sm font-semibold ${h.text}`}>{name} está: {h.label}</p>
                       {task.dueDate && (
                         <p className={`text-xs mt-0.5 ${h.text} opacity-75`}>
-                          Prazo: {new Date(task.dueDate).toLocaleDateString('pt-BR')}
-                          {task.startDate && ` · Início: ${new Date(task.startDate).toLocaleDateString('pt-BR')}`}
+                          Prazo: {parseLocalDate(task.dueDate).toLocaleDateString('pt-BR')}
+                          {task.startDate && ` · Início: ${parseLocalDate(task.startDate).toLocaleDateString('pt-BR')}`}
                         </p>
                       )}
                     </div>
