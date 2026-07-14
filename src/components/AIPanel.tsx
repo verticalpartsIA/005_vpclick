@@ -78,8 +78,8 @@ export function AIPanel({ context, onClose }: AIPanelProps) {
           <div className="space-y-3">
             <p className="text-xs text-gray-400 font-medium">
               {context
-                ? 'A IA conhece o contexto desta tarefa e pode consultar todas as tarefas do sistema (modo Raio-X). Comece com uma ação rápida ou pergunte algo:'
-                : 'Modo Raio-X: a IA consulta as tarefas do sistema em tempo real. Pergunte coisas como "O José já iniciou a tarefa X?" ou use uma ação rápida:'}
+                ? 'A IA conhece o contexto desta tarefa, pode consultar todas as tarefas do sistema e agora também executa ações (mudar status/prioridade/responsável, comentar, prorrogar prazo, criar subtarefa). Comece com uma ação rápida ou peça algo:'
+                : 'A IA consulta as tarefas do sistema em tempo real e agora também executa ações — ex: "marca a tarefa X como concluída", "cria uma tarefa pra revisar o contrato até sexta". Pergunte algo ou use uma ação rápida:'}
             </p>
             {(context ? TASK_ACTIONS : WORKSPACE_ACTIONS).map((a) => (
               <button

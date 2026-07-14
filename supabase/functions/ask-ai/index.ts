@@ -1,11 +1,13 @@
 /**
- * VP Click — Edge Function: ask-ai (v2 — modo Raio-X)
+ * VP Click — Edge Function: ask-ai (v3 — modo Raio-X + Ação)
  * IA da tarefa e do workspace (Anthropic Claude) com a chave protegida no backend.
  *
  * v2: a IA tem ferramentas para consultar o banco em tempo real —
  * usuários, tarefas (por responsável/situação/texto) e estatísticas.
- * Permissões espelham o app: ADMIN/GESTOR enxergam tudo;
- * COLABORADOR só enxerga as próprias tarefas.
+ * v3: a IA também pode EXECUTAR ações — mudar status/prioridade/
+ * responsável, comentar, prorrogar prazo e criar tarefas/subtarefas.
+ * Permissões espelham o app: ADMIN/GESTOR enxergam e alteram tudo;
+ * COLABORADOR só enxerga/altera as próprias tarefas.
  *
  * Deploy:
  *   supabase functions deploy ask-ai --project-ref sfpnjwllcmentoocylow
@@ -66,6 +68,49 @@ const TOOLS: Anthropic.Tool[] = [
       properties: {
         responsavel: { type: 'string', description: 'Nome (ou parte) do responsável. Omita para o workspace inteiro.' },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'listar_listas',
+    description: 'Lista as listas/projetos do workspace (id, nome e pasta). Use para descobrir em qual lista criar uma tarefa nova.',
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'atualizar_tarefa',
+    description:
+      'Executa mudanças reais numa tarefa existente: status, prioridade, responsável principal, comentário e/ou prorrogação de prazo. ' +
+      'Descubra o id certo com buscar_tarefas ANTES de chamar esta ferramenta — nunca invente um id. ' +
+      'Preencha só os campos que devem mudar.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tarefa_id: { type: 'string', description: 'id (uuid) da tarefa, obtido via buscar_tarefas.' },
+        novo_status: { type: 'string', description: 'Novo status, usando exatamente o texto de algum status já visto em buscar_tarefas/estatisticas_tarefas para essa tarefa/lista.' },
+        nova_prioridade: { type: 'string', enum: ['Baixa', 'Media', 'Alta', 'Urgente'] },
+        novo_responsavel: { type: 'string', description: 'Nome (ou parte) do novo responsável principal.' },
+        comentario: { type: 'string', description: 'Texto a adicionar como comentário na tarefa.' },
+        nova_data_limite: { type: 'string', description: 'Nova data de entrega, formato YYYY-MM-DD. Isso conta como uma prorrogação.' },
+        motivo_prorrogacao: { type: 'string', description: 'Obrigatório junto com nova_data_limite — motivo da mudança de prazo. Se o usuário não deu um motivo, pergunte antes de chamar a ferramenta.' },
+      },
+      required: ['tarefa_id'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'criar_tarefa',
+    description: 'Cria uma tarefa (ou subtarefa) nova. Use listar_listas e/ou listar_usuarios antes se precisar confirmar a lista ou o responsável.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        titulo: { type: 'string' },
+        lista_id: { type: 'string', description: 'id (uuid) da lista onde a tarefa deve entrar, obtido via listar_listas.' },
+        responsavel: { type: 'string', description: 'Nome (ou parte) do responsável principal. Opcional.' },
+        prazo: { type: 'string', description: 'Data de entrega, formato YYYY-MM-DD. Opcional.' },
+        prioridade: { type: 'string', enum: ['Baixa', 'Media', 'Alta', 'Urgente'] },
+        tarefa_pai_id: { type: 'string', description: 'Se for subtarefa, id (uuid) da tarefa pai.' },
+      },
+      required: ['titulo', 'lista_id'],
       additionalProperties: false,
     },
   },
@@ -143,6 +188,7 @@ Deno.serve(async (req) => {
     };
 
     const mapTask = (t: any) => ({
+      id: t.id,
       titulo: t.title,
       status: t.status,
       situacao: isDone(t.status) ? 'concluída' : isCancelled(t.status) ? 'cancelada'
@@ -192,6 +238,115 @@ Deno.serve(async (req) => {
         const limite = Math.min(Math.max(Number(input?.limite) || 30, 1), 60);
         return { total_encontrado: rows.length, exibindo: Math.min(rows.length, limite), tarefas: rows.slice(0, limite) };
       }
+
+      if (name === 'listar_listas') {
+        const { data: listsData } = await admin.from('lists').select('id, name, folder_id');
+        const { data: foldersData } = await admin.from('folders').select('id, name');
+        const folderNameOf = (id: string | null) => (foldersData || []).find((f: any) => f.id === id)?.name || null;
+        return {
+          listas: (listsData || []).map((l: any) => ({ id: l.id, nome: l.name, pasta: folderNameOf(l.folder_id) })),
+        };
+      }
+
+      const resolveResponsavel = (nome: string): { id: string; name: string } | { erro: string } => {
+        const matches = profiles.filter((p: any) => p.name.toLowerCase().includes(nome.toLowerCase()));
+        if (matches.length === 0) return { erro: `Nenhum usuário encontrado com nome parecido com "${nome}".` };
+        if (matches.length > 1) return { erro: `Mais de um usuário corresponde a "${nome}": ${matches.map((m: any) => m.name).join(', ')}. Peça pra especificar.` };
+        return { id: matches[0].id, name: matches[0].name };
+      };
+
+      const normalizePriority = (p: string): string | null => {
+        const n = p.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        if (n === 'baixa') return 'Baixa';
+        if (n === 'media') return 'Média';
+        if (n === 'alta') return 'Alta';
+        if (n === 'urgente') return 'Urgente';
+        return null;
+      };
+
+      if (name === 'atualizar_tarefa') {
+        const tarefaId = input?.tarefa_id;
+        if (!tarefaId) return { erro: 'tarefa_id é obrigatório.' };
+        const { data: task, error: taskError } = await admin.from('tasks').select('*').eq('id', tarefaId).single();
+        if (taskError || !task) return { erro: 'Tarefa não encontrada. Confira o id com buscar_tarefas.' };
+
+        const podeEditar = isPrivileged || task.main_assignee_id === user.id || (task.secondary_assignee_ids || []).includes(user.id);
+        if (!podeEditar) return { erro: 'Você só pode alterar tarefas em que é responsável (principal ou acompanhante).' };
+
+        const mudancas: string[] = [];
+
+        if (input?.novo_status && input.novo_status !== task.status) {
+          await admin.from('tasks').update({ status: input.novo_status }).eq('id', tarefaId);
+          await admin.from('task_activities').insert({ task_id: tarefaId, user_id: user.id, type: 'STATUS_CHANGE', old_value: task.status, new_value: input.novo_status });
+          mudancas.push(`status: "${task.status}" → "${input.novo_status}"`);
+        }
+
+        if (input?.nova_prioridade) {
+          const p = normalizePriority(input.nova_prioridade);
+          if (!p) return { erro: `Prioridade inválida: "${input.nova_prioridade}". Use Baixa, Média, Alta ou Urgente.` };
+          if (p !== task.priority) {
+            await admin.from('tasks').update({ priority: p }).eq('id', tarefaId);
+            await admin.from('task_activities').insert({ task_id: tarefaId, user_id: user.id, type: 'PRIORITY_CHANGE', old_value: task.priority, new_value: p });
+            mudancas.push(`prioridade: "${task.priority}" → "${p}"`);
+          }
+        }
+
+        if (input?.novo_responsavel) {
+          const r = resolveResponsavel(input.novo_responsavel);
+          if ('erro' in r) return r;
+          if (r.id !== task.main_assignee_id) {
+            await admin.from('tasks').update({ main_assignee_id: r.id }).eq('id', tarefaId);
+            await admin.from('task_activities').insert({ task_id: tarefaId, user_id: user.id, type: 'MAIN_RESPONSIBLE_CHANGE', old_value: nameOf(task.main_assignee_id), new_value: r.name });
+            mudancas.push(`responsável: "${nameOf(task.main_assignee_id) || 'sem responsável'}" → "${r.name}"`);
+          }
+        }
+
+        if (input?.comentario) {
+          await admin.from('task_comments').insert({ task_id: tarefaId, user_id: user.id, text: input.comentario });
+          mudancas.push('comentário adicionado');
+        }
+
+        if (input?.nova_data_limite) {
+          if (!input?.motivo_prorrogacao) return { erro: 'Pra prorrogar o prazo é preciso um motivo (motivo_prorrogacao). Pergunte ao usuário qual é o motivo antes de tentar de novo.' };
+          await admin.from('tasks').update({ due_date: input.nova_data_limite, extension_count: (task.extension_count || 0) + 1 }).eq('id', tarefaId);
+          await admin.from('task_extension_logs').insert({ task_id: tarefaId, old_date: task.due_date, new_date: input.nova_data_limite, reason: input.motivo_prorrogacao, updated_by: user.id });
+          mudancas.push(`prazo: "${task.due_date?.slice(0, 10) || 'sem prazo'}" → "${input.nova_data_limite}" (motivo: ${input.motivo_prorrogacao})`);
+        }
+
+        if (mudancas.length === 0) return { aviso: 'Nenhum campo válido foi enviado, nada foi alterado.' };
+        return { ok: true, tarefa: task.title, mudancas };
+      }
+
+      if (name === 'criar_tarefa') {
+        if (!input?.titulo || !input?.lista_id) return { erro: 'titulo e lista_id são obrigatórios.' };
+        let mainAssigneeId: string | null = null;
+        if (input?.responsavel) {
+          const r = resolveResponsavel(input.responsavel);
+          if ('erro' in r) return r;
+          mainAssigneeId = r.id;
+        }
+        let priority: string | null = null;
+        if (input?.prioridade) {
+          priority = normalizePriority(input.prioridade);
+          if (!priority) return { erro: `Prioridade inválida: "${input.prioridade}".` };
+        }
+        const { data: created, error: createError } = await admin
+          .from('tasks')
+          .insert({
+            title: input.titulo,
+            list_id: input.lista_id,
+            main_assignee_id: mainAssigneeId,
+            due_date: input?.prazo || null,
+            priority: priority || undefined,
+            parent_id: input?.tarefa_pai_id || null,
+            created_by: user.id,
+          })
+          .select('id, title')
+          .single();
+        if (createError || !created) return { erro: `Falha ao criar tarefa: ${createError?.message || 'erro desconhecido'}` };
+        return { ok: true, tarefa_id: created.id, titulo: created.title };
+      }
+
       return { erro: `Ferramenta desconhecida: ${name}` };
     };
 
@@ -202,14 +357,20 @@ Deno.serve(async (req) => {
 Quem está falando com você: ${userName} (papel: ${userRole}). Chame a pessoa pelo primeiro nome, em tom cordial e direto.
 Hoje é ${hoje}.
 
-Você tem MODO RAIO-X: ferramentas para consultar usuários, tarefas e estatísticas do sistema em tempo real.
+Você tem MODO RAIO-X: ferramentas para consultar usuários, tarefas, listas e estatísticas do sistema em tempo real.
 - Use as ferramentas sempre que a pergunta envolver tarefas, pessoas, prazos, andamento ou números — não responda de memória.
 - Se um nome citado for ambíguo ou não existir, use listar_usuarios para conferir e diga as opções.
-- ${isPrivileged ? 'Este usuário é ' + userRole + ' e enxerga as tarefas de TODOS.' : 'Este usuário é COLABORADOR e só enxerga as PRÓPRIAS tarefas — se pedir dados de outras pessoas, explique educadamente a limitação.'}
+- ${isPrivileged ? 'Este usuário é ' + userRole + ' e enxerga/altera as tarefas de TODOS.' : 'Este usuário é COLABORADOR: só enxerga as PRÓPRIAS tarefas (como responsável principal ou acompanhante) e só pode alterar essas mesmas tarefas — se pedir dados ou mudança em tarefa de outra pessoa, explique educadamente a limitação.'}
 - "Já iniciou?": tarefa com situação "não iniciada" = ainda não começou; "em andamento"/"concluída" = já começou.
 - Datas no formato brasileiro (dd/mm/aaaa). Destaque atrasos e prorrogações.
 - Responda em português do Brasil, conciso e organizado (use listas quando ajudar). Não invente dados.
-- Quando sugerir subtarefas ou checklists, devolva uma lista com um item por linha começando com "- ".`;
+- Quando sugerir subtarefas ou checklists (sem pedido explícito de criar de verdade), devolva uma lista com um item por linha começando com "- ".
+
+Você também tem MODO AÇÃO: ferramentas para EXECUTAR mudanças reais — atualizar_tarefa (status, prioridade, responsável, comentário, prorrogação de prazo) e criar_tarefa.
+- Sempre encontre o id certo da tarefa (buscar_tarefas) e, se precisar, da lista (listar_listas) ou do responsável (listar_usuarios) ANTES de chamar a ferramenta de ação. Nunca invente um id.
+- Quando o pedido for claro e específico o bastante para identificar a tarefa (e a lista, no caso de criação), EXECUTE a ação diretamente — não peça confirmação antes. Depois de executar, explique em 1-2 frases o que foi feito.
+- Só pergunte antes de agir quando o pedido for genuinamente ambíguo: mais de uma tarefa parecida encontrada, nome de responsável não encontrado/ambíguo, prorrogação de prazo sem motivo informado, ou criação de tarefa sem saber em qual lista.
+- Se uma ferramenta de ação retornar erro, explique o problema ao usuário em vez de tentar de novo às cegas.`;
 
     const anthropic = new Anthropic({ apiKey: Deno.env.get('ANTHROPIC_API_KEY')! });
 
