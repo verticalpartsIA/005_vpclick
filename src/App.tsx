@@ -3339,6 +3339,7 @@ export default function App() {
             uploadFile={uploadFile}
             statusGroups={statusGroups}
             lists={lists}
+            folders={folders}
             workspaceId={workspace.id}
             teams={teams}
             onTagsChange={(taskId: string, tags: string[]) =>
@@ -7147,12 +7148,14 @@ function TaskDetailModal(props: any) {
     uploadFile,
     statusGroups,
     lists,
+    folders,
     workspaceId,
     onTagsChange,
     teams = [],
   } = props;
 
   const currentList = lists?.find((l: any) => l.id === task.listId);
+  const currentFolder = folders?.find((f: any) => f.id === currentList?.folderId);
   const statusGroup = statusGroups?.find((g: any) => g.id === currentList?.statusGroupId) || statusGroups?.[0];
   const statusOptions = statusGroup?.options || [];
 
@@ -7474,7 +7477,7 @@ function TaskDetailModal(props: any) {
             <div className="flex items-center gap-2 text-xs font-semibold text-gray-400 uppercase tracking-widest">
               <span>VerticalParts</span>
               <span>/</span>
-              <span>Suporte - Chamados</span>
+              <span>{currentFolder?.name || currentList?.name || 'Sem projeto'}</span>
             </div>
           </div>
           <div className="flex items-center gap-4">
