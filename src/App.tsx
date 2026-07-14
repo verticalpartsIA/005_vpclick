@@ -7205,6 +7205,10 @@ function TaskDetailModal(props: any) {
   const [isEditingDescription, setIsEditingDescription] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(task.title);
+  const [showActivityStats, setShowActivityStats] = useState(false);
+  const [activityFilter, setActivityFilter] = useState<'all' | 'history'>('all');
+  const [showActivitySearch, setShowActivitySearch] = useState(false);
+  const [activitySearchQuery, setActivitySearchQuery] = useState('');
 
   const unifiedTimeline = useMemo(() => {
     const all = [
@@ -7222,6 +7226,50 @@ function TaskDetailModal(props: any) {
     }
     return all.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }, [task.comments, task.activities, task.extensionHistory, task.createdAt]);
+
+  // Texto pesquisável de cada item da timeline (usado pela lupa de busca)
+  const getTimelineItemText = (item: any): string => {
+    const userName = users.find((u: any) => u.id === (item.userId || item.updatedBy))?.name || '';
+    switch (item.unifiedType) {
+      case 'COMMENT':
+        return `${userName} ${item.text || ''}`;
+      case 'ACTIVITY':
+        return `${userName} ${item.type || ''} ${item.oldValue || ''} ${item.newValue || ''}`;
+      case 'EXTENSION':
+        return `${userName} ${item.reason || ''} ${item.newDate || ''} ${item.oldDate || ''}`;
+      case 'CREATION':
+        return item.text || '';
+      default:
+        return '';
+    }
+  };
+
+  const visibleTimeline = useMemo(() => {
+    let result = unifiedTimeline;
+    if (activityFilter === 'history') {
+      result = result.filter((item: any) => item.unifiedType !== 'COMMENT');
+    }
+    const q = activitySearchQuery.trim().toLowerCase();
+    if (q) {
+      result = result.filter((item: any) => getTimelineItemText(item).toLowerCase().includes(q));
+    }
+    return result;
+  }, [unifiedTimeline, activityFilter, activitySearchQuery, users]);
+
+  const activityStats = useMemo(() => {
+    const activities = task.activities || [];
+    const statusChanges = activities.filter((a: any) => a.type === 'STATUS_CHANGE').length;
+    const priorityChanges = activities.filter((a: any) => a.type === 'PRIORITY_CHANGE').length;
+    const assigneeChanges = activities.filter((a: any) =>
+      ['MAIN_RESPONSIBLE_CHANGE', 'RESPONSIBLE_ADDED', 'RESPONSIBLE_REMOVED', 'TEAM_ASSIGNED'].includes(a.type)
+    ).length;
+    const extensions = (task.extensionHistory || []).length;
+    const comments = (task.comments || []).length;
+    const daysOpen = task.createdAt
+      ? Math.max(0, Math.floor((Date.now() - new Date(task.createdAt).getTime()) / 86400000))
+      : null;
+    return { statusChanges, priorityChanges, assigneeChanges, extensions, comments, daysOpen };
+  }, [task.activities, task.extensionHistory, task.comments, task.createdAt]);
 
   const formatDate = (date: string) => {
     if (!date) return '';
@@ -8058,16 +8106,66 @@ function TaskDetailModal(props: any) {
             <div className="p-6 border-b shrink-0 flex items-center justify-between bg-white text-gray-900">
               <h3 className="text-base font-bold">Atividade</h3>
               <div className="flex items-center gap-3 text-gray-400">
-                <Icons.Chart className="w-4 h-4 cursor-pointer hover:text-gray-600" />
-                <Icons.Clock className="w-4 h-4 cursor-pointer hover:text-gray-600" />
-                <Icons.Search className="w-4 h-4 cursor-pointer hover:text-gray-600" />
+                <button
+                  type="button"
+                  onClick={() => setShowActivityStats(v => !v)}
+                  title="Estatísticas da tarefa"
+                  className={`transition-colors ${showActivityStats ? 'text-orange-500' : 'hover:text-gray-600'}`}
+                >
+                  <Icons.Chart className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActivityFilter(f => (f === 'history' ? 'all' : 'history'))}
+                  title={activityFilter === 'history' ? 'Mostrando só o histórico do sistema — clique para ver os comentários também' : 'Mostrar só o histórico do sistema (sem comentários)'}
+                  className={`transition-colors ${activityFilter === 'history' ? 'text-orange-500' : 'hover:text-gray-600'}`}
+                >
+                  <Icons.Clock className="w-4 h-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowActivitySearch(v => { if (v) setActivitySearchQuery(''); return !v; })}
+                  title="Buscar na atividade"
+                  className={`transition-colors ${showActivitySearch ? 'text-orange-500' : 'hover:text-gray-600'}`}
+                >
+                  <Icons.Search className="w-4 h-4" />
+                </button>
               </div>
             </div>
+
+            {showActivitySearch && (
+              <div className="px-6 pt-4 shrink-0">
+                <input
+                  type="text"
+                  autoFocus
+                  value={activitySearchQuery}
+                  onChange={(e) => setActivitySearchQuery(e.target.value)}
+                  placeholder="Buscar em comentários e atividades..."
+                  className="w-full px-3 py-2 text-sm border rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-200"
+                />
+              </div>
+            )}
+
+            {showActivityStats && (
+              <div className="px-6 pt-4 shrink-0">
+                <div className="grid grid-cols-2 gap-2 bg-gray-50 border border-gray-100 rounded-2xl p-4 text-xs">
+                  <div><span className="text-gray-400">Aberta há</span> <span className="font-bold text-gray-900">{activityStats.daysOpen ?? '—'}{activityStats.daysOpen !== null ? ' dias' : ''}</span></div>
+                  <div><span className="text-gray-400">Comentários</span> <span className="font-bold text-gray-900">{activityStats.comments}</span></div>
+                  <div><span className="text-gray-400">Mudanças de status</span> <span className="font-bold text-gray-900">{activityStats.statusChanges}</span></div>
+                  <div><span className="text-gray-400">Mudanças de prioridade</span> <span className="font-bold text-gray-900">{activityStats.priorityChanges}</span></div>
+                  <div><span className="text-gray-400">Mudanças de responsável</span> <span className="font-bold text-gray-900">{activityStats.assigneeChanges}</span></div>
+                  <div><span className="text-gray-400">Prorrogações</span> <span className={`font-bold ${activityStats.extensions > 0 ? 'text-red-500' : 'text-gray-900'}`}>{activityStats.extensions}</span></div>
+                </div>
+              </div>
+            )}
 
             <div className="flex-1 overflow-y-auto p-6 custom-scrollbar space-y-8">
               <div className="relative pl-6 space-y-8">
                 <div className="absolute left-1.5 top-2 bottom-0 w-px bg-gray-100"></div>
-                {unifiedTimeline.map((item: any) => {
+                {visibleTimeline.length === 0 && (
+                  <p className="text-xs text-gray-400 italic pl-2">Nenhum resultado encontrado.</p>
+                )}
+                {visibleTimeline.map((item: any) => {
                   if (item.unifiedType === 'CREATION') {
                     return (
                       <div key="creation" className="relative">
