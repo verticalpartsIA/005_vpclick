@@ -3145,6 +3145,7 @@ export default function App() {
 
           {/* Dynamic View Area */}
           <main className="flex-1 overflow-auto p-4 sm:p-6 custom-scrollbar">
+          <div key={activeView} className="animate-in fade-in slide-in-from-bottom-1 duration-200">
             {activeView === 'Admin' && (
               <AdminPanel
                 spaces={spaces}
@@ -3288,6 +3289,7 @@ export default function App() {
                 uploadFile={uploadFile}
               />
             )}
+          </div>
           </main>
         </div>
 
@@ -4858,7 +4860,7 @@ function ViewTab({ active, onClick, label }: any) {
         }`}
     >
       {label}
-      {active && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--primary-color)]" />}
+      {active && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--primary-color)] animate-in fade-in duration-200" />}
     </button>
   );
 }
