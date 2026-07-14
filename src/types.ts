@@ -232,6 +232,8 @@ export interface Doc {
   folderId: string;
   createdBy: string;
   attachments: Attachment[];
+  parentId?: string | null;
+  isWiki?: boolean;
 }
 
 export interface WorkspaceTag {

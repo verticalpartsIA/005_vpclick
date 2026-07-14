@@ -8,6 +8,7 @@ import {
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
 import { Icons, PRIORITY_COLORS, COLORS } from './constants';
+import { WIKI_INTRO_HTML, WIKI_TEMPLATE_SECTIONS } from './wikiTemplate';
 import AdminPanel from './pages/AdminPanel';
 import LoginScreen from './pages/LoginScreen';
 import ChangePasswordModal from './components/ChangePasswordModal';
@@ -889,6 +890,7 @@ export default function App() {
   // New State for Creation Modals
   const [isSpaceModalOpen, setIsSpaceModalOpen] = useState(false);
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
+  const [isCreateWikiModalOpen, setIsCreateWikiModalOpen] = useState(false);
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false); // New Task Modal State
   const [prefilledTaskData, setPrefilledTaskData] = useState<Partial<Task> | null>(null);
   const [targetSpaceId, setTargetSpaceId] = useState<string | null>(null);
@@ -994,7 +996,9 @@ export default function App() {
             headerImage: d.header_image,
             folderId: d.folder_id,
             createdBy: d.created_by,
-            attachments: docAttachments
+            attachments: docAttachments,
+            parentId: d.parent_id,
+            isWiki: d.is_wiki || false
           };
         }));
       }
@@ -1746,24 +1750,80 @@ export default function App() {
     } else { toast.error('Erro ao mover pasta: ' + error.message); }
   };
 
-  const handleCreateDoc = (folderId: string) => {
+  const handleCreateDoc = (folderId: string, parentId: string | null = null) => {
     setRenameModal({
-      title: 'Novo Documento', defaultValue: '', placeholder: 'Título do documento…',
+      title: parentId ? 'Nova Subpágina' : 'Novo Documento', defaultValue: '', placeholder: 'Título do documento…',
       onSubmit: async (title) => {
         if (!title.trim()) return;
         const { data, error } = await supabase
           .from('docs')
-          .insert({ title: title.trim(), content: 'Comece a escrever aqui...', folder_id: folderId, created_by: currentUser.id })
+          .insert({ title: title.trim(), content: 'Comece a escrever aqui...', folder_id: folderId, created_by: currentUser.id, parent_id: parentId })
           .select().single();
         if (data && !error) {
-          const newDoc: Doc = { id: data.id, title: data.title, content: data.content || '', headerImage: data.header_image, folderId: data.folder_id, createdBy: data.created_by, attachments: [] };
+          const newDoc: Doc = { id: data.id, title: data.title, content: data.content || '', headerImage: data.header_image, folderId: data.folder_id, createdBy: data.created_by, attachments: [], parentId: data.parent_id, isWiki: data.is_wiki || false };
           setDocs(prev => [...prev, newDoc]);
           setActiveDocId(newDoc.id);
           setActiveView('Doc');
-          setActiveScope({ type: 'folder', id: folderId, name: title.trim() });
+          if (!parentId) setActiveScope({ type: 'folder', id: folderId, name: title.trim() });
         } else { toast.error('Erro ao criar documento: ' + error?.message); }
       }
     });
+  };
+
+  // Cria uma pasta "Wiki Interna" no espaço escolhido, com um Doc raiz (marcado
+  // como wiki) e 10 subpáginas pré-preenchidas — um atalho pra montar a
+  // estrutura de base de conhecimento inteira de uma vez.
+  const handleCreateWiki = async (spaceId: string) => {
+    try {
+      const { data: folderData, error: folderError } = await supabase
+        .from('folders')
+        .insert({ name: 'Wiki Interna', space_id: spaceId })
+        .select().single();
+      if (folderError || !folderData) throw folderError || new Error('Falha ao criar pasta da wiki.');
+
+      const newFolder: Folder = { id: folderData.id, name: folderData.name, spaceId: folderData.space_id };
+      setFolders(prev => [...prev, newFolder]);
+
+      const { data: rootData, error: rootError } = await supabase
+        .from('docs')
+        .insert({
+          title: 'Wiki Interna',
+          content: WIKI_INTRO_HTML,
+          folder_id: newFolder.id,
+          created_by: currentUser.id,
+          is_wiki: true
+        })
+        .select().single();
+      if (rootError || !rootData) throw rootError || new Error('Falha ao criar o documento raiz da wiki.');
+
+      const rootDoc: Doc = { id: rootData.id, title: rootData.title, content: rootData.content || '', headerImage: rootData.header_image, folderId: rootData.folder_id, createdBy: rootData.created_by, attachments: [], parentId: null, isWiki: true };
+
+      const sectionsToInsert = WIKI_TEMPLATE_SECTIONS.map(s => ({
+        title: s.title,
+        content: s.html,
+        folder_id: newFolder.id,
+        created_by: currentUser.id,
+        parent_id: rootDoc.id
+      }));
+      const { data: sectionsData, error: sectionsError } = await supabase
+        .from('docs')
+        .insert(sectionsToInsert)
+        .select();
+      if (sectionsError) throw sectionsError;
+
+      const sectionDocs: Doc[] = (sectionsData || []).map((d: any) => ({
+        id: d.id, title: d.title, content: d.content || '', headerImage: d.header_image, folderId: d.folder_id, createdBy: d.created_by, attachments: [], parentId: d.parent_id, isWiki: false
+      }));
+
+      setDocs(prev => [...prev, rootDoc, ...sectionDocs]);
+      setActiveScope({ type: 'folder', id: newFolder.id, name: newFolder.name });
+      setActiveDocId(rootDoc.id);
+      setActiveView('Doc');
+      toast.success('Wiki Interna criada com 10 páginas de base.');
+    } catch (err: any) {
+      console.error('Erro ao criar wiki:', err);
+      toast.error(`Falha ao criar a wiki${err?.message ? `: ${err.message}` : '.'}`);
+    }
   };
 
   const handleDeleteDoc = async (docId: string) => {
@@ -1931,7 +1991,8 @@ export default function App() {
       .update({
         title: updatedDoc.title,
         content: updatedDoc.content,
-        header_image: updatedDoc.headerImage
+        header_image: updatedDoc.headerImage,
+        is_wiki: updatedDoc.isWiki || false
       })
       .eq('id', updatedDoc.id);
 
@@ -2992,6 +3053,15 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-4 relative">
+              {(currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
+                <button
+                  onClick={() => setIsCreateWikiModalOpen(true)}
+                  title="Criar uma Wiki Interna (pasta + páginas de base já preenchidas)"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-gray-500 hover:bg-gray-100 hover:text-gray-900 font-bold text-sm rounded-lg transition-colors"
+                >
+                  <FileText className="w-4 h-4" /> <span className="hidden md:inline">Wiki</span>
+                </button>
+              )}
               <button
                 onClick={() => setShowGlobalAI(true)}
                 title="IA do VP Click — modo Raio-X"
@@ -3284,7 +3354,10 @@ export default function App() {
             {activeView === 'Doc' && activeDocId && (
               <DocView
                 doc={docs.find(d => d.id === activeDocId)!}
+                allDocs={docs}
                 onUpdate={handleUpdateDoc}
+                onSelectDoc={setActiveDocId}
+                onCreateSubpage={(parentDoc: Doc) => handleCreateDoc(parentDoc.folderId, parentDoc.id)}
                 currentUser={currentUser}
                 uploadFile={uploadFile}
               />
@@ -3422,6 +3495,18 @@ export default function App() {
           <CreateSpaceModal
             onClose={() => setIsSpaceModalOpen(false)}
             onCreate={handleCreateSpace}
+          />
+        )}
+
+        {/* Create Wiki Modal */}
+        {isCreateWikiModalOpen && (
+          <CreateWikiModal
+            spaces={spaces}
+            onClose={() => setIsCreateWikiModalOpen(false)}
+            onCreate={async (spaceId: string) => {
+              setIsCreateWikiModalOpen(false);
+              await handleCreateWiki(spaceId);
+            }}
           />
         )}
 
@@ -3776,12 +3861,17 @@ function SpaceOverview({ space, folders, lists, listProgressMap, tasks, onNaviga
   );
 }
 
-function DocView({ doc, onUpdate, currentUser, uploadFile }: {
+function DocView({ doc, allDocs = [], onUpdate, onSelectDoc, onCreateSubpage, currentUser, uploadFile }: {
   doc: Doc,
+  allDocs?: Doc[],
   onUpdate: (doc: Doc) => void,
+  onSelectDoc?: (docId: string) => void,
+  onCreateSubpage?: (parentDoc: Doc) => void,
   currentUser: User,
   uploadFile: (file: File, path: string, bucket?: string) => Promise<string | null>
 }) {
+  const parentDoc = doc.parentId ? allDocs.find(d => d.id === doc.parentId) : null;
+  const childDocs = allDocs.filter(d => d.parentId === doc.id);
   const [headerImage, setHeaderImage] = useState(doc.headerImage || '');
   const [title, setTitle] = useState(doc.title);
   const [isUploading, setIsUploading] = useState(false);
@@ -3987,14 +4077,36 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
       </div>
 
       <div className="p-8 sm:p-16 space-y-8">
-        {/* Title */}
-        <input
-          type="text"
-          value={title}
-          onChange={handleTitleChange}
-          placeholder="Título do Documento"
-          className="w-full text-5xl font-black text-gray-900 border-none focus:ring-0 placeholder:text-gray-100 p-0"
-        />
+        {parentDoc && (
+          <button
+            onClick={() => onSelectDoc?.(parentDoc.id)}
+            className="flex items-center gap-1.5 text-xs font-bold text-gray-400 hover:text-orange-500 transition-colors -mb-4"
+          >
+            <Icons.ChevronRight className="w-3 h-3 rotate-180" /> {parentDoc.title}
+          </button>
+        )}
+
+        {/* Title + Wiki toggle */}
+        <div className="flex items-start justify-between gap-4">
+          <input
+            type="text"
+            value={title}
+            onChange={handleTitleChange}
+            placeholder="Título do Documento"
+            className="flex-1 text-5xl font-black text-gray-900 border-none focus:ring-0 placeholder:text-gray-100 p-0"
+          />
+          <button
+            onClick={() => onUpdate({ ...doc, isWiki: !doc.isWiki })}
+            title={doc.isWiki ? 'Marcado como Wiki — clique para desmarcar' : 'Marcar como Wiki (destaca este documento como fonte oficial)'}
+            className={`shrink-0 mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border transition-all ${
+              doc.isWiki
+                ? 'bg-orange-50 border-orange-200 text-orange-600'
+                : 'bg-white border-gray-200 text-gray-400 hover:text-gray-600 hover:border-gray-300'
+            }`}
+          >
+            📌 {doc.isWiki ? 'Wiki' : 'Marcar como Wiki'}
+          </button>
+        </div>
 
         {/* Toolbar */}
         <div className="flex items-center gap-2 border-y py-3 sticky top-0 bg-white/80 backdrop-blur-sm z-[2]">
@@ -4043,6 +4155,38 @@ function DocView({ doc, onUpdate, currentUser, uploadFile }: {
           dangerouslySetInnerHTML={{ __html: linkifyHtml(doc.content) }}
           className="w-full min-h-[300px] text-xl text-gray-700 leading-relaxed outline-none prose prose-orange max-w-none focus:prose-orange [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer hover:[&_a]:text-blue-800"
         />
+
+        {/* Subpáginas */}
+        <div className="border-t pt-8 mt-8">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider flex items-center gap-2">
+              <Icons.Folder className="h-4 w-4" />
+              Subpáginas ({childDocs.length})
+            </h3>
+            <button
+              onClick={() => onCreateSubpage?.(doc)}
+              className="text-xs font-bold text-orange-500 hover:underline"
+            >
+              + Nova subpágina
+            </button>
+          </div>
+          {childDocs.length > 0 && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {childDocs.map((child) => (
+                <button
+                  key={child.id}
+                  onClick={() => onSelectDoc?.(child.id)}
+                  className="text-left group flex items-center gap-3 bg-gray-50 hover:bg-orange-50 border border-gray-100 hover:border-orange-200 rounded-xl p-4 transition-all"
+                >
+                  <div className="h-9 w-9 shrink-0 rounded-lg bg-white shadow-sm flex items-center justify-center text-orange-500">
+                    <Icons.FileText className="h-5 w-5" />
+                  </div>
+                  <span className="text-sm font-bold text-gray-900 truncate">{child.title}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* Attachments Section */}
         {(doc.attachments || []).length > 0 && (
@@ -4194,6 +4338,41 @@ function SettingsModal({ onClose, themePreset, setThemePreset, uiScale, setUiSca
         </div>
       </div>
     </div>
+  );
+}
+
+function SidebarDocItem({ doc, allDocs, depth, activeDocId, folder, onSetActiveDocId, onViewChange, onNavigate, onDeleteDoc }: any) {
+  const children = allDocs.filter((d: any) => d.parentId === doc.id);
+  const isActive = activeDocId === doc.id;
+  return (
+    <>
+      <div
+        className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${isActive ? 'bg-orange-500/10 text-orange-500 font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
+        style={{ paddingLeft: 8 + depth * 14 }}
+        onClick={(e) => { e.stopPropagation(); onSetActiveDocId(doc.id); onViewChange('Doc'); onNavigate('folder', folder.id, doc.title); }}
+      >
+        <FileText className="h-3 w-3 text-sidebar-foreground/40 shrink-0" />
+        <span className="truncate flex-1">{doc.title}</span>
+        {doc.isWiki && <span className="text-[10px] shrink-0" title="Marcado como Wiki">📌</span>}
+        <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute right-1">
+          <button onClick={(e: any) => { e.stopPropagation(); onDeleteDoc(doc.id); }} className="p-1 text-sidebar-foreground/40 hover:text-red-500"><Icons.Trash /></button>
+        </div>
+      </div>
+      {children.map((child: any) => (
+        <SidebarDocItem
+          key={child.id}
+          doc={child}
+          allDocs={allDocs}
+          depth={depth + 1}
+          activeDocId={activeDocId}
+          folder={folder}
+          onSetActiveDocId={onSetActiveDocId}
+          onViewChange={onViewChange}
+          onNavigate={onNavigate}
+          onDeleteDoc={onDeleteDoc}
+        />
+      ))}
+    </>
   );
 }
 
@@ -4769,22 +4948,20 @@ function Sidebar({
                                         );
                                       })}
 
-                                      {docs.filter((d: any) => d.folderId === folder.id).map((doc: any) => {
-                                        const isActive = activeDocId === doc.id;
-                                        return (
-                                          <div
-                                            key={doc.id}
-                                            className={`text-[12px] flex items-center gap-2 px-2 py-1.5 cursor-pointer rounded transition-colors group relative ${isActive ? 'bg-orange-500/10 text-orange-500 font-semibold' : 'text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent/50'}`}
-                                            onClick={(e) => { e.stopPropagation(); onSetActiveDocId(doc.id); onViewChange('Doc'); onNavigate('folder', folder.id, doc.title); }}
-                                          >
-                                            <FileText className="h-3 w-3 text-sidebar-foreground/40 shrink-0" />
-                                            <span className="truncate flex-1">{doc.title}</span>
-                                            <div className="opacity-0 group-hover:opacity-100 transition-opacity absolute right-1">
-                                              <button onClick={(e) => { e.stopPropagation(); onDeleteDoc(doc.id); }} className="p-1 text-sidebar-foreground/40 hover:text-red-500"><Icons.Trash /></button>
-                                            </div>
-                                          </div>
-                                        );
-                                      })}
+                                      {docs.filter((d: any) => d.folderId === folder.id && !d.parentId).map((doc: any) => (
+                                        <SidebarDocItem
+                                          key={doc.id}
+                                          doc={doc}
+                                          allDocs={docs}
+                                          depth={0}
+                                          activeDocId={activeDocId}
+                                          folder={folder}
+                                          onSetActiveDocId={onSetActiveDocId}
+                                          onViewChange={onViewChange}
+                                          onNavigate={onNavigate}
+                                          onDeleteDoc={onDeleteDoc}
+                                        />
+                                      ))}
 
                                       <button
                                         onClick={(e) => { e.stopPropagation(); onCreateList?.(folder.id); }}
@@ -8841,6 +9018,66 @@ function CreateSpaceModal({ onClose, onCreate }: any) {
             className="px-6 py-2 text-xs bg-[var(--primary-color)] text-[#2c3e50] font-black rounded-lg hover:shadow-lg disabled:opacity-50 transition-all flex items-center gap-2"
           >
             Continuar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateWikiModal({ spaces, onClose, onCreate }: any) {
+  const [spaceId, setSpaceId] = useState(spaces?.[0]?.id || '');
+  const [isCreating, setIsCreating] = useState(false);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const handleConfirm = async () => {
+    if (!spaceId || isCreating) return;
+    setIsCreating(true);
+    await onCreate(spaceId);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-md p-4" onClick={(e) => { e.stopPropagation(); if (e.target === e.currentTarget) onClose(); }}>
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden animate-in zoom-in duration-200">
+        <div className="p-4 border-b flex justify-between items-center bg-gray-50/50">
+          <h3 className="font-bold text-gray-800 flex items-center gap-2"><FileText className="w-4 h-4 text-orange-500" /> Criar Wiki Interna</h3>
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full text-gray-400 hover:text-gray-600 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <p className="text-xs text-gray-500 leading-relaxed">
+            Cria uma pasta <strong>"Wiki Interna"</strong> no espaço escolhido, com um documento raiz e 10 subpáginas já preenchidas
+            (Visão geral, Processos, Procedimentos, Políticas, Manuais, FAQ, Responsáveis, Modelos, Decisões e Manutenção) — pronto pra ajustar e usar.
+          </p>
+          <div>
+            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-1 block">Espaço</label>
+            <select
+              className="w-full p-2.5 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-orange-200"
+              value={spaceId}
+              onChange={(e) => setSpaceId(e.target.value)}
+            >
+              {(spaces || []).map((s: Space) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="p-4 border-t bg-gray-50/50 flex justify-end gap-3">
+          <button onClick={onClose} className="px-4 py-2 text-xs font-bold text-gray-500 hover:text-gray-700">Cancelar</button>
+          <button
+            onClick={handleConfirm}
+            disabled={!spaceId || isCreating}
+            className="px-6 py-2 text-xs bg-[var(--primary-color)] text-[#2c3e50] font-black rounded-lg hover:shadow-lg disabled:opacity-50 transition-all"
+          >
+            {isCreating ? 'Criando...' : 'Criar Wiki'}
           </button>
         </div>
       </div>
