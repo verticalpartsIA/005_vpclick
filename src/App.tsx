@@ -7595,12 +7595,15 @@ function TaskDetailModal(props: any) {
   };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files || files.length === 0) return;
+    // Copia a FileList ANTES de limpar o input: event.target.files é uma
+    // lista "viva" — zerar o value esvazia a própria lista, e iterar depois
+    // não encontraria nenhum arquivo (upload silenciosamente não acontecia).
+    const files = Array.from(event.target.files || []);
     // Permite selecionar o mesmo arquivo novamente após uma falha
     event.target.value = '';
+    if (files.length === 0) return;
 
-    for (const file of Array.from(files)) {
+    for (const file of files) {
       if (uploadFile && saveAttachment) {
         try {
           const safeName = file.name.replace(/[^\w.\-]/g, '_');
