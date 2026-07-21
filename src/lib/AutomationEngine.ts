@@ -129,7 +129,7 @@ export class AutomationEngine {
   private checkConditions(conditions: AutomationCondition[], task: Task): boolean {
     if (!conditions || conditions.length === 0) return true;
     return conditions.every((cond) => {
-      const taskValue = String((task as Record<string, unknown>)[cond.field] ?? '');
+      const taskValue = String((task as unknown as Record<string, unknown>)[cond.field] ?? '');
       switch (cond.operator) {
         case 'equals':       return taskValue === cond.value;
         case 'not_equals':   return taskValue !== cond.value;
@@ -187,7 +187,7 @@ export class AutomationEngine {
   static evaluateConditions(task: Task, conditions: AutomationCondition[]): boolean {
     if (!conditions || conditions.length === 0) return true;
     return conditions.every((cond) => {
-      const taskValue = (task as Record<string, unknown>)[cond.field];
+      const taskValue = (task as unknown as Record<string, unknown>)[cond.field];
       switch (cond.operator) {
         case 'equals':     return taskValue === cond.value;
         case 'not_equals': return taskValue !== cond.value;

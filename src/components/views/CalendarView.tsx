@@ -4,7 +4,7 @@ import {
   Search, Filter, Calendar as CalendarIcon, 
   ChevronDown, MoreHorizontal 
 } from "lucide-react";
-import { Task, Profile } from '../../types';
+import { Task, User } from '../../types';
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { 
@@ -16,7 +16,7 @@ import { ptBR } from 'date-fns/locale';
 
 interface CalendarViewProps {
   tasks: Task[];
-  users: Profile[];
+  users: User[];
   onTaskClick: (taskId: string) => void;
   onAddTaskAtDate: (date: Date) => void;
 }

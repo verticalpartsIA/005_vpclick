@@ -20,7 +20,6 @@ import { GanttView } from './components/views/GanttView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
-import { FormulaParser } from './lib/FormulaParser';
 import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
@@ -1202,7 +1201,7 @@ export default function App() {
       // comentários/checklists/anexos/etc sumirem silenciosamente no escopo global.
       // Quebramos em lotes de 150 IDs (URL segura) e concatenamos os resultados.
       const fetchInChunks = async (
-        build: (ids: string[]) => Promise<{ data: any[] | null; error: any }>,
+        build: (ids: string[]) => PromiseLike<{ data: any[] | null; error: any }>,
         label: string
       ): Promise<any[]> => {
         const CHUNK = 150;
@@ -2929,6 +2928,7 @@ export default function App() {
           onDeleteSpace={handleDeleteSpace}
           onRenameFolder={handleRenameFolder}
           onDeleteFolder={handleDeleteFolder}
+          onBulkDeleteFolders={handleBulkDeleteFolders}
           onDeleteList={handleDeleteList}
           onRenameList={handleRenameList}
           onDuplicateList={handleDuplicateList}
@@ -3341,7 +3341,7 @@ export default function App() {
                 users={adminUsers} 
                 onTaskClick={setSelectedTaskId} 
                 onAddTaskAtDate={(date) => {
-                  setPrefilledTaskData({ due_date: formatLocalDate(date) as any });
+                  setPrefilledTaskData({ dueDate: formatLocalDate(date) });
                   setIsTaskModalOpen(true);
                 }}
               />
@@ -4391,7 +4391,7 @@ function Sidebar({
   themePreset,
   spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onNavigate, onViewChange, isCollapsed, onToggle,
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
-  onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder,
+  onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder, onBulkDeleteFolders,
   onDeleteList, onRenameList, onDuplicateList,
   docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc,
   onMoveList, onMoveFolder,
@@ -4773,7 +4773,7 @@ function Sidebar({
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
+                                      onBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
                                     }}
                                     className="text-red-600 hover:text-red-700 font-bold"
                                   >
@@ -5397,7 +5397,7 @@ function ListView({
       order = activeStatusOptions.map((o: any) => o.label);
     } else {
       // Caso contrário, coletar todos os status únicos das tarefas presentes
-      const uniqueStatuses = Array.from(new Set(tasks.map((t: Task) => t.status)));
+      const uniqueStatuses = Array.from(new Set<string>(tasks.map((t: Task) => t.status)));
       // Tentar manter uma ordem razoável baseada no grupo padrão
       const defaultOrder = statusGroups?.[0]?.options.map((o: any) => o.label) || [];
       order = uniqueStatuses.sort((a: any, b: any) => {
@@ -5912,7 +5912,10 @@ function ListView({
                                   <td key={col.id} className="px-4 py-3 border-r border-gray-200" onClick={(e) => e.stopPropagation()}>
                                     {field.type === CustomFieldType.FORMULA ? (
                                       <div className="text-xs font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded border border-blue-100 italic">
-                                        {FormulaParser.evaluate(field.config?.formula || '', { ...t, ...Object.fromEntries(fieldValues.filter(fv => fv.entityId === t.id).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) })}
+                                        <FormulaValue
+                                          formula={field.config?.formula || ''}
+                                          context={{ ...t, ...Object.fromEntries(fieldValues.filter(fv => fv.entityId === t.id).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) }}
+                                        />
                                       </div>
                                     ) : field.type === CustomFieldType.DROPDOWN ? (
                                         <DropdownMenu>
@@ -6032,7 +6035,7 @@ function ListView({
                               </td>
                             </tr>
                           );
-                          const rows = [currentRow];
+                          const rows: React.ReactNode[] = [currentRow];
                           if (isTaskExpanded && hasChildren) {
                             subtasks.forEach(child => {
                               rows.push(...renderRecursiveRows(child, depth + 1));
@@ -6991,6 +6994,13 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [selectedSpaceId, setSelectedSpaceId] = useState<string>('');
   const [selectedFolderId, setSelectedFolderId] = useState<string>('');
   const [selectedListId, setSelectedListId] = useState<string>('');
+
+  // Prazo pré-preenchido (ex: ao clicar num dia no Calendário). Continua
+  // editável até o usuário informar início/duração, que aí recalcula e
+  // sobrescreve esse valor.
+  useEffect(() => {
+    if (prefilledData?.dueDate) setDueDate(prefilledData.dueDate);
+  }, [prefilledData?.dueDate]);
 
   // Initialize selection based on current scope or prefilled data
   useEffect(() => {
@@ -9348,6 +9358,30 @@ export function BufferedProgressEditor({ value, onCommit, compact = false }: { v
   );
 }
 
+// FormulaParser depende de mathjs, uma biblioteca relativamente pesada.
+// Carregamos por import dinâmico (chunk separado) em vez de estático, pra
+// não inflar o bundle inicial de quem nunca usa um campo do tipo Fórmula.
+let formulaParserPromise: Promise<typeof import('./lib/FormulaParser')> | null = null;
+function loadFormulaParser() {
+  if (!formulaParserPromise) formulaParserPromise = import('./lib/FormulaParser');
+  return formulaParserPromise;
+}
+
+export function FormulaValue({ formula, context }: { formula: string; context: Record<string, any> }) {
+  const [result, setResult] = useState<number | string>('…');
+  // `context` é um objeto novo a cada render (montado inline pelo chamador);
+  // comparamos pelo conteúdo serializado pra não reavaliar a cada re-render.
+  const contextKey = JSON.stringify(context);
+  useEffect(() => {
+    let active = true;
+    loadFormulaParser().then(({ FormulaParser }) => {
+      if (active) setResult(FormulaParser.evaluate(formula, JSON.parse(contextKey)));
+    });
+    return () => { active = false; };
+  }, [formula, contextKey]);
+  return <>{result}</>;
+}
+
 function CustomFieldInput({ field, value, onChange, formulaContext }: any) {
   switch (field.type) {
     case CustomFieldType.TEXT:
@@ -9397,17 +9431,15 @@ function CustomFieldInput({ field, value, onChange, formulaContext }: any) {
           <BufferedProgressEditor value={value} onCommit={onChange} />
         </div>
       );
-    case CustomFieldType.FORMULA: {
-      const result = FormulaParser.evaluate(field.config?.formula || '', formulaContext || {});
+    case CustomFieldType.FORMULA:
       return (
         <div>
           <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
           <div className="mt-1 text-sm font-mono text-blue-600 bg-blue-50 px-3 py-2 rounded border border-blue-100 italic">
-            {result}
+            <FormulaValue formula={field.config?.formula || ''} context={formulaContext || {}} />
           </div>
         </div>
       );
-    }
     case CustomFieldType.DATE:
       return (
         <div>
