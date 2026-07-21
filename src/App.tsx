@@ -2848,6 +2848,15 @@ export default function App() {
     return result;
   }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig]);
 
+  // O modal "Gerenciar Campos Personalizados" precisa saber qual lista está
+  // ativa pra ler/gravar quais campos estão ocultos — usa a mesma resolução
+  // que o ListView (ver `resolveActiveListId`), senão os toggles gravam numa
+  // chave que a tabela nunca consulta e parecem não ter efeito nenhum.
+  const fieldManagerListId = useMemo(
+    () => resolveActiveListId(activeListId, filteredTasks),
+    [activeListId, filteredTasks],
+  );
+
   const filteredSpaces = useMemo(() => {
     if (currentUser.role === UserRole.ADMIN) return spaces;
     const access = userAccess[currentUser.id];
@@ -3477,7 +3486,7 @@ export default function App() {
             onDeleteField={handleDeleteField}
             onReorderField={handleReorderField}
             currentUser={currentUser}
-            activeListId={activeListId}
+            activeListId={fieldManagerListId}
             hiddenStandardColumnKeysByList={hiddenStandardColumnKeysByList}
             onToggleStandardColumn={(listId: string, key: any) => {
               setHiddenStandardColumnKeysByList((prev) => {
@@ -5276,6 +5285,19 @@ function formatLocalDate(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+// Resolve qual lista deve ser considerada "ativa" quando `activeListId` está
+// vazio (ex: navegando por pasta/espaço em vez de uma lista específica): se
+// todas as tarefas visíveis pertencem à mesma lista, usamos essa lista;
+// senão é ambíguo e retornamos null. Usado tanto pela tabela (ListView)
+// quanto pelo modal de campos personalizados — as duas telas PRECISAM
+// concordar sobre qual lista está "ativa", senão os toggles de
+// mostrar/ocultar campo gravam numa chave que a outra tela nunca lê.
+export function resolveActiveListId(activeListId: string | null | undefined, tasks: { listId: string }[]): string | null {
+  if (activeListId) return activeListId;
+  const listIds = Array.from(new Set(tasks.map((t) => t.listId)));
+  return listIds.length === 1 ? listIds[0] : null;
+}
+
 function getTaskHealth(task: Task) {
   const status = (task.status || '').toLowerCase();
 
@@ -5442,8 +5464,8 @@ function ListView({
   }, [tasks]);
 
   const derivedActiveListId = useMemo(
-    () => activeListId ?? (listIdsInView.length === 1 ? listIdsInView[0] : null),
-    [activeListId, listIdsInView],
+    () => resolveActiveListId(activeListId, tasks),
+    [activeListId, tasks],
   );
 
   const hiddenTaskFieldIdsForActiveList = useMemo(() => {
@@ -8725,6 +8747,12 @@ function CustomFieldsManager(props: any) {
                 </button>
               </div>
 
+              {!activeListId && (
+                <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Selecione uma lista específica na barra lateral para mostrar/ocultar campos — como há mais de uma lista neste escopo, não é possível saber em qual delas aplicar a alteração.
+                </p>
+              )}
+
               <div className="space-y-1">
                 {/* Standard Fields */}
                 {filteredStandard.map(f => (
@@ -8735,7 +8763,8 @@ function CustomFieldsManager(props: any) {
                     </div>
                     <button
                       onClick={() => onToggleStandardColumn(activeListId, f.id)}
-                      className={`w-10 h-6 rounded-full transition-all relative ${!isStandardHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
+                      disabled={!activeListId}
+                      className={`w-10 h-6 rounded-full transition-all relative disabled:opacity-40 disabled:cursor-not-allowed ${!isStandardHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
                     >
                       <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${!isStandardHidden(f.id) ? 'left-5' : 'left-1'}`} />
                     </button>
@@ -8759,7 +8788,8 @@ function CustomFieldsManager(props: any) {
                       </div>
                       <button
                         onClick={() => onToggleTaskFieldForList(activeListId, f.id)}
-                        className={`w-10 h-6 rounded-full transition-all relative ${!isFieldHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
+                        disabled={!activeListId}
+                        className={`w-10 h-6 rounded-full transition-all relative disabled:opacity-40 disabled:cursor-not-allowed ${!isFieldHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
                       >
                         <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${!isFieldHidden(f.id) ? 'left-5' : 'left-1'}`} />
                       </button>
