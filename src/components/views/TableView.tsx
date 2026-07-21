@@ -3,7 +3,7 @@ import {
   Filter, ArrowUpDown, CheckCircle2,
   MoreHorizontal, Plus, GripVertical, Settings2, AlertTriangle
 } from "lucide-react";
-import { Task, CustomField, CustomFieldValue, Profile, WorkspaceTag } from '../../types';
+import { Task, CustomField, CustomFieldType, CustomFieldValue, User, WorkspaceTag } from '../../types';
 import { TagBadge } from '@/components/TagBadge';
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,7 +20,7 @@ interface TableViewProps {
   tasks: Task[];
   customFields: CustomField[];
   fieldValues: CustomFieldValue[];
-  users: Profile[];
+  users: User[];
   onTaskClick: (taskId: string) => void;
   onUpdateTask: (taskId: string, updates: Partial<Task>) => void;
   onUpdateFieldValue: (taskId: string, fieldId: string, value: any) => void;
@@ -325,7 +325,7 @@ export const TableView: React.FC<TableViewProps> = ({
                     <span className={`text-sm font-medium ${
                       task.priority === 'Urgente' ? 'text-destructive' :
                       task.priority === 'Alta' ? 'text-orange-500' :
-                      task.priority === 'Media' ? 'text-blue-500' : 'text-muted-foreground'
+                      task.priority === 'Média' ? 'text-blue-500' : 'text-muted-foreground'
                     }`}>
                       {task.priority || 'Normal'}
                     </span>
@@ -375,8 +375,8 @@ export const TableView: React.FC<TableViewProps> = ({
                       style={{ width: w, maxWidth: w }}
                     >
                       <span className="truncate block">
-                        {field?.type === 'currency' ? `R$ ${val || '0,00'}` :
-                         field?.type === 'progress' ? `${val || 0}%` :
+                        {field?.type === CustomFieldType.MONEY || field?.type === CustomFieldType.CURRENCY ? `${field.config?.currency || 'R$'} ${val || '0,00'}` :
+                         field?.type === CustomFieldType.PROGRESS ? `${val || 0}%` :
                          String(val || '-')}
                       </span>
                     </td>

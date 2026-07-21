@@ -1201,7 +1201,7 @@ export default function App() {
       // comentários/checklists/anexos/etc sumirem silenciosamente no escopo global.
       // Quebramos em lotes de 150 IDs (URL segura) e concatenamos os resultados.
       const fetchInChunks = async (
-        build: (ids: string[]) => Promise<{ data: any[] | null; error: any }>,
+        build: (ids: string[]) => PromiseLike<{ data: any[] | null; error: any }>,
         label: string
       ): Promise<any[]> => {
         const CHUNK = 150;
@@ -2387,8 +2387,11 @@ export default function App() {
           priority: newTaskPartial.priority || TaskPriority.MEDIA,
           main_assignee_id: newTaskPartial.mainAssigneeId || currentUser.id,
           secondary_assignee_ids: [],
-          start_date: new Date().toISOString().split('T')[0],
-          due_date: (newTaskPartial.dueDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()).split('T')[0],
+          // `toISOString()` converte para UTC: à noite no Brasil (UTC-3) já
+          // é o dia seguinte em UTC, o que fazia tarefas criadas de noite
+          // nascerem com data de início/prazo erradas. Usamos data local.
+          start_date: formatLocalDate(new Date()),
+          due_date: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
           list_id: newTaskPartial.listId,
           project_id: newTaskPartial.projectId || null,
           parent_id: newTaskPartial.parentId || null
@@ -2845,6 +2848,15 @@ export default function App() {
     return result;
   }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig]);
 
+  // O modal "Gerenciar Campos Personalizados" precisa saber qual lista está
+  // ativa pra ler/gravar quais campos estão ocultos — usa a mesma resolução
+  // que o ListView (ver `resolveActiveListId`), senão os toggles gravam numa
+  // chave que a tabela nunca consulta e parecem não ter efeito nenhum.
+  const fieldManagerListId = useMemo(
+    () => resolveActiveListId(activeListId, filteredTasks),
+    [activeListId, filteredTasks],
+  );
+
   const filteredSpaces = useMemo(() => {
     if (currentUser.role === UserRole.ADMIN) return spaces;
     const access = userAccess[currentUser.id];
@@ -2916,6 +2928,7 @@ export default function App() {
           onDeleteSpace={handleDeleteSpace}
           onRenameFolder={handleRenameFolder}
           onDeleteFolder={handleDeleteFolder}
+          onBulkDeleteFolders={handleBulkDeleteFolders}
           onDeleteList={handleDeleteList}
           onRenameList={handleRenameList}
           onDuplicateList={handleDuplicateList}
@@ -3328,7 +3341,7 @@ export default function App() {
                 users={adminUsers} 
                 onTaskClick={setSelectedTaskId} 
                 onAddTaskAtDate={(date) => {
-                  setPrefilledTaskData({ due_date: date.toISOString().split('T')[0] as any });
+                  setPrefilledTaskData({ dueDate: formatLocalDate(date) });
                   setIsTaskModalOpen(true);
                 }}
               />
@@ -3474,7 +3487,7 @@ export default function App() {
             onDeleteField={handleDeleteField}
             onReorderField={handleReorderField}
             currentUser={currentUser}
-            activeListId={activeListId}
+            activeListId={fieldManagerListId}
             hiddenStandardColumnKeysByList={hiddenStandardColumnKeysByList}
             onToggleStandardColumn={(listId: string, key: any) => {
               setHiddenStandardColumnKeysByList((prev) => {
@@ -4378,7 +4391,7 @@ function Sidebar({
   themePreset,
   spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onNavigate, onViewChange, isCollapsed, onToggle,
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
-  onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder,
+  onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder, onBulkDeleteFolders,
   onDeleteList, onRenameList, onDuplicateList,
   docs, activeDocId, onSetActiveDocId, onCreateDoc, onDeleteDoc,
   onMoveList, onMoveFolder,
@@ -4760,7 +4773,7 @@ function Sidebar({
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
+                                      onBulkDeleteFolders(selectedFolderIds, () => setSelectedFolderIds([]));
                                     }}
                                     className="text-red-600 hover:text-red-700 font-bold"
                                   >
@@ -5263,6 +5276,29 @@ function parseLocalDate(dateStr: string): Date {
   return new Date(y, m - 1, d);
 }
 
+// Inverso de parseLocalDate: formata um Date usando os componentes locais
+// (ano/mês/dia), nunca `toISOString()` — que converte para UTC e pode
+// arredondar para o dia errado em fusos atrás de UTC (ex: Brasil, UTC-3).
+function formatLocalDate(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+// Resolve qual lista deve ser considerada "ativa" quando `activeListId` está
+// vazio (ex: navegando por pasta/espaço em vez de uma lista específica): se
+// todas as tarefas visíveis pertencem à mesma lista, usamos essa lista;
+// senão é ambíguo e retornamos null. Usado tanto pela tabela (ListView)
+// quanto pelo modal de campos personalizados — as duas telas PRECISAM
+// concordar sobre qual lista está "ativa", senão os toggles de
+// mostrar/ocultar campo gravam numa chave que a outra tela nunca lê.
+export function resolveActiveListId(activeListId: string | null | undefined, tasks: { listId: string }[]): string | null {
+  if (activeListId) return activeListId;
+  const listIds = Array.from(new Set(tasks.map((t) => t.listId)));
+  return listIds.length === 1 ? listIds[0] : null;
+}
+
 function getTaskHealth(task: Task) {
   const status = (task.status || '').toLowerCase();
 
@@ -5361,7 +5397,7 @@ function ListView({
       order = activeStatusOptions.map((o: any) => o.label);
     } else {
       // Caso contrário, coletar todos os status únicos das tarefas presentes
-      const uniqueStatuses = Array.from(new Set(tasks.map((t: Task) => t.status)));
+      const uniqueStatuses = Array.from(new Set<string>(tasks.map((t: Task) => t.status)));
       // Tentar manter uma ordem razoável baseada no grupo padrão
       const defaultOrder = statusGroups?.[0]?.options.map((o: any) => o.label) || [];
       order = uniqueStatuses.sort((a: any, b: any) => {
@@ -5429,8 +5465,8 @@ function ListView({
   }, [tasks]);
 
   const derivedActiveListId = useMemo(
-    () => activeListId ?? (listIdsInView.length === 1 ? listIdsInView[0] : null),
-    [activeListId, listIdsInView],
+    () => resolveActiveListId(activeListId, tasks),
+    [activeListId, tasks],
   );
 
   const hiddenTaskFieldIdsForActiveList = useMemo(() => {
@@ -5876,7 +5912,10 @@ function ListView({
                                   <td key={col.id} className="px-4 py-3 border-r border-gray-200" onClick={(e) => e.stopPropagation()}>
                                     {field.type === CustomFieldType.FORMULA ? (
                                       <div className="text-xs font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded border border-blue-100 italic">
-                                        {FormulaParser.evaluate(field.config?.formula || '', { ...t, ...Object.fromEntries(fieldValues.filter(fv => fv.entityId === t.id).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) })}
+                                        <FormulaValue
+                                          formula={field.config?.formula || ''}
+                                          context={{ ...t, ...Object.fromEntries(fieldValues.filter(fv => fv.entityId === t.id).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) }}
+                                        />
                                       </div>
                                     ) : field.type === CustomFieldType.DROPDOWN ? (
                                         <DropdownMenu>
@@ -5930,52 +5969,23 @@ function ListView({
                                           </DropdownMenuContent>
                                         </DropdownMenu>
                                       ) : field.type === CustomFieldType.DATE ? (
-                                        <input
-                                          type="date"
-                                          value={currentValue ?? ''}
-                                          onChange={(e) => {
-                                            if (e.target.value) {
-                                              onUpdateFieldValue(field.id, t.id, e.target.value);
-                                            }
-                                          }}
-                                          onBlur={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
+                                        <DateFieldEditor
+                                          value={currentValue}
+                                          onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
                                           className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
                                         />
                                       ) : field.type === CustomFieldType.RATING ? (
-                                        <div className="flex gap-1">
-                                          {[1, 2, 3, 4, 5].map((star) => (
-                                            <Icons.Star
-                                              key={star}
-                                              className={`w-4 h-4 cursor-pointer transition-colors ${
-                                                Number(currentValue) >= star ? 'text-yellow-400 fill-yellow-400' : 'text-gray-200 hover:text-yellow-200'
-                                              }`}
-                                              onClick={() => onUpdateFieldValue(field.id, t.id, star)}
-                                            />
-                                          ))}
-                                        </div>
+                                        <BufferedRating
+                                          value={currentValue}
+                                          onCommit={(star) => onUpdateFieldValue(field.id, t.id, star)}
+                                          className="flex gap-1"
+                                        />
                                       ) : field.type === CustomFieldType.PROGRESS ? (
-                                        <div className="w-full space-y-1">
-                                          <div className="flex justify-between text-[9px] font-bold text-gray-400 uppercase">
-                                            <span>Progresso</span>
-                                            <span>{currentValue || 0}%</span>
-                                          </div>
-                                          <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden border border-gray-200">
-                                            <div 
-                                              className="h-full transition-all duration-500"
-                                              style={{ 
-                                                width: `${currentValue || 0}%`,
-                                                backgroundColor: Number(currentValue) > 75 ? '#22c55e' : Number(currentValue) > 30 ? '#eab308' : '#ef4444'
-                                              }}
-                                            />
-                                          </div>
-                                          <input 
-                                            type="range" 
-                                            min="0" max="100" 
-                                            value={currentValue || 0}
-                                            onChange={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
-                                            className="w-full h-1 opacity-0 hover:opacity-100 transition-opacity cursor-pointer accent-orange-500"
-                                          />
-                                        </div>
+                                        <BufferedProgressEditor
+                                          value={currentValue}
+                                          onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
+                                          compact
+                                        />
                                       ) : (
                                         <div className="relative">
                                           {(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) && (
@@ -5983,11 +5993,11 @@ function ListView({
                                               {field.config?.currency || 'R$'}
                                             </div>
                                           )}
-                                          <input
-                                            type={field.type === CustomFieldType.NUMBER || field.type === CustomFieldType.MONEY ? 'number' : 'text'}
-                                            value={currentValue ?? ''}
-                                            onChange={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
-                                            className={`h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all ${field.type === CustomFieldType.MONEY ? 'pl-8' : ''}`}
+                                          <BufferedFieldInput
+                                            type={field.type === CustomFieldType.NUMBER || field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY ? 'number' : 'text'}
+                                            value={currentValue}
+                                            onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
+                                            className={`h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all ${(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) ? 'pl-8' : ''}`}
                                             placeholder="—"
                                           />
                                         </div>
@@ -6025,7 +6035,7 @@ function ListView({
                               </td>
                             </tr>
                           );
-                          const rows = [currentRow];
+                          const rows: React.ReactNode[] = [currentRow];
                           if (isTaskExpanded && hasChildren) {
                             subtasks.forEach(child => {
                               rows.push(...renderRecursiveRows(child, depth + 1));
@@ -6965,14 +6975,18 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
     const isHours = /^\d+(\.\d+)?\s*h$/i.test(newDuration.trim());
     const numericValue = parseFloat(newDuration);
     if (isNaN(numericValue) || numericValue <= 0) return;
-    const d = new Date(newStart);
+    // newStart é "YYYY-MM-DD" (sem hora); `new Date(newStart)` interpreta
+    // isso como meia-noite UTC, o que em fusos atrás de UTC (ex: Brasil)
+    // faz `getDate()`/`setDate()` operarem no dia anterior. Usamos o parser
+    // local do app para não perder um dia no cálculo da data limite.
+    const d = parseLocalDate(newStart);
     if (isHours) {
       // Horas: mantém o mesmo dia da data de início
       setDueDate(newStart);
     } else {
       // Dias: soma à data de início
       d.setDate(d.getDate() + Math.round(numericValue));
-      setDueDate(d.toISOString().split('T')[0]);
+      setDueDate(formatLocalDate(d));
     }
   };
 
@@ -6980,6 +6994,13 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [selectedSpaceId, setSelectedSpaceId] = useState<string>('');
   const [selectedFolderId, setSelectedFolderId] = useState<string>('');
   const [selectedListId, setSelectedListId] = useState<string>('');
+
+  // Prazo pré-preenchido (ex: ao clicar num dia no Calendário). Continua
+  // editável até o usuário informar início/duração, que aí recalcula e
+  // sobrescreve esse valor.
+  useEffect(() => {
+    if (prefilledData?.dueDate) setDueDate(prefilledData.dueDate);
+  }, [prefilledData?.dueDate]);
 
   // Initialize selection based on current scope or prefilled data
   useEffect(() => {
@@ -8070,6 +8091,14 @@ function TaskDetailModal(props: any) {
                                 field={field}
                                 value={currentValue}
                                 onChange={(val: any) => { onUpdateFieldValue(field.id, task.id, val); }}
+                                formulaContext={{
+                                  ...task,
+                                  ...Object.fromEntries(
+                                    (fieldValues || [])
+                                      .filter((fv: CustomFieldValue) => fv.entityId === task.id)
+                                      .map((fv: CustomFieldValue) => [customFields.find((f: CustomField) => f.id === fv.fieldId)?.name || '', fv.value])
+                                  ),
+                                }}
                               />
                             </div>
                           </div>
@@ -8570,6 +8599,8 @@ function CustomFieldsManager(props: any) {
   const [options, setOptions] = useState<CustomFieldOption[]>([]);
   const [optionSearch, setOptionSearch] = useState('');
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
+  const [formula, setFormula] = useState('');
+  const [currencySymbol, setCurrencySymbol] = useState('R$');
 
   const STANDARD_FIELDS_MAP = [
     { id: 'status', label: 'Status' },
@@ -8622,6 +8653,8 @@ function CustomFieldsManager(props: any) {
     setType(field.type);
     setTarget(field.target);
     setOptions(field.config?.options || []);
+    setFormula(field.config?.formula || '');
+    setCurrencySymbol(field.config?.currency || 'R$');
   };
 
   const cancelEditing = () => {
@@ -8629,15 +8662,22 @@ function CustomFieldsManager(props: any) {
     setName('');
     setType(CustomFieldType.TEXT);
     setOptions([]);
+    setFormula('');
+    setCurrencySymbol('R$');
   };
 
   const handleSave = () => {
     if (!name) return;
+    const config =
+      type === CustomFieldType.DROPDOWN ? { options: options.filter(o => o.label.trim() !== '') } :
+      type === CustomFieldType.FORMULA ? { formula } :
+      (type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) ? { currency: currencySymbol.trim() || 'R$' } :
+      undefined;
     const fieldData: any = {
       name,
       type,
       target,
-      config: type === CustomFieldType.DROPDOWN ? { options: options.filter(o => o.label.trim() !== '') } : undefined,
+      config,
     };
 
     if (editingFieldId) {
@@ -8706,13 +8746,35 @@ function CustomFieldsManager(props: any) {
                 <button
                   onClick={() => {
                     if (!activeListId) return;
-                    // Logic to hide all? Maybe just a shortcut
+                    const allHidden =
+                      filteredStandard.every((f) => isStandardHidden(f.id)) &&
+                      filteredFields.every((f) => isFieldHidden(f.id));
+                    // Mostrar tudo: reexibe o que estava oculto. Ocultar tudo: oculta o que estava visível.
+                    filteredStandard.forEach((f) => {
+                      if (allHidden ? isStandardHidden(f.id) : !isStandardHidden(f.id)) {
+                        onToggleStandardColumn(activeListId, f.id);
+                      }
+                    });
+                    filteredFields.forEach((f) => {
+                      if (allHidden ? isFieldHidden(f.id) : !isFieldHidden(f.id)) {
+                        onToggleTaskFieldForList(activeListId, f.id);
+                      }
+                    });
                   }}
-                  className="text-xs font-bold text-gray-400 hover:text-gray-600"
+                  disabled={!activeListId}
+                  className="text-xs font-bold text-gray-400 hover:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  Ocultar tudo
+                  {filteredStandard.every((f) => isStandardHidden(f.id)) && filteredFields.every((f) => isFieldHidden(f.id))
+                    ? 'Mostrar tudo'
+                    : 'Ocultar tudo'}
                 </button>
               </div>
+
+              {!activeListId && (
+                <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Selecione uma lista específica na barra lateral para mostrar/ocultar campos — como há mais de uma lista neste escopo, não é possível saber em qual delas aplicar a alteração.
+                </p>
+              )}
 
               <div className="space-y-1">
                 {/* Standard Fields */}
@@ -8724,7 +8786,8 @@ function CustomFieldsManager(props: any) {
                     </div>
                     <button
                       onClick={() => onToggleStandardColumn(activeListId, f.id)}
-                      className={`w-10 h-6 rounded-full transition-all relative ${!isStandardHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
+                      disabled={!activeListId}
+                      className={`w-10 h-6 rounded-full transition-all relative disabled:opacity-40 disabled:cursor-not-allowed ${!isStandardHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
                     >
                       <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${!isStandardHidden(f.id) ? 'left-5' : 'left-1'}`} />
                     </button>
@@ -8748,7 +8811,8 @@ function CustomFieldsManager(props: any) {
                       </div>
                       <button
                         onClick={() => onToggleTaskFieldForList(activeListId, f.id)}
-                        className={`w-10 h-6 rounded-full transition-all relative ${!isFieldHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
+                        disabled={!activeListId}
+                        className={`w-10 h-6 rounded-full transition-all relative disabled:opacity-40 disabled:cursor-not-allowed ${!isFieldHidden(f.id) ? 'bg-orange-500' : 'bg-gray-200'}`}
                       >
                         <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${!isFieldHidden(f.id) ? 'left-5' : 'left-1'}`} />
                       </button>
@@ -8872,6 +8936,36 @@ function CustomFieldsManager(props: any) {
                       )}
                     </div>
                   </div>
+                </div>
+              )}
+
+              {type === CustomFieldType.FORMULA && (
+                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+                  <label className="text-xs font-bold text-gray-500 uppercase">Fórmula</label>
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded text-sm font-mono focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+                    value={formula}
+                    onChange={(e) => setFormula(e.target.value)}
+                    placeholder="Ex: {{Preço}} * {{Quantidade}}"
+                  />
+                  <p className="text-[11px] text-gray-400">
+                    Use <code className="bg-white border rounded px-1">{'{{Nome do Campo}}'}</code> para referenciar outros campos numéricos da tarefa. Calculado automaticamente, não é editável.
+                  </p>
+                </div>
+              )}
+
+              {(type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) && (
+                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+                  <label className="text-xs font-bold text-gray-500 uppercase">Símbolo da Moeda</label>
+                  <input
+                    type="text"
+                    className="w-24 p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+                    value={currencySymbol}
+                    onChange={(e) => setCurrencySymbol(e.target.value)}
+                    placeholder="R$"
+                    maxLength={5}
+                  />
                 </div>
               )}
             </div>
@@ -9120,37 +9214,229 @@ function CreateFolderModal({ onClose, onCreate }: any) {
   );
 }
 
-function CustomFieldInput({ field, value, onChange }: any) {
+// Input de data para campos personalizados/tabela. Inputs nativos <input
+// type="date"> disparam onChange a cada tecla digitada, inclusive enquanto
+// a data está incompleta (ex: só o dia e mês, ou só 1-2 dígitos do ano) —
+// nesses casos `e.target.value` vem vazio. Sem tratamento isso causava dois
+// problemas: (1) cada tecla parcial disparava um upsert salvando valor
+// vazio, criando uma corrida entre requisições que podia sobrescrever a
+// data completa digitada por último com uma parcial que resolveu depois;
+// (2) como o valor exibido é controlado pela prop `value` (só atualizada
+// depois que o upsert assíncrono termina), qualquer re-render do app nesse
+// intervalo (ex: outra tarefa mudando via realtime) forçava o campo de
+// volta ao valor antigo, apagando visualmente o que o usuário tinha
+// acabado de digitar — exatamente o sintoma relatado de "a data não fica
+// gravada assim que termino de digitar o ano". Por isso: (a) mantemos um
+// valor local que não depende do round-trip de rede para continuar exibindo
+// o que foi digitado, e (b) só disparamos onCommit quando o usuário termina
+// uma data válida ou explicitamente limpa um valor que já existia.
+export function DateFieldEditor({ value, onCommit, className }: { value: any; onCommit: (v: string) => void; className?: string }) {
+  const [local, setLocal] = useState(value ?? '');
+  useEffect(() => { setLocal(value ?? ''); }, [value]);
+  return (
+    <input
+      type="date"
+      value={local}
+      onChange={(e) => {
+        const v = e.target.value;
+        setLocal(v);
+        if (v || value) onCommit(v);
+      }}
+      className={className}
+    />
+  );
+}
+
+// Input de texto/número para campos personalizados/tabela. Mesmo problema do
+// DateFieldEditor, mas mais severo aqui: como o valor exibido dependia
+// diretamente da prop `value` (só atualizada depois que o upsert assíncrono
+// termina), o React reverte o input pro valor antigo a cada tecla — antes
+// mesmo da tecla seguinte ser digitada. Na prática, digitar "hello" salvava
+// só "o" (confirmado em navegador real, não só em teste). Corrigido com o
+// mesmo buffer local: o que aparece na tela nunca depende do round-trip de
+// rede, só o que é persistido.
+export function BufferedFieldInput({ value, onCommit, type = 'text', className, placeholder }: { value: any; onCommit: (v: string) => void; type?: string; className?: string; placeholder?: string }) {
+  const [local, setLocal] = useState(value ?? '');
+  useEffect(() => { setLocal(value ?? ''); }, [value]);
+  return (
+    <input
+      type={type}
+      value={local}
+      placeholder={placeholder}
+      onChange={(e) => {
+        setLocal(e.target.value);
+        onCommit(e.target.value);
+      }}
+      className={className}
+    />
+  );
+}
+
+// Mesmo problema do BufferedFieldInput, mas para checkbox: sem buffer local,
+// o clique liga o checkbox visualmente e, como o `checked` exibido também só
+// reflete o valor depois do upsert assíncrono terminar, o React desmarca o
+// checkbox de volta antes da resposta chegar — parece que o clique "não
+// pegou" (só funciona se a rede responder rápido o suficiente).
+export function BufferedCheckbox({ checked, onCommit, className }: { checked: any; onCommit: (v: boolean) => void; className?: string }) {
+  const [local, setLocal] = useState(!!checked);
+  useEffect(() => { setLocal(!!checked); }, [checked]);
+  return (
+    <input
+      type="checkbox"
+      checked={local}
+      onChange={(e) => {
+        setLocal(e.target.checked);
+        onCommit(e.target.checked);
+      }}
+      className={className}
+    />
+  );
+}
+
+// Avaliação por estrelas: buffer local pelo mesmo motivo dos outros — sem
+// ele, clicar numa estrela podia "voltar" pra nota anterior por uma fração
+// de segundo (ou de vez, se outro re-render acontecesse) até o upsert
+// assíncrono terminar.
+export function BufferedRating({ value, onCommit, max = 5, className }: { value: any; onCommit: (v: number) => void; max?: number; className?: string }) {
+  const [local, setLocal] = useState(Number(value) || 0);
+  useEffect(() => { setLocal(Number(value) || 0); }, [value]);
+  return (
+    <div className={className}>
+      {Array.from({ length: max }, (_, i) => i + 1).map((star) => (
+        // Icons.* não repassa `onClick` pro <svg> (só aceita className/size/color),
+        // então o clique precisa ficar num elemento que realmente o recebe.
+        <button
+          key={star}
+          type="button"
+          onClick={() => {
+            setLocal(star);
+            onCommit(star);
+          }}
+          className="cursor-pointer"
+        >
+          <Icons.Star
+            className={`w-4 h-4 transition-colors ${
+              local >= star ? 'text-yellow-400 fill-yellow-400' : 'text-gray-200 hover:text-yellow-200'
+            }`}
+          />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Slider de progresso: mesmo problema do BufferedFieldInput, só que mais
+// grave, porque arrastar dispara `onChange` continuamente — sem buffer local
+// o "bolinha" do slider (e o rótulo/barra de progresso, que também dependem
+// do mesmo valor) ficam travando/voltando durante o próprio arraste, só
+// acompanhando de verdade depois que cada upsert assíncrono termina.
+export function BufferedProgressEditor({ value, onCommit, compact = false }: { value: any; onCommit: (v: string) => void; compact?: boolean }) {
+  const [local, setLocal] = useState(Number(value) || 0);
+  useEffect(() => { setLocal(Number(value) || 0); }, [value]);
+  const barColor = local > 75 ? '#22c55e' : local > 30 ? '#eab308' : '#ef4444';
+  return (
+    <div className={compact ? 'w-full space-y-1' : 'mt-2 space-y-1'}>
+      <div className={`flex justify-between font-bold text-gray-400 ${compact ? 'text-[9px] uppercase' : 'text-xs'}`}>
+        <span>Progresso</span>
+        <span>{local}%</span>
+      </div>
+      <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden border border-gray-200">
+        <div className="h-full transition-all duration-500" style={{ width: `${local}%`, backgroundColor: barColor }} />
+      </div>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        value={local}
+        onChange={(e) => {
+          setLocal(Number(e.target.value));
+          onCommit(e.target.value);
+        }}
+        className={compact ? 'w-full h-1 opacity-0 hover:opacity-100 transition-opacity cursor-pointer accent-orange-500' : 'w-full accent-[var(--primary-color)]'}
+      />
+    </div>
+  );
+}
+
+// FormulaParser depende de mathjs, uma biblioteca relativamente pesada.
+// Carregamos por import dinâmico (chunk separado) em vez de estático, pra
+// não inflar o bundle inicial de quem nunca usa um campo do tipo Fórmula.
+let formulaParserPromise: Promise<typeof import('./lib/FormulaParser')> | null = null;
+function loadFormulaParser() {
+  if (!formulaParserPromise) formulaParserPromise = import('./lib/FormulaParser');
+  return formulaParserPromise;
+}
+
+export function FormulaValue({ formula, context }: { formula: string; context: Record<string, any> }) {
+  const [result, setResult] = useState<number | string>('…');
+  // `context` é um objeto novo a cada render (montado inline pelo chamador);
+  // comparamos pelo conteúdo serializado pra não reavaliar a cada re-render.
+  const contextKey = JSON.stringify(context);
+  useEffect(() => {
+    let active = true;
+    loadFormulaParser().then(({ FormulaParser }) => {
+      if (active) setResult(FormulaParser.evaluate(formula, JSON.parse(contextKey)));
+    });
+    return () => { active = false; };
+  }, [formula, contextKey]);
+  return <>{result}</>;
+}
+
+function CustomFieldInput({ field, value, onChange, formulaContext }: any) {
   switch (field.type) {
     case CustomFieldType.TEXT:
     case CustomFieldType.WEBSITE:
       return (
         <div>
           <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
-          <input
+          <BufferedFieldInput
             type="text"
             className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow"
-            value={value || ''}
-            onChange={(e) => onChange(e.target.value)}
+            value={value}
+            onCommit={onChange}
             placeholder={field.type === CustomFieldType.WEBSITE ? 'https://...' : 'Digite aqui...'}
           />
         </div>
       );
     case CustomFieldType.NUMBER:
     case CustomFieldType.MONEY:
+    case CustomFieldType.CURRENCY:
       return (
         <div>
           <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
           <div className="relative mt-1">
-            {field.type === CustomFieldType.MONEY && (
+            {(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) && (
               <div className="absolute left-3 top-2 text-gray-400 text-sm font-medium">{field.config?.currency || 'R$'}</div>
             )}
-            <input
+            <BufferedFieldInput
               type="number"
-              className={`w-full p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow ${field.type === CustomFieldType.MONEY ? 'pl-9' : ''}`}
-              value={value || ''}
-              onChange={(e) => onChange(e.target.value)}
+              className={`w-full p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow ${(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) ? 'pl-9' : ''}`}
+              value={value}
+              onCommit={onChange}
             />
+          </div>
+        </div>
+      );
+    case CustomFieldType.RATING:
+      return (
+        <div>
+          <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
+          <BufferedRating value={value} onCommit={onChange} className="flex gap-1 mt-2" />
+        </div>
+      );
+    case CustomFieldType.PROGRESS:
+      return (
+        <div>
+          <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
+          <BufferedProgressEditor value={value} onCommit={onChange} />
+        </div>
+      );
+    case CustomFieldType.FORMULA:
+      return (
+        <div>
+          <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
+          <div className="mt-1 text-sm font-mono text-blue-600 bg-blue-50 px-3 py-2 rounded border border-blue-100 italic">
+            <FormulaValue formula={field.config?.formula || ''} context={formulaContext || {}} />
           </div>
         </div>
       );
@@ -9158,11 +9444,10 @@ function CustomFieldInput({ field, value, onChange }: any) {
       return (
         <div>
           <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
-          <input
-            type="date"
+          <DateFieldEditor
+            value={value}
+            onCommit={onChange}
             className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow"
-            value={value || ''}
-            onChange={(e) => onChange(e.target.value)}
           />
         </div>
       );
@@ -9224,10 +9509,9 @@ function CustomFieldInput({ field, value, onChange }: any) {
     case CustomFieldType.CHECKBOX:
       return (
         <div className="flex items-center gap-3 mt-4 p-3 bg-gray-50 rounded-lg border border-transparent hover:border-gray-200 transition-colors">
-          <input
-            type="checkbox"
-            checked={!!value}
-            onChange={(e) => onChange(e.target.checked)}
+          <BufferedCheckbox
+            checked={value}
+            onCommit={onChange}
             className="w-5 h-5 text-[var(--primary-color)] focus:ring-[var(--primary-color)] border-gray-300 rounded cursor-pointer"
           />
           <label className="text-sm font-semibold text-gray-700 cursor-pointer" onClick={() => onChange(!value)}>{field.name}</label>
