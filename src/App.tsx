@@ -14,6 +14,7 @@ import LoginScreen from './pages/LoginScreen';
 import ChangePasswordModal from './components/ChangePasswordModal';
 import CreateListModal from './components/CreateListModal';
 import compactLogoWhite from './assets/logo-verticalparts-white.png';
+import bootLogoVideo from './assets/logo-limpo-video.mp4';
 import { TableView } from './components/views/TableView';
 import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
@@ -295,6 +296,16 @@ export default function App() {
   const [workspace] = useState<Workspace>(INITIAL_WORKSPACE);
   const [session, setSession] = useState<Session | null>(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
+  // Tela de entrada mostra o vídeo do logo até ele terminar de tocar por
+  // completo, mesmo que a verificação de sessão já tenha terminado antes.
+  const [bootVideoEnded, setBootVideoEnded] = useState(false);
+  useEffect(() => {
+    // Segurança: se o vídeo não conseguir tocar por algum motivo (autoplay
+    // bloqueado, formato não suportado, etc.), não travamos o usuário na
+    // tela de carregamento pra sempre — o vídeo dura ~10s.
+    const fallback = setTimeout(() => setBootVideoEnded(true), 12000);
+    return () => clearTimeout(fallback);
+  }, []);
   const [is2faVerified, setIs2faVerified] = useState(() => localStorage.getItem('vp_2fa_verified') === 'true');
   // Impede que getSession() libere a tela enquanto o SSO ainda está processando
   const isSSOProcessing = useRef(
@@ -2878,16 +2889,21 @@ export default function App() {
 
   const uiScaleClass = uiScale <= 0.9 ? 'text-xs' : uiScale >= 1.2 ? 'text-base' : 'text-sm';
 
-  // Auth guard
-  if (isLoadingAuth) {
+  // Auth guard — a tela só libera quando a sessão for verificada E o vídeo
+  // do logo tiver tocado por completo, o que vier depois.
+  if (isLoadingAuth || !bootVideoEnded) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-900">
         <div className="text-center">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-yellow-400 rounded-2xl mb-4">
-            <svg className="w-8 h-8 text-slate-900 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
-            </svg>
-          </div>
+          <video
+            src={bootLogoVideo}
+            autoPlay
+            muted
+            playsInline
+            onEnded={() => setBootVideoEnded(true)}
+            onError={() => setBootVideoEnded(true)}
+            className="w-full max-w-sm mx-auto mb-4"
+          />
           <p className="text-white font-bold text-xl">VP CLICK</p>
           <p className="text-slate-400 text-sm mt-1">Verificando sessão...</p>
         </div>
