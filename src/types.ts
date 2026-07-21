@@ -38,7 +38,11 @@ export enum CustomFieldType {
   LABELS = 'Rótulos',
   CHECKBOX = 'Caixa de Seleção',
   MONEY = 'Dinheiro',
-  WEBSITE = 'Site'
+  WEBSITE = 'Site',
+  RATING = 'Avaliação',
+  PROGRESS = 'Progresso',
+  FORMULA = 'Fórmula',
+  CURRENCY = 'Moeda'
 }
 
 export interface CustomFieldOption {
@@ -61,6 +65,7 @@ export interface CustomField {
     allowTime?: boolean;
     min?: number;
     max?: number;
+    formula?: string;
   };
   target: 'TASK' | 'LIST' | 'PROJECT';
   visibleTo: UserRole[];

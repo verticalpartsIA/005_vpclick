@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent, act } from "@testing-library/react";
 import { useState } from "react";
-import { BufferedFieldInput, BufferedCheckbox } from "../App";
+import { BufferedFieldInput, BufferedCheckbox, BufferedRating, BufferedProgressEditor } from "../App";
 
 // Confirmado em Chromium real (não só jsdom): sem buffer local, digitar
 // "hello" num input controlado cujo `value` só é atualizado depois que um
@@ -82,6 +82,56 @@ describe("BufferedCheckbox", () => {
       vi.advanceTimersByTime(300);
     });
     expect(checkbox.checked).toBe(true);
+    vi.useRealTimers();
+  });
+});
+
+describe("BufferedRating", () => {
+  it("keeps the clicked star selected while the async save is in flight", async () => {
+    vi.useFakeTimers();
+    function Harness({ delayMs }: { delayMs: number }) {
+      const [saved, setSaved] = useState(0);
+      return <BufferedRating value={saved} onCommit={(v) => setTimeout(() => setSaved(v), delayMs)} />;
+    }
+    const { container } = render(<Harness delayMs={300} />);
+    const buttons = container.querySelectorAll("button");
+    expect(buttons.length).toBe(5);
+
+    fireEvent.click(buttons[3]); // 4th star
+    // Buffered locally: the 4th star's icon should already be highlighted.
+    expect(buttons[3].querySelector("svg")?.getAttribute("class")).toContain("text-yellow-400");
+
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(buttons[3].querySelector("svg")?.getAttribute("class")).toContain("text-yellow-400");
+    vi.useRealTimers();
+  });
+});
+
+describe("BufferedProgressEditor", () => {
+  it("keeps the dragged percentage visible while the async save is in flight", async () => {
+    vi.useFakeTimers();
+    function Harness({ delayMs }: { delayMs: number }) {
+      const [saved, setSaved] = useState(0);
+      return <BufferedProgressEditor value={saved} onCommit={(v) => setTimeout(() => setSaved(Number(v)), delayMs)} />;
+    }
+    const { container } = render(<Harness delayMs={300} />);
+    const slider = container.querySelector('input[type="range"]') as HTMLInputElement;
+
+    fireEvent.change(slider, { target: { value: "30" } });
+    expect(slider.value).toBe("30");
+    expect(container.textContent).toContain("30%");
+
+    fireEvent.change(slider, { target: { value: "70" } });
+    expect(slider.value).toBe("70");
+    expect(container.textContent).toContain("70%");
+
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(slider.value).toBe("70");
+    expect(container.textContent).toContain("70%");
     vi.useRealTimers();
   });
 });

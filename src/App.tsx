@@ -20,6 +20,7 @@ import { GanttView } from './components/views/GanttView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
+import { FormulaParser } from './lib/FormulaParser';
 import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
@@ -5971,40 +5972,17 @@ function ListView({
                                           className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
                                         />
                                       ) : field.type === CustomFieldType.RATING ? (
-                                        <div className="flex gap-1">
-                                          {[1, 2, 3, 4, 5].map((star) => (
-                                            <Icons.Star
-                                              key={star}
-                                              className={`w-4 h-4 cursor-pointer transition-colors ${
-                                                Number(currentValue) >= star ? 'text-yellow-400 fill-yellow-400' : 'text-gray-200 hover:text-yellow-200'
-                                              }`}
-                                              onClick={() => onUpdateFieldValue(field.id, t.id, star)}
-                                            />
-                                          ))}
-                                        </div>
+                                        <BufferedRating
+                                          value={currentValue}
+                                          onCommit={(star) => onUpdateFieldValue(field.id, t.id, star)}
+                                          className="flex gap-1"
+                                        />
                                       ) : field.type === CustomFieldType.PROGRESS ? (
-                                        <div className="w-full space-y-1">
-                                          <div className="flex justify-between text-[9px] font-bold text-gray-400 uppercase">
-                                            <span>Progresso</span>
-                                            <span>{currentValue || 0}%</span>
-                                          </div>
-                                          <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden border border-gray-200">
-                                            <div 
-                                              className="h-full transition-all duration-500"
-                                              style={{ 
-                                                width: `${currentValue || 0}%`,
-                                                backgroundColor: Number(currentValue) > 75 ? '#22c55e' : Number(currentValue) > 30 ? '#eab308' : '#ef4444'
-                                              }}
-                                            />
-                                          </div>
-                                          <input 
-                                            type="range" 
-                                            min="0" max="100" 
-                                            value={currentValue || 0}
-                                            onChange={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
-                                            className="w-full h-1 opacity-0 hover:opacity-100 transition-opacity cursor-pointer accent-orange-500"
-                                          />
-                                        </div>
+                                        <BufferedProgressEditor
+                                          value={currentValue}
+                                          onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
+                                          compact
+                                        />
                                       ) : (
                                         <div className="relative">
                                           {(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) && (
@@ -6013,10 +5991,10 @@ function ListView({
                                             </div>
                                           )}
                                           <BufferedFieldInput
-                                            type={field.type === CustomFieldType.NUMBER || field.type === CustomFieldType.MONEY ? 'number' : 'text'}
+                                            type={field.type === CustomFieldType.NUMBER || field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY ? 'number' : 'text'}
                                             value={currentValue}
                                             onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
-                                            className={`h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all ${field.type === CustomFieldType.MONEY ? 'pl-8' : ''}`}
+                                            className={`h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all ${(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) ? 'pl-8' : ''}`}
                                             placeholder="—"
                                           />
                                         </div>
@@ -8103,6 +8081,14 @@ function TaskDetailModal(props: any) {
                                 field={field}
                                 value={currentValue}
                                 onChange={(val: any) => { onUpdateFieldValue(field.id, task.id, val); }}
+                                formulaContext={{
+                                  ...task,
+                                  ...Object.fromEntries(
+                                    (fieldValues || [])
+                                      .filter((fv: CustomFieldValue) => fv.entityId === task.id)
+                                      .map((fv: CustomFieldValue) => [customFields.find((f: CustomField) => f.id === fv.fieldId)?.name || '', fv.value])
+                                  ),
+                                }}
                               />
                             </div>
                           </div>
@@ -8603,6 +8589,8 @@ function CustomFieldsManager(props: any) {
   const [options, setOptions] = useState<CustomFieldOption[]>([]);
   const [optionSearch, setOptionSearch] = useState('');
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
+  const [formula, setFormula] = useState('');
+  const [currencySymbol, setCurrencySymbol] = useState('R$');
 
   const STANDARD_FIELDS_MAP = [
     { id: 'status', label: 'Status' },
@@ -8655,6 +8643,8 @@ function CustomFieldsManager(props: any) {
     setType(field.type);
     setTarget(field.target);
     setOptions(field.config?.options || []);
+    setFormula(field.config?.formula || '');
+    setCurrencySymbol(field.config?.currency || 'R$');
   };
 
   const cancelEditing = () => {
@@ -8662,15 +8652,22 @@ function CustomFieldsManager(props: any) {
     setName('');
     setType(CustomFieldType.TEXT);
     setOptions([]);
+    setFormula('');
+    setCurrencySymbol('R$');
   };
 
   const handleSave = () => {
     if (!name) return;
+    const config =
+      type === CustomFieldType.DROPDOWN ? { options: options.filter(o => o.label.trim() !== '') } :
+      type === CustomFieldType.FORMULA ? { formula } :
+      (type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) ? { currency: currencySymbol.trim() || 'R$' } :
+      undefined;
     const fieldData: any = {
       name,
       type,
       target,
-      config: type === CustomFieldType.DROPDOWN ? { options: options.filter(o => o.label.trim() !== '') } : undefined,
+      config,
     };
 
     if (editingFieldId) {
@@ -8929,6 +8926,36 @@ function CustomFieldsManager(props: any) {
                       )}
                     </div>
                   </div>
+                </div>
+              )}
+
+              {type === CustomFieldType.FORMULA && (
+                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+                  <label className="text-xs font-bold text-gray-500 uppercase">Fórmula</label>
+                  <input
+                    type="text"
+                    className="w-full p-2 border rounded text-sm font-mono focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+                    value={formula}
+                    onChange={(e) => setFormula(e.target.value)}
+                    placeholder="Ex: {{Preço}} * {{Quantidade}}"
+                  />
+                  <p className="text-[11px] text-gray-400">
+                    Use <code className="bg-white border rounded px-1">{'{{Nome do Campo}}'}</code> para referenciar outros campos numéricos da tarefa. Calculado automaticamente, não é editável.
+                  </p>
+                </div>
+              )}
+
+              {(type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) && (
+                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+                  <label className="text-xs font-bold text-gray-500 uppercase">Símbolo da Moeda</label>
+                  <input
+                    type="text"
+                    className="w-24 p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+                    value={currencySymbol}
+                    onChange={(e) => setCurrencySymbol(e.target.value)}
+                    placeholder="R$"
+                    maxLength={5}
+                  />
                 </div>
               )}
             </div>
@@ -9256,7 +9283,72 @@ export function BufferedCheckbox({ checked, onCommit, className }: { checked: an
   );
 }
 
-function CustomFieldInput({ field, value, onChange }: any) {
+// Avaliação por estrelas: buffer local pelo mesmo motivo dos outros — sem
+// ele, clicar numa estrela podia "voltar" pra nota anterior por uma fração
+// de segundo (ou de vez, se outro re-render acontecesse) até o upsert
+// assíncrono terminar.
+export function BufferedRating({ value, onCommit, max = 5, className }: { value: any; onCommit: (v: number) => void; max?: number; className?: string }) {
+  const [local, setLocal] = useState(Number(value) || 0);
+  useEffect(() => { setLocal(Number(value) || 0); }, [value]);
+  return (
+    <div className={className}>
+      {Array.from({ length: max }, (_, i) => i + 1).map((star) => (
+        // Icons.* não repassa `onClick` pro <svg> (só aceita className/size/color),
+        // então o clique precisa ficar num elemento que realmente o recebe.
+        <button
+          key={star}
+          type="button"
+          onClick={() => {
+            setLocal(star);
+            onCommit(star);
+          }}
+          className="cursor-pointer"
+        >
+          <Icons.Star
+            className={`w-4 h-4 transition-colors ${
+              local >= star ? 'text-yellow-400 fill-yellow-400' : 'text-gray-200 hover:text-yellow-200'
+            }`}
+          />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Slider de progresso: mesmo problema do BufferedFieldInput, só que mais
+// grave, porque arrastar dispara `onChange` continuamente — sem buffer local
+// o "bolinha" do slider (e o rótulo/barra de progresso, que também dependem
+// do mesmo valor) ficam travando/voltando durante o próprio arraste, só
+// acompanhando de verdade depois que cada upsert assíncrono termina.
+export function BufferedProgressEditor({ value, onCommit, compact = false }: { value: any; onCommit: (v: string) => void; compact?: boolean }) {
+  const [local, setLocal] = useState(Number(value) || 0);
+  useEffect(() => { setLocal(Number(value) || 0); }, [value]);
+  const barColor = local > 75 ? '#22c55e' : local > 30 ? '#eab308' : '#ef4444';
+  return (
+    <div className={compact ? 'w-full space-y-1' : 'mt-2 space-y-1'}>
+      <div className={`flex justify-between font-bold text-gray-400 ${compact ? 'text-[9px] uppercase' : 'text-xs'}`}>
+        <span>Progresso</span>
+        <span>{local}%</span>
+      </div>
+      <div className="h-1.5 w-full bg-gray-100 rounded-full overflow-hidden border border-gray-200">
+        <div className="h-full transition-all duration-500" style={{ width: `${local}%`, backgroundColor: barColor }} />
+      </div>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        value={local}
+        onChange={(e) => {
+          setLocal(Number(e.target.value));
+          onCommit(e.target.value);
+        }}
+        className={compact ? 'w-full h-1 opacity-0 hover:opacity-100 transition-opacity cursor-pointer accent-orange-500' : 'w-full accent-[var(--primary-color)]'}
+      />
+    </div>
+  );
+}
+
+function CustomFieldInput({ field, value, onChange, formulaContext }: any) {
   switch (field.type) {
     case CustomFieldType.TEXT:
     case CustomFieldType.WEBSITE:
@@ -9274,22 +9366,48 @@ function CustomFieldInput({ field, value, onChange }: any) {
       );
     case CustomFieldType.NUMBER:
     case CustomFieldType.MONEY:
+    case CustomFieldType.CURRENCY:
       return (
         <div>
           <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
           <div className="relative mt-1">
-            {field.type === CustomFieldType.MONEY && (
+            {(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) && (
               <div className="absolute left-3 top-2 text-gray-400 text-sm font-medium">{field.config?.currency || 'R$'}</div>
             )}
             <BufferedFieldInput
               type="number"
-              className={`w-full p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow ${field.type === CustomFieldType.MONEY ? 'pl-9' : ''}`}
+              className={`w-full p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow ${(field.type === CustomFieldType.MONEY || field.type === CustomFieldType.CURRENCY) ? 'pl-9' : ''}`}
               value={value}
               onCommit={onChange}
             />
           </div>
         </div>
       );
+    case CustomFieldType.RATING:
+      return (
+        <div>
+          <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
+          <BufferedRating value={value} onCommit={onChange} className="flex gap-1 mt-2" />
+        </div>
+      );
+    case CustomFieldType.PROGRESS:
+      return (
+        <div>
+          <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
+          <BufferedProgressEditor value={value} onCommit={onChange} />
+        </div>
+      );
+    case CustomFieldType.FORMULA: {
+      const result = FormulaParser.evaluate(field.config?.formula || '', formulaContext || {});
+      return (
+        <div>
+          <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
+          <div className="mt-1 text-sm font-mono text-blue-600 bg-blue-50 px-3 py-2 rounded border border-blue-100 italic">
+            {result}
+          </div>
+        </div>
+      );
+    }
     case CustomFieldType.DATE:
       return (
         <div>
