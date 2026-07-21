@@ -9235,6 +9235,27 @@ export function BufferedFieldInput({ value, onCommit, type = 'text', className, 
   );
 }
 
+// Mesmo problema do BufferedFieldInput, mas para checkbox: sem buffer local,
+// o clique liga o checkbox visualmente e, como o `checked` exibido também só
+// reflete o valor depois do upsert assíncrono terminar, o React desmarca o
+// checkbox de volta antes da resposta chegar — parece que o clique "não
+// pegou" (só funciona se a rede responder rápido o suficiente).
+export function BufferedCheckbox({ checked, onCommit, className }: { checked: any; onCommit: (v: boolean) => void; className?: string }) {
+  const [local, setLocal] = useState(!!checked);
+  useEffect(() => { setLocal(!!checked); }, [checked]);
+  return (
+    <input
+      type="checkbox"
+      checked={local}
+      onChange={(e) => {
+        setLocal(e.target.checked);
+        onCommit(e.target.checked);
+      }}
+      className={className}
+    />
+  );
+}
+
 function CustomFieldInput({ field, value, onChange }: any) {
   switch (field.type) {
     case CustomFieldType.TEXT:
@@ -9338,10 +9359,9 @@ function CustomFieldInput({ field, value, onChange }: any) {
     case CustomFieldType.CHECKBOX:
       return (
         <div className="flex items-center gap-3 mt-4 p-3 bg-gray-50 rounded-lg border border-transparent hover:border-gray-200 transition-colors">
-          <input
-            type="checkbox"
-            checked={!!value}
-            onChange={(e) => onChange(e.target.checked)}
+          <BufferedCheckbox
+            checked={value}
+            onCommit={onChange}
             className="w-5 h-5 text-[var(--primary-color)] focus:ring-[var(--primary-color)] border-gray-300 rounded cursor-pointer"
           />
           <label className="text-sm font-semibold text-gray-700 cursor-pointer" onClick={() => onChange(!value)}>{field.name}</label>

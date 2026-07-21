@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent, act } from "@testing-library/react";
 import { useState } from "react";
-import { BufferedFieldInput } from "../App";
+import { BufferedFieldInput, BufferedCheckbox } from "../App";
 
 // Confirmado em Chromium real (não só jsdom): sem buffer local, digitar
 // "hello" num input controlado cujo `value` só é atualizado depois que um
@@ -58,6 +58,30 @@ describe("BufferedFieldInput", () => {
       vi.advanceTimersByTime(300);
     });
     expect(input.value).toBe("42");
+    vi.useRealTimers();
+  });
+});
+
+describe("BufferedCheckbox", () => {
+  it("stays checked while the async save is in flight instead of snapping back unchecked", async () => {
+    vi.useFakeTimers();
+    function Harness({ delayMs }: { delayMs: number }) {
+      const [saved, setSaved] = useState(false);
+      return (
+        <BufferedCheckbox checked={saved} onCommit={(v) => setTimeout(() => setSaved(v), delayMs)} />
+      );
+    }
+    const { container } = render(<Harness delayMs={300} />);
+    const checkbox = container.querySelector("input") as HTMLInputElement;
+
+    expect(checkbox.checked).toBe(false);
+    fireEvent.click(checkbox);
+    expect(checkbox.checked).toBe(true);
+
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(checkbox.checked).toBe(true);
     vi.useRealTimers();
   });
 });
