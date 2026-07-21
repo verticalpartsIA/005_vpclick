@@ -2387,8 +2387,11 @@ export default function App() {
           priority: newTaskPartial.priority || TaskPriority.MEDIA,
           main_assignee_id: newTaskPartial.mainAssigneeId || currentUser.id,
           secondary_assignee_ids: [],
-          start_date: new Date().toISOString().split('T')[0],
-          due_date: (newTaskPartial.dueDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()).split('T')[0],
+          // `toISOString()` converte para UTC: à noite no Brasil (UTC-3) já
+          // é o dia seguinte em UTC, o que fazia tarefas criadas de noite
+          // nascerem com data de início/prazo erradas. Usamos data local.
+          start_date: formatLocalDate(new Date()),
+          due_date: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
           list_id: newTaskPartial.listId,
           project_id: newTaskPartial.projectId || null,
           parent_id: newTaskPartial.parentId || null
@@ -3328,7 +3331,7 @@ export default function App() {
                 users={adminUsers} 
                 onTaskClick={setSelectedTaskId} 
                 onAddTaskAtDate={(date) => {
-                  setPrefilledTaskData({ due_date: date.toISOString().split('T')[0] as any });
+                  setPrefilledTaskData({ due_date: formatLocalDate(date) as any });
                   setIsTaskModalOpen(true);
                 }}
               />
@@ -5263,6 +5266,16 @@ function parseLocalDate(dateStr: string): Date {
   return new Date(y, m - 1, d);
 }
 
+// Inverso de parseLocalDate: formata um Date usando os componentes locais
+// (ano/mês/dia), nunca `toISOString()` — que converte para UTC e pode
+// arredondar para o dia errado em fusos atrás de UTC (ex: Brasil, UTC-3).
+function formatLocalDate(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
 function getTaskHealth(task: Task) {
   const status = (task.status || '').toLowerCase();
 
@@ -5930,15 +5943,9 @@ function ListView({
                                           </DropdownMenuContent>
                                         </DropdownMenu>
                                       ) : field.type === CustomFieldType.DATE ? (
-                                        <input
-                                          type="date"
-                                          value={currentValue ?? ''}
-                                          onChange={(e) => {
-                                            if (e.target.value) {
-                                              onUpdateFieldValue(field.id, t.id, e.target.value);
-                                            }
-                                          }}
-                                          onBlur={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
+                                        <DateFieldEditor
+                                          value={currentValue}
+                                          onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
                                           className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
                                         />
                                       ) : field.type === CustomFieldType.RATING ? (
@@ -6965,14 +6972,18 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
     const isHours = /^\d+(\.\d+)?\s*h$/i.test(newDuration.trim());
     const numericValue = parseFloat(newDuration);
     if (isNaN(numericValue) || numericValue <= 0) return;
-    const d = new Date(newStart);
+    // newStart é "YYYY-MM-DD" (sem hora); `new Date(newStart)` interpreta
+    // isso como meia-noite UTC, o que em fusos atrás de UTC (ex: Brasil)
+    // faz `getDate()`/`setDate()` operarem no dia anterior. Usamos o parser
+    // local do app para não perder um dia no cálculo da data limite.
+    const d = parseLocalDate(newStart);
     if (isHours) {
       // Horas: mantém o mesmo dia da data de início
       setDueDate(newStart);
     } else {
       // Dias: soma à data de início
       d.setDate(d.getDate() + Math.round(numericValue));
-      setDueDate(d.toISOString().split('T')[0]);
+      setDueDate(formatLocalDate(d));
     }
   };
 
@@ -9120,6 +9131,39 @@ function CreateFolderModal({ onClose, onCreate }: any) {
   );
 }
 
+// Input de data para campos personalizados/tabela. Inputs nativos <input
+// type="date"> disparam onChange a cada tecla digitada, inclusive enquanto
+// a data está incompleta (ex: só o dia e mês, ou só 1-2 dígitos do ano) —
+// nesses casos `e.target.value` vem vazio. Sem tratamento isso causava dois
+// problemas: (1) cada tecla parcial disparava um upsert salvando valor
+// vazio, criando uma corrida entre requisições que podia sobrescrever a
+// data completa digitada por último com uma parcial que resolveu depois;
+// (2) como o valor exibido é controlado pela prop `value` (só atualizada
+// depois que o upsert assíncrono termina), qualquer re-render do app nesse
+// intervalo (ex: outra tarefa mudando via realtime) forçava o campo de
+// volta ao valor antigo, apagando visualmente o que o usuário tinha
+// acabado de digitar — exatamente o sintoma relatado de "a data não fica
+// gravada assim que termino de digitar o ano". Por isso: (a) mantemos um
+// valor local que não depende do round-trip de rede para continuar exibindo
+// o que foi digitado, e (b) só disparamos onCommit quando o usuário termina
+// uma data válida ou explicitamente limpa um valor que já existia.
+export function DateFieldEditor({ value, onCommit, className }: { value: any; onCommit: (v: string) => void; className?: string }) {
+  const [local, setLocal] = useState(value ?? '');
+  useEffect(() => { setLocal(value ?? ''); }, [value]);
+  return (
+    <input
+      type="date"
+      value={local}
+      onChange={(e) => {
+        const v = e.target.value;
+        setLocal(v);
+        if (v || value) onCommit(v);
+      }}
+      className={className}
+    />
+  );
+}
+
 function CustomFieldInput({ field, value, onChange }: any) {
   switch (field.type) {
     case CustomFieldType.TEXT:
@@ -9158,11 +9202,10 @@ function CustomFieldInput({ field, value, onChange }: any) {
       return (
         <div>
           <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
-          <input
-            type="date"
+          <DateFieldEditor
+            value={value}
+            onCommit={onChange}
             className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow"
-            value={value || ''}
-            onChange={(e) => onChange(e.target.value)}
           />
         </div>
       );
