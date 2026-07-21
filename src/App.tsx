@@ -2906,7 +2906,7 @@ export default function App() {
             onError={() => setBootVideoEnded(true)}
             className="w-full max-w-sm mx-auto rounded-xl shadow-lg shadow-slate-200"
           />
-          <p className="font-black text-2xl tracking-wide -mt-2" style={{ color: COLORS.primary }}>VPCLICK</p>
+          <p className="font-light text-2xl tracking-wide mt-4" style={{ color: COLORS.primary, fontFamily: 'Poppins, sans-serif' }}>VPCLICK</p>
           <div className="flex items-center justify-center gap-2 mt-4">
             <svg className="w-4 h-4 animate-spin" style={{ color: COLORS.primary }} fill="none" viewBox="0 0 24 24">
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
