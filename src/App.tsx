@@ -6012,10 +6012,10 @@ function ListView({
                                               {field.config?.currency || 'R$'}
                                             </div>
                                           )}
-                                          <input
+                                          <BufferedFieldInput
                                             type={field.type === CustomFieldType.NUMBER || field.type === CustomFieldType.MONEY ? 'number' : 'text'}
-                                            value={currentValue ?? ''}
-                                            onChange={(e) => onUpdateFieldValue(field.id, t.id, e.target.value)}
+                                            value={currentValue}
+                                            onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
                                             className={`h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-sm font-medium text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500 transition-all ${field.type === CustomFieldType.MONEY ? 'pl-8' : ''}`}
                                             placeholder="—"
                                           />
@@ -8739,11 +8739,27 @@ function CustomFieldsManager(props: any) {
                 <button
                   onClick={() => {
                     if (!activeListId) return;
-                    // Logic to hide all? Maybe just a shortcut
+                    const allHidden =
+                      filteredStandard.every((f) => isStandardHidden(f.id)) &&
+                      filteredFields.every((f) => isFieldHidden(f.id));
+                    // Mostrar tudo: reexibe o que estava oculto. Ocultar tudo: oculta o que estava visível.
+                    filteredStandard.forEach((f) => {
+                      if (allHidden ? isStandardHidden(f.id) : !isStandardHidden(f.id)) {
+                        onToggleStandardColumn(activeListId, f.id);
+                      }
+                    });
+                    filteredFields.forEach((f) => {
+                      if (allHidden ? isFieldHidden(f.id) : !isFieldHidden(f.id)) {
+                        onToggleTaskFieldForList(activeListId, f.id);
+                      }
+                    });
                   }}
-                  className="text-xs font-bold text-gray-400 hover:text-gray-600"
+                  disabled={!activeListId}
+                  className="text-xs font-bold text-gray-400 hover:text-gray-600 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
-                  Ocultar tudo
+                  {filteredStandard.every((f) => isStandardHidden(f.id)) && filteredFields.every((f) => isFieldHidden(f.id))
+                    ? 'Mostrar tudo'
+                    : 'Ocultar tudo'}
                 </button>
               </div>
 
@@ -9194,6 +9210,31 @@ export function DateFieldEditor({ value, onCommit, className }: { value: any; on
   );
 }
 
+// Input de texto/número para campos personalizados/tabela. Mesmo problema do
+// DateFieldEditor, mas mais severo aqui: como o valor exibido dependia
+// diretamente da prop `value` (só atualizada depois que o upsert assíncrono
+// termina), o React reverte o input pro valor antigo a cada tecla — antes
+// mesmo da tecla seguinte ser digitada. Na prática, digitar "hello" salvava
+// só "o" (confirmado em navegador real, não só em teste). Corrigido com o
+// mesmo buffer local: o que aparece na tela nunca depende do round-trip de
+// rede, só o que é persistido.
+export function BufferedFieldInput({ value, onCommit, type = 'text', className, placeholder }: { value: any; onCommit: (v: string) => void; type?: string; className?: string; placeholder?: string }) {
+  const [local, setLocal] = useState(value ?? '');
+  useEffect(() => { setLocal(value ?? ''); }, [value]);
+  return (
+    <input
+      type={type}
+      value={local}
+      placeholder={placeholder}
+      onChange={(e) => {
+        setLocal(e.target.value);
+        onCommit(e.target.value);
+      }}
+      className={className}
+    />
+  );
+}
+
 function CustomFieldInput({ field, value, onChange }: any) {
   switch (field.type) {
     case CustomFieldType.TEXT:
@@ -9201,11 +9242,11 @@ function CustomFieldInput({ field, value, onChange }: any) {
       return (
         <div>
           <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
-          <input
+          <BufferedFieldInput
             type="text"
             className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow"
-            value={value || ''}
-            onChange={(e) => onChange(e.target.value)}
+            value={value}
+            onCommit={onChange}
             placeholder={field.type === CustomFieldType.WEBSITE ? 'https://...' : 'Digite aqui...'}
           />
         </div>
@@ -9219,11 +9260,11 @@ function CustomFieldInput({ field, value, onChange }: any) {
             {field.type === CustomFieldType.MONEY && (
               <div className="absolute left-3 top-2 text-gray-400 text-sm font-medium">{field.config?.currency || 'R$'}</div>
             )}
-            <input
+            <BufferedFieldInput
               type="number"
               className={`w-full p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow ${field.type === CustomFieldType.MONEY ? 'pl-9' : ''}`}
-              value={value || ''}
-              onChange={(e) => onChange(e.target.value)}
+              value={value}
+              onCommit={onChange}
             />
           </div>
         </div>
