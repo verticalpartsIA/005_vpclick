@@ -2890,11 +2890,13 @@ export default function App() {
   const uiScaleClass = uiScale <= 0.9 ? 'text-xs' : uiScale >= 1.2 ? 'text-base' : 'text-sm';
 
   // Auth guard — a tela só libera quando a sessão for verificada E o vídeo
-  // do logo tiver tocado por completo, o que vier depois.
+  // do logo tiver tocado por completo, o que vier depois. Não há tela de
+  // login própria pra cobrir aqui: a entrada é sempre via SSO do vpsistema.
   if (isLoadingAuth || !bootVideoEnded) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-900">
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
         <div className="text-center">
+          <p className="text-slate-500 text-sm font-bold uppercase tracking-widest mb-3">Gestão de Tarefas</p>
           <video
             src={bootLogoVideo}
             autoPlay
@@ -2902,10 +2904,16 @@ export default function App() {
             playsInline
             onEnded={() => setBootVideoEnded(true)}
             onError={() => setBootVideoEnded(true)}
-            className="w-full max-w-sm mx-auto mb-4"
+            className="w-full max-w-sm mx-auto rounded-xl shadow-lg shadow-slate-200"
           />
-          <p className="text-white font-bold text-xl">VP CLICK</p>
-          <p className="text-slate-400 text-sm mt-1">Verificando sessão...</p>
+          <p className="font-black text-2xl tracking-wide -mt-2" style={{ color: COLORS.primary }}>VPCLICK</p>
+          <div className="flex items-center justify-center gap-2 mt-4">
+            <svg className="w-4 h-4 animate-spin" style={{ color: COLORS.primary }} fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+            </svg>
+            <p className="text-slate-400 text-xs">Carregando...</p>
+          </div>
         </div>
       </div>
     );
