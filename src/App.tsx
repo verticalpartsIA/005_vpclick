@@ -20,6 +20,7 @@ import { GanttView } from './components/views/GanttView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
+import { startVersionCheck } from './lib/versionCheck';
 import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
@@ -299,6 +300,11 @@ export default function App() {
   const isSSOProcessing = useRef(
     new URLSearchParams(window.location.search).get('sso_token') !== null
   );
+
+  // Avisa quando uma nova versão foi publicada (deploy é um build estático,
+  // sem invalidação — uma aba deixada aberta pode ficar rodando código
+  // antigo por muito tempo). Ver src/lib/versionCheck.ts.
+  useEffect(() => startVersionCheck(), []);
 
   // --- SSO LOGIC ---
   const handleSSOToken = useCallback(async (token: string) => {
