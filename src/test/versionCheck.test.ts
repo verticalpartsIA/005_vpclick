@@ -12,6 +12,7 @@ describe("startVersionCheck", () => {
     vi.stubGlobal("__APP_BUILD_TIME__", "2026-07-21T10:00:00.000Z");
     vi.useFakeTimers();
     toastMessage.mockClear();
+    localStorage.clear();
   });
 
   afterEach(() => {
@@ -74,5 +75,28 @@ describe("startVersionCheck", () => {
     await vi.waitFor(() => expect(toastMessage).toHaveBeenCalledTimes(1));
 
     stop();
+  });
+
+  it("does not repeat the same notification across independent instances (e.g. other tabs, or a remount)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ buildTime: "2026-07-21T12:30:00.000Z", commit: "abc123" }),
+      }),
+    );
+
+    const stopA = startVersionCheck();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(toastMessage).toHaveBeenCalledTimes(1);
+    stopA();
+
+    // Segunda instância independente (outra aba com sua própria variável
+    // `notified`, ou um remount do componente) — não deve duplicar o aviso,
+    // porque o localStorage já registra que esse buildTime foi avisado.
+    const stopB = startVersionCheck();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(toastMessage).toHaveBeenCalledTimes(1);
+    stopB();
   });
 });
