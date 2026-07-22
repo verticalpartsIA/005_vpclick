@@ -23,6 +23,17 @@ function formatUpdateMessage(buildTime: string): string {
   return `Este site foi atualizado em ${date} às ${time}h`;
 }
 
+// Usado pela Sidebar pra mostrar "Última atualização: DD/MM/AA HH:MMh" —
+// data/hora do build desta aba (__APP_BUILD_TIME__), não a mais recente
+// publicada no servidor (essa é a que o toast acima avisa quando muda).
+export function formatBuildTimeShort(buildTime: string): string | null {
+  const d = new Date(buildTime);
+  if (isNaN(d.getTime())) return null;
+  const date = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
+  const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  return `${date} ${time}h`;
+}
+
 export function startVersionCheck(): () => void {
   let notified = false;
   const currentBuildTime = __APP_BUILD_TIME__;
