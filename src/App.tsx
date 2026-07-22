@@ -5320,6 +5320,47 @@ function formatLocalDate(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+// Detecta URLs dentro de um texto solto (descrição de tarefa, nome de anexo
+// do tipo link etc.) e devolve nós React com essas URLs como <a> clicáveis,
+// preservando o resto do texto como está. Pontuação comum no fim de frase
+// (. , ; : ! ? ) ] ' ") fica de fora do link.
+const LINKIFY_URL_PATTERN = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
+
+export function linkifyText(text: string): React.ReactNode[] {
+  if (!text) return [];
+  const nodes: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  const regex = new RegExp(LINKIFY_URL_PATTERN);
+  while ((match = regex.exec(text)) !== null) {
+    let url = match[0];
+    let trailing = '';
+    while (url.length && /[.,;:!?)\]'"]$/.test(url)) {
+      trailing = url.slice(-1) + trailing;
+      url = url.slice(0, -1);
+    }
+    if (!url) { lastIndex = match.index + match[0].length; continue; }
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    const href = url.startsWith('http') ? url : `https://${url}`;
+    nodes.push(
+      <a
+        key={match.index}
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-blue-600 underline hover:text-blue-800"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {url}
+      </a>
+    );
+    if (trailing) nodes.push(trailing);
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
 // Resolve qual lista deve ser considerada "ativa" quando `activeListId` está
 // vazio (ex: navegando por pasta/espaço em vez de uma lista específica): se
 // todas as tarefas visíveis pertencem à mesma lista, usamos essa lista;
@@ -8062,7 +8103,7 @@ function TaskDetailModal(props: any) {
                     onClick={() => !isReadOnly && setIsEditingDescription(true)}
                     className={`prose prose-sm max-w-none text-gray-600 leading-relaxed italic ${!isReadOnly ? 'cursor-text' : ''}`}
                   >
-                    {task.description || "Nenhuma descrição fornecida."}
+                    {task.description ? linkifyText(task.description) : "Nenhuma descrição fornecida."}
                     {!isReadOnly && (
                       <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1.5 text-[10px] font-black text-gray-400 uppercase tracking-widest">
                         <Icons.Edit className="w-3.5 h-3.5" /> Editar
@@ -8259,7 +8300,7 @@ function TaskDetailModal(props: any) {
                           <Icons.Paperclip className="w-5 h-5 text-gray-400" />
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-bold text-gray-900 truncate">{attachment.name}</p>
+                          <p className="text-sm font-bold text-gray-900 truncate">{linkifyText(attachment.name)}</p>
                           <p className="text-[10px] text-gray-500">{formatFileSize(attachment.size)} • {new Date(attachment.uploadedAt).toLocaleDateString()}</p>
                         </div>
                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
