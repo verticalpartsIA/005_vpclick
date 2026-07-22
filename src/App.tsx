@@ -5049,9 +5049,8 @@ function Sidebar({
                 Personalizar a barra lateral
               </button>
             )}
-            <div className="text-[10px] text-sidebar-foreground/30 text-center py-1.5 uppercase tracking-widest">v2.0.0 Gold</div>
             {formatBuildTimeShort(__APP_BUILD_TIME__) && (
-              <div className="text-[10px] text-sidebar-foreground/30 text-center pb-1.5">
+              <div className="text-[10px] text-sidebar-foreground/30 text-center py-1.5">
                 Última atualização: {formatBuildTimeShort(__APP_BUILD_TIME__)}
               </div>
             )}
