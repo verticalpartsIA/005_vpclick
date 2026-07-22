@@ -21,7 +21,7 @@ import { GanttView } from './components/views/GanttView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
-import { startVersionCheck } from './lib/versionCheck';
+import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
@@ -5050,6 +5050,11 @@ function Sidebar({
               </button>
             )}
             <div className="text-[10px] text-sidebar-foreground/30 text-center py-1.5 uppercase tracking-widest">v2.0.0 Gold</div>
+            {formatBuildTimeShort(__APP_BUILD_TIME__) && (
+              <div className="text-[10px] text-sidebar-foreground/30 text-center pb-1.5">
+                Última atualização: {formatBuildTimeShort(__APP_BUILD_TIME__)}
+              </div>
+            )}
           </div>
         </div>
       )}
