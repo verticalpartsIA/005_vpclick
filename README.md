@@ -155,3 +155,13 @@ O VP Click organiza as equipes da VerticalParts em 17 Spaces:
 *Desenvolvido internamente pela equipe de T.I. da VerticalParts*
 
 </div>
+
+---
+
+## Contributors
+
+- Gelson Simões — criador e responsável pelas soluções VerticalParts
+
+---
+
+**Feito por Gelson Simões**
