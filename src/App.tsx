@@ -22,6 +22,7 @@ import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChar
 import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
+import { trackEnter, trackExit } from './lib/trackActivity';
 import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
@@ -794,6 +795,36 @@ export default function App() {
 
     return () => subscription.unsubscribe();
   }, [loadUserProfile]);
+
+  // --- Rastro de acesso cross-sistema (timeline central do vpsistema) ---
+  // Dispara "enter" uma única vez assim que a identidade real do usuário
+  // (e-mail vindo do perfil local do VPClick, já sincronizado com o
+  // vpsistema pelo fluxo de SSO acima) fica disponível — nunca antes disso
+  // e nunca em loop. "exit" é disparado no pagehide da aba, reaproveitando
+  // o mesmo session_id salvo em sessionStorage.
+  const hasTrackedEnterRef = useRef(false);
+  const currentUserRef = useRef(currentUser);
+  currentUserRef.current = currentUser;
+
+  useEffect(() => {
+    if (currentUser.email && currentUser.id !== 'loading' && !hasTrackedEnterRef.current) {
+      hasTrackedEnterRef.current = true;
+      trackEnter(currentUser.email, currentUser.name);
+    }
+  }, [currentUser.email, currentUser.id, currentUser.name]);
+
+  useEffect(() => {
+    const onPageHide = () => {
+      const u = currentUserRef.current;
+      if (u.email && u.id !== 'loading') {
+        trackExit(u.email, u.name);
+      }
+    };
+    // pagehide (em vez de beforeunload) por causa do bfcache — dispara de
+    // forma confiável tanto em navegação/fechamento quanto em bfcache.
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
+  }, []);
 
   // Theme State (temas prontos)
   const [themePreset, setThemePreset] = useState<ThemePresetId>(() => {
