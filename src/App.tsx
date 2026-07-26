@@ -23,6 +23,7 @@ import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
+import { ssoToken, veioDoPortal } from './lib/ssoEntry';
 import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
@@ -309,10 +310,10 @@ export default function App() {
   }, []);
   const [is2faVerified, setIs2faVerified] = useState(() => localStorage.getItem('vp_2fa_verified') === 'true');
   const [ssoError, setSsoError] = useState<string | null>(null);
-  // Impede que getSession() libere a tela enquanto o SSO ainda está processando
-  const isSSOProcessing = useRef(
-    new URLSearchParams(window.location.search).get('sso_token') !== null
-  );
+  // Impede que getSession() libere a tela enquanto o SSO ainda está processando.
+  // A URL já foi limpa do token antes do app montar (ver src/lib/ssoEntry.ts),
+  // por isso a origem da informação é o módulo, não window.location.
+  const isSSOProcessing = useRef(veioDoPortal);
 
   // Avisa quando uma nova versão foi publicada (deploy é um build estático,
   // sem invalidação — uma aba deixada aberta pode ficar rodando código
@@ -434,14 +435,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const ssoToken = params.get('sso_token');
+    // O token já foi lido e removido da URL antes do app montar; aqui só
+    // processamos. A limpeza antecipada também preserva os outros parâmetros
+    // (antes o `taskId` de um link direto era descartado junto com o token).
     if (ssoToken) {
       // Mantém loading enquanto SSO processa — evita redirect prematuro do LoginScreen
       setIsLoadingAuth(true);
-      // Limpa a URL imediatamente para segurança
-      const nextURL = window.location.origin + window.location.pathname;
-      window.history.replaceState({}, document.title, nextURL);
       handleSSOToken(ssoToken).finally(() => {
         isSSOProcessing.current = false;
       });
