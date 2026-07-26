@@ -3,6 +3,8 @@ import { supabase } from '@/lib/supabase';
 
 interface LoginScreenProps {
     onLogin: () => void;
+    /** Mensagem de erro quando o SSO do vpsistema falhou nesta visita. */
+    ssoError?: string | null;
 }
 
 const BACKGROUND_IMAGES = [
@@ -13,22 +15,28 @@ const BACKGROUND_IMAGES = [
 
 const LOGO_URL = 'https://verticalparts.com.br/wp-content/uploads/2026/01/grp__NM__bg__NM__logotipo_branco.png';
 
-export default function LoginScreen({ onLogin }: LoginScreenProps) {
+export default function LoginScreen({ onLogin, ssoError }: LoginScreenProps) {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(
+        ssoError ? `Não foi possível entrar automaticamente pelo portal: ${ssoError}. Use seu email e senha abaixo.` : null
+    );
 
     // Carousel state
     const [bgIndex, setBgIndex] = useState(0);
 
-    // Force redirect to central portal to ensure SSO usage (só em produção)
+    // Em produção a entrada normal é sempre pelo portal central (SSO), então
+    // quem chega direto no vpclick é devolvido pra lá. Mas se o SSO já falhou
+    // nesta visita, redirecionar de novo devolve a pessoa pro portal, que a
+    // manda de volta pra cá — loop infinito, sem nunca mostrar o erro nem
+    // deixar usar o formulário de email/senha desta tela.
     useEffect(() => {
+        if (ssoError) return;
         if (window.location.hostname === 'vpclick.vpsistema.com') {
             window.location.replace("https://vpsistema.com");
         }
-    }, []);
+    }, [ssoError]);
 
     useEffect(() => {
         const interval = setInterval(() => {

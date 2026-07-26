@@ -76,4 +76,49 @@ jobs:
             exit 1
           fi
           rm -f deploy_key
-          echo '✅ Deploy concluído para vpclick.vpsistema.com'
+          echo 'Arquivos enviados para vpclick.vpsistema.com'
+
+      # O scp pode terminar com sucesso e ainda assim deixar o site quebrado —
+      # já aconteceu: o index.html subiu mas os bundles .js não, e o site ficou
+      # em tela branca (sem JS o React nunca inicia) por dias, com o deploy
+      # marcado como verde. Aqui buscamos a página publicada de verdade e
+      # exigimos que todo asset que ela referencia esteja servível.
+      - name: Verificar que o site publicado está servível
+        run: |
+          set -e
+          SITE='https://vpclick.vpsistema.com'
+          echo "Buscando $SITE/index.html publicado..."
+          curl -fsS -H 'Cache-Control: no-cache' "$SITE/?cachebust=$GITHUB_RUN_ID" -o published.html
+
+          ASSETS=$(grep -oE '(src|href)="/assets/[^"]+"' published.html | sed 's/.*"\(.*\)"/\1/' | sort -u)
+          if [ -z "$ASSETS" ]; then
+            echo '❌ O index.html publicado não referencia nenhum asset — build ou envio inválido.'
+            exit 1
+          fi
+
+          FALHAS=0
+          for asset in $ASSETS; do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$SITE$asset")
+            if [ "$CODE" = "200" ]; then
+              echo "  ok   $asset"
+            else
+              echo "  FALHA $asset (HTTP $CODE)"
+              FALHAS=$((FALHAS + 1))
+            fi
+          done
+
+          if [ "$FALHAS" -gt 0 ]; then
+            echo ''
+            echo "❌ DEPLOY INCOMPLETO: $FALHAS asset(s) que a página precisa não estão no servidor."
+            echo 'O site está fora do ar (tela branca) — usuários não conseguem entrar.'
+            echo ''
+            echo 'O que verificar na Hostinger (hPanel):'
+            echo '  1. Espaço em disco / cota da conta — envio pode ter sido truncado.'
+            echo '  2. Scanner de malware (Imunify/Monarx): bundles .js grandes e minificados'
+            echo '     são falso-positivo comum e podem ser postos em quarentena após o envio.'
+            echo '  3. Confira a pasta domains/vpclick.vpsistema.com/public_html/assets/ via SSH.'
+            exit 1
+          fi
+
+          echo ''
+          echo '✅ Deploy verificado: index.html e todos os assets respondendo em produção.'

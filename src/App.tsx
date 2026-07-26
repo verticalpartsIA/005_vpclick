@@ -308,6 +308,7 @@ export default function App() {
     return () => clearTimeout(fallback);
   }, []);
   const [is2faVerified, setIs2faVerified] = useState(() => localStorage.getItem('vp_2fa_verified') === 'true');
+  const [ssoError, setSsoError] = useState<string | null>(null);
   // Impede que getSession() libere a tela enquanto o SSO ainda está processando
   const isSSOProcessing = useRef(
     new URLSearchParams(window.location.search).get('sso_token') !== null
@@ -426,6 +427,7 @@ export default function App() {
       setIs2faVerified(true);
     } catch (err) {
       console.error("SSO Error:", err);
+      setSsoError(err instanceof Error ? err.message : String(err));
       toast.error("Falha no login via SSO");
       setIsLoadingAuth(false);
     }
@@ -2951,7 +2953,7 @@ export default function App() {
   }
 
   if (!session || !is2faVerified) {
-    return <LoginScreen onLogin={() => setIs2faVerified(true)} />;
+    return <LoginScreen onLogin={() => setIs2faVerified(true)} ssoError={ssoError} />;
   }
 
   return (
