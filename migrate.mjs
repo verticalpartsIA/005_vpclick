@@ -1,21 +1,52 @@
+// Script pontual para criar/verificar o usuário administrador do VP Click.
+// Roda fora do navegador (node migrate.mjs) e usa a service_role key, que dá
+// acesso irrestrito ao banco — por isso nada aqui pode ser escrito no código:
+// este arquivo é versionado, então tudo vem de variáveis de ambiente.
+//
+// Uso:
+//   VITE_SUPABASE_URL=... \
+//   VITE_SUPABASE_SERVICE_ROLE_KEY=... \
+//   VP_ADMIN_EMAIL=... \
+//   VP_ADMIN_PASSWORD=... \
+//   node migrate.mjs
+//
+// As duas primeiras já ficam no .env local (não versionado). A senha do admin
+// é passada na hora da execução — não deve ser gravada em arquivo nenhum.
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = 'https://sfpnjwllcmentoocylow.supabase.co';
-const serviceRoleKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNmcG5qd2xsY21lbnRvb2N5bG93Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTg1MDg1OCwiZXhwIjoyMDg3NDI2ODU4fQ.zwp8V6sPNmKQTG-R0zK_nDPqX95vU5PwME0jVI3TYTY';
+const supabaseUrl = process.env.VITE_SUPABASE_URL;
+const serviceRoleKey = process.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+const adminEmail = process.env.VP_ADMIN_EMAIL;
+const adminPassword = process.env.VP_ADMIN_PASSWORD;
+
+const faltando = Object.entries({
+    VITE_SUPABASE_URL: supabaseUrl,
+    VITE_SUPABASE_SERVICE_ROLE_KEY: serviceRoleKey,
+    VP_ADMIN_EMAIL: adminEmail,
+    VP_ADMIN_PASSWORD: adminPassword,
+})
+    .filter(([, valor]) => !valor)
+    .map(([nome]) => nome);
+
+if (faltando.length > 0) {
+    console.error(`Variáveis de ambiente obrigatórias não definidas: ${faltando.join(', ')}`);
+    console.error('Veja o cabeçalho deste arquivo para o modo de uso.');
+    process.exit(1);
+}
 
 const supabase = createClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false }
 });
 
 async function createAdminUser() {
-    console.log('Criando usuario admin...');
+    console.log(`Criando usuario admin (${adminEmail})...`);
 
     const result = await supabase.auth.admin.createUser({
-        email: 'geovane.silva@verticalparts.com.br',
-        password: 'VPClick@2026',
+        email: adminEmail,
+        password: adminPassword,
         email_confirm: true,
         user_metadata: {
-            name: 'Geovane Silva',
+            name: process.env.VP_ADMIN_NAME || adminEmail.split('@')[0],
             role: 'ADMIN'
         }
     });
@@ -26,7 +57,7 @@ async function createAdminUser() {
 
             const listResult = await supabase.auth.admin.listUsers();
             if (listResult.data) {
-                const user = listResult.data.users.find(u => u.email === 'geovane.silva@verticalparts.com.br');
+                const user = listResult.data.users.find(u => u.email === adminEmail);
                 if (user) {
                     console.log('ID do usuario:', user.id);
                 }

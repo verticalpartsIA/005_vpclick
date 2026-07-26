@@ -23,6 +23,57 @@
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:site" content="@Lovable" />
   <meta name="twitter:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
+
+  <!-- O portal (vpsistema) entrega o acesso mandando o usuário pra cá com o
+       token de SSO na própria URL. Esse token é longo, e o endereço fica
+       visível na barra até alguém limpá-lo. Fazer isso no React é tarde: o
+       bundle tem mais de 1 MB, então o endereço com o token gigante fica à
+       vista enquanto o JS baixa e monta a tela.
+
+       Este script roda antes disso — é inline e está no head, então executa
+       na primeira leitura do HTML. Guarda o token numa variável e reescreve o
+       endereço na mesma hora, preservando os outros parâmetros (ex: taskId de
+       link direto pra tarefa). O app lê o token daqui (ver src/lib/ssoEntry.ts).
+
+       Além da aparência: token na barra de endereço vaza pro histórico do
+       navegador e pro cabeçalho Referer. Quanto menos tempo lá, melhor. -->
+  <script>
+    (function () {
+      var PORTAL = 'https://vpsistema.com';
+      var HOST_PRODUCAO = 'vpclick.vpsistema.com';
+
+      try {
+        var url = new URL(window.location.href);
+        var token = url.searchParams.get('sso_token');
+
+        if (token) {
+          window.__VP_SSO_TOKEN__ = token;
+          url.searchParams.delete('sso_token');
+          var query = url.searchParams.toString();
+          window.history.replaceState({}, document.title,
+            url.pathname + (query ? '?' + query : '') + url.hash);
+          return;
+        }
+
+        // Sem token: ou a pessoa já tem sessão neste navegador, ou está tentando
+        // entrar direto no VP Click. O segundo caso vai pro portal — a entrada é
+        // sempre por lá. Fazer isso aqui, e não no React, evita exibir a tela do
+        // VP Click por vários segundos antes de redirecionar, o que dá a falsa
+        // impressão de ter entrado e sido expulso.
+        //
+        // Só redirecionamos quando não existe nem token de sessão guardado: aí a
+        // ausência é certa, sem depender de validação (que é assíncrona). Se
+        // houver sessão salva, quem decide é o app — a chave pode estar expirada,
+        // e nesse caso o LoginScreen manda pro portal do mesmo jeito.
+        if (window.location.hostname !== HOST_PRODUCAO) return;
+        if (window.localStorage.getItem('vp-click-user-auth')) return;
+        window.location.replace(PORTAL);
+      } catch (e) {
+        // Qualquer falha aqui (localStorage bloqueado, sem suporte a URL) deixa
+        // o fluxo seguir pelo app, que já cobre os dois casos por conta própria.
+      }
+    })();
+  </script>
 </head>
 
 <body>
