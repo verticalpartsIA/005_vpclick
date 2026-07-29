@@ -1,0 +1,34 @@
+# VP Click — cabeçalhos de cache para o build estático servido pela Hostinger
+# (CDN "hcdn" na frente da origem, com múltiplos nós de borda).
+#
+# Sem isto, nada dizia à CDN como cachear cada arquivo: o `index.html` ficava
+# sujeito à heurística própria dela, e nós de borda diferentes podiam guardar
+# cópias de tempos diferentes — depois de um deploy, algumas requisições
+# pegavam o `index.html` novo (referenciando o bundle JS novo) e outras uma
+# cópia velha ainda apontando pro bundle antigo, causando comportamento
+# inconsistente entre abas/tentativas (ver issue #40).
+#
+# Regra: o `index.html` nunca é servido do cache sem antes revalidar com a
+# origem (usa o ETag/Last-Modified que o servidor já envia — na prática vira
+# um 304 quase sempre, então não pesa). Os arquivos dentro de /assets/ têm
+# hash no nome (gerado pelo Vite a cada build), então podem ficar em cache
+# "para sempre": um deploy novo gera nomes novos, nunca reaproveita um antigo.
+<IfModule mod_headers.c>
+  <FilesMatch "^index\.html$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+
+  <FilesMatch "\.(js|css|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|mp4|ico)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+</IfModule>
+
+# SPA: qualquer rota sem arquivo físico correspondente cai no index.html
+# (o roteamento de tela é feito em JS, não por múltiplos arquivos HTML).
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+</IfModule>
