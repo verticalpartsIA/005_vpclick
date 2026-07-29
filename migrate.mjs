@@ -5,23 +5,25 @@
 //
 // Uso:
 //   VITE_SUPABASE_URL=... \
-//   VITE_SUPABASE_SERVICE_ROLE_KEY=... \
+//   SUPABASE_SERVICE_ROLE_KEY=... \
 //   VP_ADMIN_EMAIL=... \
 //   VP_ADMIN_PASSWORD=... \
 //   node migrate.mjs
 //
-// As duas primeiras já ficam no .env local (não versionado). A senha do admin
-// é passada na hora da execução — não deve ser gravada em arquivo nenhum.
+// A primeira já fica no .env local (não versionado). A service role key e a
+// senha do admin são passadas na hora da execução — não devem ser gravadas em
+// arquivo nenhum. Sem prefixo VITE_ de propósito: essa env não deve nunca ser
+// lida pelo Vite/navegador, só por este script Node.
 import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const serviceRoleKey = process.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const adminEmail = process.env.VP_ADMIN_EMAIL;
 const adminPassword = process.env.VP_ADMIN_PASSWORD;
 
 const faltando = Object.entries({
     VITE_SUPABASE_URL: supabaseUrl,
-    VITE_SUPABASE_SERVICE_ROLE_KEY: serviceRoleKey,
+    SUPABASE_SERVICE_ROLE_KEY: serviceRoleKey,
     VP_ADMIN_EMAIL: adminEmail,
     VP_ADMIN_PASSWORD: adminPassword,
 })

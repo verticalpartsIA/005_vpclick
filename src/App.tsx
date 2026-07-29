@@ -19,7 +19,7 @@ import { TableView } from './components/views/TableView';
 import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
-import { supabase, supabaseAdmin, isTaskBlocked } from './lib/supabase';
+import { supabase, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -33,7 +33,7 @@ import { MentionText, notifyMentions, notifyAssignment } from './lib/mentions';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
-import { Session, createClient } from '@supabase/supabase-js';
+import { Session } from '@supabase/supabase-js';
 import { Toaster, toast } from 'sonner';
 
 import {
@@ -73,12 +73,6 @@ import {
 } from "@/components/ui/dialog";
 
 import { Checkbox } from "@/components/ui/checkbox";
-
-// --- SSO CONFIGURATION ---
-const CENTRAL_URL = "https://ubdkoqxfwcraftesgmbw.supabase.co";
-const CENTRAL_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViZGtvcXhmd2NyYWZ0ZXNnbWJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUwNjUwMjcsImV4cCI6MjA5MDY0MTAyN30.s1A15nFQVne94gbz0511L2IYvHdTcgYeL0H8YU80iI8";
-
-const centralSupabase = createClient(CENTRAL_URL, CENTRAL_ANON);
 
 const SSOHandler: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   return <>{children}</>;
@@ -324,96 +318,21 @@ export default function App() {
   const handleSSOToken = useCallback(async (token: string) => {
     try {
       console.log("SSO: Iniciando validação de token...");
-      
-      const { data: { user: centralUser }, error: centralError } = await centralSupabase.auth.getUser(token);
-      if (centralError || !centralUser) throw new Error("Token central inválido");
 
-      console.log("SSO: Usuário central validado:", centralUser.email);
-
-      // Busca o perfil completo na porta de entrada (vpsistema) com o token do
-      // próprio usuário — é de lá que herdamos nome, avatar e nível.
-      let centralProfile: { name?: string; avatar_url?: string; level?: string } | null = null;
-      try {
-        const centralAsUser = createClient(CENTRAL_URL, CENTRAL_ANON, {
-          global: { headers: { Authorization: `Bearer ${token}` } },
-          auth: { persistSession: false, autoRefreshToken: false },
-        });
-        const { data } = await centralAsUser
-          .from('profiles')
-          .select('name, avatar_url, level')
-          .eq('id', centralUser.id)
-          .maybeSingle();
-        centralProfile = data;
-      } catch (profileErr) {
-        console.warn('SSO: não foi possível ler o perfil do vpsistema, usando metadados do Auth.', profileErr);
-      }
-
-      const centralName = centralProfile?.name
-        || centralUser.user_metadata?.name
-        || centralUser.email?.split('@')[0]
-        || 'Usuário';
-      const centralAvatar = centralProfile?.avatar_url || centralUser.user_metadata?.avatar || null;
-      const centralLevel = centralProfile?.level || centralUser.user_metadata?.level;
-      const mappedRole = centralLevel === 'Administrador'
-        ? UserRole.ADMIN
-        : (centralLevel === 'Lider' || centralLevel === 'Gestor')
-          ? UserRole.GESTOR
-          : UserRole.COLABORADOR;
-
-      const { data: users, error: userError } = await supabaseAdmin
-        .from('profiles')
-        .select('*')
-        .eq('email', centralUser.email);
-
-      let targetUserId;
-
-      if (userError || !users || users.length === 0) {
-        console.log("SSO: Usuário não existe no VPClick, criando...");
-        const { data: newUser, error: createError } = await supabaseAdmin.auth.admin.createUser({
-          email: centralUser.email!,
-          email_confirm: true,
-          user_metadata: { name: centralName, avatar: centralAvatar, role: mappedRole }
-        });
-
-        if (createError) {
-          // Usuário já existe no Auth mas sem perfil — recupera o id pelo email
-          const { data: list } = await supabaseAdmin.auth.admin.listUsers({ perPage: 1000 });
-          const existingAuthUser = list?.users?.find((u: any) => u.email === centralUser.email);
-          if (!existingAuthUser) throw createError;
-          targetUserId = existingAuthUser.id;
-        } else {
-          targetUserId = newUser.user?.id;
-        }
-
-        // Cria o perfil já herdando a identidade do vpsistema; o papel inicial
-        // vem do nível de lá e pode ser ajustado depois no painel do VPClick.
-        const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
-          id: targetUserId,
-          name: centralName,
-          email: centralUser.email,
-          avatar: centralAvatar || `https://picsum.photos/seed/${targetUserId}/100`,
-          role: mappedRole,
-          is_active: true,
-        }, { onConflict: 'id' });
-        if (profileError) console.error('SSO: erro ao criar perfil herdado:', profileError);
-      } else {
-        targetUserId = users[0].id;
-        // Identidade (nome/avatar) segue sincronizada com a porta de entrada;
-        // papel e acessos continuam sendo configurados dentro do VPClick.
-        const identity: Record<string, string> = { name: centralName };
-        if (centralAvatar) identity.avatar = centralAvatar;
-        const { error: syncError } = await supabaseAdmin.from('profiles').update(identity).eq('id', targetUserId);
-        if (syncError) console.error('SSO: erro ao sincronizar identidade:', syncError);
-      }
-
-      const { data: linkData, error: linkError } = await supabaseAdmin.auth.admin.generateLink({
-        type: 'magiclink',
-        email: centralUser.email!
+      // Toda a parte privilegiada (validar o token central, criar/sincronizar
+      // usuário e perfil, gerar o magic link) roda na Edge Function
+      // sso-exchange, com a service_role key só no servidor. O front nunca
+      // vê essa chave — só recebe de volta o token_hash de um magic link
+      // recém-gerado e de uso único, que troca por sessão a seguir.
+      const { data, error: exchangeError } = await supabase.functions.invoke('sso-exchange', {
+        body: { token },
       });
 
-      if (linkError) throw linkError;
+      if (exchangeError || data?.error) {
+        throw new Error(data?.error || exchangeError?.message || 'Falha ao validar SSO');
+      }
 
-      const tokenHash = linkData?.properties?.hashed_token;
+      const tokenHash = data?.token_hash;
       if (!tokenHash) throw new Error("hashed_token ausente");
 
       const { error: verifyError } = await supabase.auth.verifyOtp({
@@ -522,7 +441,7 @@ export default function App() {
   }, []);
 
   const removeTaskAttachment = useCallback(async (taskId: string, attachmentId: string) => {
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await supabase
       .from('task_attachments')
       .delete()
       .eq('id', attachmentId)
@@ -543,7 +462,7 @@ export default function App() {
     const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
     if (match) {
       const storagePath = decodeURIComponent(match[2]);
-      const { error: storageError } = await supabaseAdmin.storage.from(match[1]).remove([storagePath]);
+      const { error: storageError } = await supabase.storage.from(match[1]).remove([storagePath]);
       if (storageError) console.error('Erro ao remover arquivo do Storage:', storageError);
     }
 
@@ -1224,7 +1143,7 @@ export default function App() {
   const loadTasks = useCallback(async () => {
     if (!session) return;
 
-    let query = supabaseAdmin.from('tasks').select('*');
+    let query = supabase.from('tasks').select('*');
 
     if (activeListId) {
       query = query.eq('list_id', activeListId);
@@ -1270,12 +1189,12 @@ export default function App() {
 
       // Lotes rodam em paralelo por tabela
       const [attData, commData, logData, checkData, actData, watchData] = await Promise.all([
-        fetchInChunks((ids) => supabaseAdmin.from('task_attachments').select('*').in('task_id', ids), 'task_attachments'),
-        fetchInChunks((ids) => supabaseAdmin.from('task_comments').select('*').in('task_id', ids).is('deleted_at', null), 'task_comments'),
-        fetchInChunks((ids) => supabaseAdmin.from('task_extension_logs').select('*').in('task_id', ids), 'task_extension_logs'),
-        fetchInChunks((ids) => supabaseAdmin.from('task_checklists').select('*').in('task_id', ids), 'task_checklists'),
-        fetchInChunks((ids) => supabaseAdmin.from('task_activities').select('*').in('task_id', ids), 'task_activities'),
-        fetchInChunks((ids) => supabaseAdmin.from('task_watchers').select('task_id, user_id').in('task_id', ids), 'task_watchers'),
+        fetchInChunks((ids) => supabase.from('task_attachments').select('*').in('task_id', ids), 'task_attachments'),
+        fetchInChunks((ids) => supabase.from('task_comments').select('*').in('task_id', ids).is('deleted_at', null), 'task_comments'),
+        fetchInChunks((ids) => supabase.from('task_extension_logs').select('*').in('task_id', ids), 'task_extension_logs'),
+        fetchInChunks((ids) => supabase.from('task_checklists').select('*').in('task_id', ids), 'task_checklists'),
+        fetchInChunks((ids) => supabase.from('task_activities').select('*').in('task_id', ids), 'task_activities'),
+        fetchInChunks((ids) => supabase.from('task_watchers').select('task_id, user_id').in('task_id', ids), 'task_watchers'),
       ]);
 
       setTasks(data.map((d: any) => {
@@ -1386,7 +1305,7 @@ export default function App() {
       let from = 0;
       const pageSize = 1000;
       while (true) {
-        const { data: page, error: pageErr } = await supabaseAdmin
+        const { data: page, error: pageErr } = await supabase
           .from('tasks')
           .select('*')
           .range(from, from + pageSize - 1);
@@ -1399,12 +1318,12 @@ export default function App() {
       if (data.length > 0) {
         // Atividades + listas em paralelo (evita IN com milhares de IDs)
         const [actResult, listsResult] = await Promise.all([
-          supabaseAdmin
+          supabase
             .from('task_activities')
             .select('id,task_id,user_id,type,old_value,new_value,created_at')
             .order('created_at', { ascending: false })
             .limit(200),
-          supabaseAdmin.from('lists').select('id,name'),
+          supabase.from('lists').select('id,name'),
         ]);
         const actData = actResult.data;
         if (listsResult.data) setDashboardLists(listsResult.data);
@@ -1457,7 +1376,7 @@ export default function App() {
 
   const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
-      const { error } = await supabaseAdmin
+      const { error } = await supabase
         .from('tasks')
         .update({
           title: updatedTask.title,
@@ -1535,7 +1454,7 @@ export default function App() {
     setConfirmModal({
       message: `Excluir ${ids.length} tarefa(s) permanentemente?`,
       onConfirm: async () => {
-        const { error } = await supabaseAdmin.from('tasks').delete().in('id', ids).select();
+        const { error } = await supabase.from('tasks').delete().in('id', ids).select();
         if (!error) {
           setTasks(prev => prev.filter(t => !ids.includes(t.id)));
           toast.success(`${ids.length} tarefa(s) removidas.`);
@@ -1561,7 +1480,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta tarefa permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabaseAdmin.from('tasks').delete().eq('id', taskId).select();
+        const { error } = await supabase.from('tasks').delete().eq('id', taskId).select();
         if (!error) {
           setTasks(prev => prev.filter(t => t.id !== taskId));
           if (selectedTaskId === taskId) setSelectedTaskId(null);
@@ -1581,7 +1500,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir este espaço e todas as suas pastas e tarefas?',
       onConfirm: async () => {
-        const { error } = await supabaseAdmin.from('spaces').delete().eq('id', spaceId).select();
+        const { error } = await supabase.from('spaces').delete().eq('id', spaceId).select();
         if (!error) {
           setSpaces(prev => prev.filter(s => s.id !== spaceId));
           setFolders(prev => prev.filter(f => f.spaceId !== spaceId));
@@ -1610,7 +1529,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta pasta e todas as suas tarefas?',
       onConfirm: async () => {
-        const { error } = await supabaseAdmin.from('folders').delete().eq('id', folderId).select();
+        const { error } = await supabase.from('folders').delete().eq('id', folderId).select();
         if (!error) {
           setFolders(prev => prev.filter(f => f.id !== folderId));
           if (activeScope.type === 'folder' && activeScope.id === folderId) handleNavigate('global', null, 'Dashboard');
@@ -1626,7 +1545,7 @@ export default function App() {
       onConfirm: async () => {
         let errorCount = 0;
         for (const folderId of folderIds) {
-          const { error } = await supabaseAdmin.from('folders').delete().eq('id', folderId).select();
+          const { error } = await supabase.from('folders').delete().eq('id', folderId).select();
           if (error) { errorCount++; toast.error('Erro ao excluir pasta: ' + error.message); }
           else {
             setFolders(prev => prev.filter(f => f.id !== folderId));
@@ -1657,7 +1576,7 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta lista e todas as suas tarefas permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabaseAdmin.from('lists').delete().eq('id', listId).select();
+        const { error } = await supabase.from('lists').delete().eq('id', listId).select();
         if (!error) {
           setLists(prev => prev.filter(l => l.id !== listId));
           setTasks(prev => prev.filter(t => t.listId !== listId));
@@ -1691,7 +1610,7 @@ export default function App() {
         const toastId = toast.loading('Duplicando projeto...');
         try {
           // 1. Cria a nova lista na mesma pasta, com o mesmo grupo de status
-          const { data: newListData, error: listError } = await supabaseAdmin
+          const { data: newListData, error: listError } = await supabase
             .from('lists')
             .insert({ name: newName.trim(), folder_id: sourceList.folderId, status_group_id: sourceList.statusGroupId })
             .select()
@@ -1699,7 +1618,7 @@ export default function App() {
           if (listError || !newListData) throw listError || new Error('A nova lista não foi retornada.');
 
           // 2. Busca todas as tarefas da lista direto do banco (estado local pode estar filtrado)
-          const { data: sourceTasks, error: tasksError } = await supabaseAdmin
+          const { data: sourceTasks, error: tasksError } = await supabase
             .from('tasks').select('*').eq('list_id', listId);
           if (tasksError) throw tasksError;
 
@@ -1726,7 +1645,7 @@ export default function App() {
 
           // 3. Insere tarefas principais em lote (ordem do retorno = ordem do insert)
           if (parents.length > 0) {
-            const { data: createdParents, error: parentsError } = await supabaseAdmin
+            const { data: createdParents, error: parentsError } = await supabase
               .from('tasks').insert(parents.map((t: any) => cloneRow(t, null))).select('id');
             if (parentsError || !createdParents) throw parentsError || new Error('Falha ao duplicar tarefas.');
             parents.forEach((t: any, i: number) => idMap.set(t.id, createdParents[i].id));
@@ -1735,7 +1654,7 @@ export default function App() {
           // 4. Insere subtarefas apontando para os novos pais
           const validChildren = children.filter((t: any) => idMap.has(t.parent_id));
           if (validChildren.length > 0) {
-            const { data: createdChildren, error: childrenError } = await supabaseAdmin
+            const { data: createdChildren, error: childrenError } = await supabase
               .from('tasks').insert(validChildren.map((t: any) => cloneRow(t, idMap.get(t.parent_id)!))).select('id');
             if (childrenError || !createdChildren) throw childrenError || new Error('Falha ao duplicar subtarefas.');
             validChildren.forEach((t: any, i: number) => idMap.set(t.id, createdChildren[i].id));
@@ -1744,19 +1663,19 @@ export default function App() {
           const oldTaskIds = Array.from(idMap.keys());
           if (oldTaskIds.length > 0) {
             // 5. Copia checklists
-            const { data: checklists } = await supabaseAdmin
+            const { data: checklists } = await supabase
               .from('task_checklists').select('task_id, text, completed').in('task_id', oldTaskIds);
             if (checklists && checklists.length > 0) {
-              await supabaseAdmin.from('task_checklists').insert(
+              await supabase.from('task_checklists').insert(
                 checklists.map((c: any) => ({ task_id: idMap.get(c.task_id)!, text: c.text, completed: c.completed }))
               );
             }
 
             // 6. Copia valores de campos personalizados
-            const { data: customValues } = await supabaseAdmin
+            const { data: customValues } = await supabase
               .from('custom_field_values').select('field_id, entity_id, value').in('entity_id', oldTaskIds);
             if (customValues && customValues.length > 0) {
-              await supabaseAdmin.from('custom_field_values').insert(
+              await supabase.from('custom_field_values').insert(
                 customValues.map((v: any) => ({ field_id: v.field_id, entity_id: idMap.get(v.entity_id)!, value: v.value }))
               );
             }
@@ -1945,11 +1864,16 @@ export default function App() {
 
   const handleAdminDeleteUser = async (userId: string) => {
     if (window.confirm("Excluir este usuário permanentemente?")) {
-      const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
-      if (!error) {
+      // auth.admin.deleteUser exige a service_role key — vive na Edge Function
+      // admin-user-management, que só executa se o chamador for ADMIN.
+      const { data, error } = await supabase.functions.invoke('admin-user-management', {
+        body: { action: 'delete', userId },
+      });
+      if (!error && !data?.error) {
         setAdminUsers(prev => prev.filter(u => u.id !== userId));
       } else {
-        console.error('Erro ao excluir usuário:', error);
+        console.error('Erro ao excluir usuário:', data?.error || error);
+        toast.error('Erro ao excluir usuário: ' + (data?.error || error?.message));
       }
     }
   };
@@ -1985,30 +1909,33 @@ export default function App() {
   };
 
   const handleAdminUpdatePassword = async (userId: string, newPassword: string) => {
-    const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, { password: newPassword });
-    if (error) {
-      console.error('Erro ao atualizar senha:', error);
-      throw error;
+    const { data, error } = await supabase.functions.invoke('admin-user-management', {
+      body: { action: 'updatePassword', userId, newPassword },
+    });
+    if (error || data?.error) {
+      const message = data?.error || error?.message;
+      console.error('Erro ao atualizar senha:', message);
+      throw new Error(message);
     }
   };
 
   const handleAdminCreateUser = async (user: Partial<User>, password?: string) => {
-    const { data, error } = await supabaseAdmin.auth.admin.createUser({
-      email: user.email!,
-      password: password || 'Click@2026',
-      email_confirm: true,
-      user_metadata: {
+    const { data, error } = await supabase.functions.invoke('admin-user-management', {
+      body: {
+        action: 'create',
+        email: user.email,
+        password: password || 'Click@2026',
         name: user.name,
-        role: user.role
-      }
+        role: user.role,
+      },
     });
 
-    if (data && !error) {
+    if (data?.userId && !error && !data?.error) {
       const newUser: User = {
-        id: data.user.id,
+        id: data.userId,
         name: user.name || '',
         email: user.email || '',
-        avatar: user.avatar || `https://picsum.photos/seed/${data.user.id}/100`,
+        avatar: user.avatar || `https://picsum.photos/seed/${data.userId}/100`,
         role: (user.role as UserRole) || UserRole.COLABORADOR
       };
       // Garante a linha em profiles na hora (FKs de user_access/teams dependem
@@ -2029,8 +1956,9 @@ export default function App() {
       setUserAccess(prev => ({ ...prev, [newUser.id]: { spaceIds: [], folderIds: [] } }));
       return newUser;
     } else {
-      console.error('Erro ao criar usuário:', error);
-      throw error;
+      const message = data?.error || error?.message || 'Erro desconhecido';
+      console.error('Erro ao criar usuário:', message);
+      throw new Error(message);
     }
   };
 
@@ -2268,7 +2196,7 @@ export default function App() {
 
   // Creation Handlers
   const handleCreateSpace = async (name: string, color: string, icon: string = 'Layout') => {
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await supabase
       .from('spaces')
       .insert({
         name,
@@ -2307,7 +2235,7 @@ export default function App() {
     if (!targetSpaceId) return;
 
     // 1. Criar Folder
-    const { data: folderData, error: folderError } = await supabaseAdmin
+    const { data: folderData, error: folderError } = await supabase
       .from('folders')
       .insert({ name, space_id: targetSpaceId })
       .select()
@@ -2323,7 +2251,7 @@ export default function App() {
       // 2. Criar lista padrão 'Geral' com o primeiro grupo de status (Padrão)
       const defaultStatusGroupId = statusGroups.find(g => g.name === 'Padrão')?.id || statusGroups[0]?.id;
 
-      const { data: listData, error: listError } = await supabaseAdmin
+      const { data: listData, error: listError } = await supabase
         .from('lists')
         .insert({
           name: 'Geral',
@@ -2375,7 +2303,7 @@ export default function App() {
   const handleConfirmCreateList = async (folderId: string, name: string, statusGroupId: string): Promise<void> => {
     const folder = folders.find((f) => f.id === folderId);
 
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await supabase
       .from('lists')
       .insert({
         name: name.trim(),
@@ -2427,7 +2355,7 @@ export default function App() {
         return;
       }
 
-      const { data, error } = await supabaseAdmin
+      const { data, error } = await supabase
         .from('tasks')
         .insert({
           title: newTaskPartial.title || 'Nova Tarefa',
@@ -2514,7 +2442,7 @@ export default function App() {
         tags: options.includeTags ? (sourceTask.tags || []) : [],
       };
 
-      const { data: created, error } = await supabaseAdmin
+      const { data: created, error } = await supabase
         .from('tasks')
         .insert(clonePayload)
         .select()
@@ -2592,7 +2520,7 @@ export default function App() {
       if (options.includeSubtasks) {
         const subtasks = tasks.filter((task) => task.parentId === sourceTask.id);
         for (const subtask of subtasks) {
-          const { data: createdSubtask, error: subtaskError } = await supabaseAdmin
+          const { data: createdSubtask, error: subtaskError } = await supabase
             .from('tasks')
             .insert({
               title: subtask.title,
@@ -4095,7 +4023,7 @@ function DocView({ doc, allDocs = [], onUpdate, onSelectDoc, onCreateSubpage, cu
   };
 
   const removeAttachment = async (id: string) => {
-    const { data, error } = await supabaseAdmin
+    const { data, error } = await supabase
       .from('doc_attachments')
       .delete()
       .eq('id', id)
@@ -4111,7 +4039,7 @@ function DocView({ doc, allDocs = [], onUpdate, onSelectDoc, onCreateSubpage, cu
     const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
     if (match) {
       const storagePath = decodeURIComponent(match[2]);
-      const { error: storageError } = await supabaseAdmin.storage.from(match[1]).remove([storagePath]);
+      const { error: storageError } = await supabase.storage.from(match[1]).remove([storagePath]);
       if (storageError) console.error('Erro ao remover arquivo do Storage:', storageError);
     }
 
