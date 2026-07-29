@@ -308,6 +308,13 @@ export default function App() {
   // A URL já foi limpa do token antes do app montar (ver src/lib/ssoEntry.ts),
   // por isso a origem da informação é o módulo, não window.location.
   const isSSOProcessing = useRef(veioDoPortal);
+  // true quando getSession()/loadUserProfile esbarra no timeout do LockManager
+  // do navegador (disputa da mesma storageKey entre chamadas concorrentes ou
+  // abas abertas ao mesmo tempo). É um erro transitório, não uma sessão
+  // inválida — por isso mostramos uma tela de recuperação em vez de deixar
+  // cair no redirect automático pro portal (ver LoginScreen).
+  const [sessionConflict, setSessionConflict] = useState(false);
+  const authInitializedRef = useRef(false);
 
   // Avisa quando uma nova versão foi publicada (deploy é um build estático,
   // sem invalidação — uma aba deixada aberta pode ficar rodando código
@@ -647,20 +654,26 @@ export default function App() {
     } catch (err: any) {
       console.error('Erro ao carregar perfil:', err);
       if (err?.message?.includes('LockManager')) {
-        toast.error('O sistema detectou um conflito de sessão. Por favor, recarregue a página.');
+        if (!isSSOProcessing.current) setSessionConflict(true);
       } else {
         toast.error('Erro ao carregar dados do usuário. Tente recarregar.');
       }
     }
   }, []);
 
-  useEffect(() => {
-    let authInitialized = false;
-
-    // Fonte primária de auth: getSession ao montar
-    supabase.auth.getSession().then(async ({ data: { session: s }, error }) => {
+  // Fonte primária de auth: getSession ao montar (e de novo no "Tentar
+  // novamente" da tela de conflito de sessão). Erro de LockManager é tratado
+  // como transitório — não desloga ninguém, só pede pra tentar de novo.
+  const checkSession = useCallback(async () => {
+    setSessionConflict(false);
+    try {
+      const { data: { session: s }, error } = await supabase.auth.getSession();
       if (error) {
-        console.error("Erro ao obter sessão:", error);
+        if (error.message?.includes('LockManager')) {
+          if (!isSSOProcessing.current) setSessionConflict(true);
+        } else {
+          console.error("Erro ao obter sessão:", error);
+        }
       } else {
         setSession(s);
         if (s) {
@@ -671,18 +684,47 @@ export default function App() {
           }
         }
       }
-      if (!isSSOProcessing.current) setIsLoadingAuth(false);
-      authInitialized = true;
-    }).catch(err => {
+    } catch (err: any) {
       console.error("Erro fatal ao verificar sessão:", err);
-      toast.error("Erro ao verificar sessão. Por favor, recarregue a página.");
+      if (err?.message?.includes('LockManager')) {
+        if (!isSSOProcessing.current) setSessionConflict(true);
+      } else {
+        toast.error("Erro ao verificar sessão. Por favor, recarregue a página.");
+      }
+    } finally {
       if (!isSSOProcessing.current) setIsLoadingAuth(false);
-      authInitialized = true;
-    });
+      authInitializedRef.current = true;
+    }
+  }, [loadUserProfile]);
+
+  // Botão "Tentar novamente" da tela de conflito de sessão.
+  const handleRetrySession = useCallback(() => {
+    setIsLoadingAuth(true);
+    checkSession();
+  }, [checkSession]);
+
+  // Botão "Sair e entrar novamente". Não usa supabase.auth.signOut(): esse
+  // método também disputa o mesmo lock que já está travado, então pode
+  // ficar pendurado do mesmo jeito. Como o objetivo aqui é uma saída
+  // garantida do estado travado, limpamos a sessão local direto e recarregamos
+  // — o próximo carregamento passa pelo fluxo normal (SSO do portal ou login).
+  const handleSignOutAndRestart = useCallback(() => {
+    try {
+      localStorage.removeItem('vp-click-user-auth');
+      localStorage.removeItem('vp_2fa_verified');
+    } catch {
+      // localStorage bloqueado — segue pro reload mesmo assim
+    }
+    window.location.href = '/';
+  }, []);
+
+  useEffect(() => {
+    authInitializedRef.current = false;
+    checkSession();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
-      // Ignorar eventos iniciais — getSession() já cuida do carregamento
-      if (!authInitialized && (event === 'INITIAL_SESSION' || event === 'SIGNED_IN')) {
+      // Ignorar eventos iniciais — checkSession() já cuida do carregamento
+      if (!authInitializedRef.current && (event === 'INITIAL_SESSION' || event === 'SIGNED_IN')) {
         return;
       }
 
@@ -714,7 +756,7 @@ export default function App() {
     });
 
     return () => subscription.unsubscribe();
-  }, [loadUserProfile]);
+  }, [checkSession, loadUserProfile]);
 
   // --- Rastro de acesso cross-sistema (timeline central do vpsistema) ---
   // Dispara "enter" uma única vez assim que a identidade real do usuário
@@ -2848,6 +2890,45 @@ export default function App() {
   }, [folders, allowedFolderIdSet, currentUser]);
 
   const uiScaleClass = uiScale <= 0.9 ? 'text-xs' : uiScale >= 1.2 ? 'text-base' : 'text-sm';
+
+  // Conflito de sessão (LockManager) — checado antes de qualquer outra tela
+  // de auth: mostra recuperação controlada em vez de deixar a pessoa presa em
+  // "Carregando..." ou cair no redirect automático pro portal (LoginScreen).
+  if (sessionConflict) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-900 p-4">
+        <div className="max-w-sm w-full bg-white/10 backdrop-blur-2xl border border-white/20 rounded-3xl p-8 text-center space-y-5">
+          <div className="w-14 h-14 mx-auto rounded-full bg-yellow-400/20 flex items-center justify-center">
+            <svg className="w-7 h-7 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="text-white font-black text-lg">Conflito de sessão detectado</h2>
+            <p className="text-slate-300 text-xs mt-2 leading-relaxed">
+              Detectamos um conflito de sessão, provavelmente por outra aba do VP Click
+              aberta ao mesmo tempo. Isso costuma se resolver sozinho — tente novamente
+              antes de sair.
+            </p>
+          </div>
+          <div className="space-y-2">
+            <button
+              onClick={handleRetrySession}
+              className="w-full h-12 bg-yellow-400 hover:bg-yellow-300 text-slate-900 font-black rounded-2xl text-sm transition-all"
+            >
+              Tentar novamente
+            </button>
+            <button
+              onClick={handleSignOutAndRestart}
+              className="w-full h-12 bg-white/10 hover:bg-white/20 text-white font-bold rounded-2xl text-sm border border-white/20 transition-all"
+            >
+              Sair e entrar novamente
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Auth guard — a tela só libera quando a sessão for verificada E o vídeo
   // do logo tiver tocado por completo, o que vier depois. Não há tela de
