@@ -124,6 +124,17 @@ create policy profiles_self on public.profiles for select using (
 ---
 
 ## Correções já aplicadas nesta branch (seguras, sem dependência de infra)
+- **CRIT-01-bis** (`supabase_migration_13_prevent_role_escalation.sql`, já aplicada no
+  projeto VP CLICK): achado do Codex review no PR #43 — como `auth_profiles_update`
+  (CRIT-02, `USING (true)`) permite UPDATE irrestrito em `profiles`, qualquer colaborador
+  autenticado podia rodar `supabase.from('profiles').update({ role: 'ADMIN' })` na própria
+  linha e depois passar pela checagem de autorização da Edge Function
+  `admin-user-management` (que só olhava `profiles.role`), ganhando `auth.admin.*` de
+  verdade (criar usuário, resetar senha, excluir conta). Trigger `BEFORE INSERT OR UPDATE`
+  em `profiles` agora exige que quem está mudando um `role` para algo diferente do padrão
+  já seja ADMIN (ou seja uma chamada server-side com a service_role, onde `auth.uid()` é
+  NULL); testado em produção com rollback: auto-escalonamento bloqueado, e um ADMIN de
+  verdade ainda consegue alterar o papel de outros usuários normalmente.
 - **ALTO-02** (`src/App.tsx`, `loadTasks`): busca de sub-entidades por task_id agora em
   **lotes de 150 IDs**, evitando a URL de ~39k caracteres que causava HTTP 400 e fazia
   comentários/checklists/anexos/watchers/atividades/logs sumirem no escopo global.
