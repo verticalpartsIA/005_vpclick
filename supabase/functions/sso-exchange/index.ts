@@ -11,6 +11,13 @@
  * O cliente troca esse `token_hash` por sessão com `supabase.auth.verifyOtp`
  * usando a anon key — a service_role nunca sai deste função.
  *
+ * A validação do token central usa fetch() direto no REST do Auth
+ * (/auth/v1/user), não o método `auth.getUser()` do SDK — mesmo padrão usado
+ * pelos outros apps satélite do vpsistema (catraca, propostas,
+ * gestaoimportacao). Evita entrar na máquina de estado/lock do GoTrue-js
+ * (Navigator LockManager) para uma validação que é só um GET com bearer
+ * token; ver issues #38/#41 do VP Click.
+ *
  * Deploy:
  *   supabase functions deploy sso-exchange --project-ref sfpnjwllcmentoocylow --no-verify-jwt
  */
@@ -33,9 +40,12 @@ Deno.serve(async (req) => {
     const { token } = await req.json();
     if (!token || typeof token !== 'string') return json({ error: 'token é obrigatório' }, 400);
 
-    const central = createClient(CENTRAL_URL, CENTRAL_ANON);
-    const { data: { user: centralUser }, error: centralError } = await central.auth.getUser(token);
-    if (centralError || !centralUser) return json({ error: 'Token central inválido' }, 401);
+    const authResp = await fetch(`${CENTRAL_URL}/auth/v1/user`, {
+      headers: { Authorization: `Bearer ${token}`, apikey: CENTRAL_ANON },
+    });
+    if (!authResp.ok) return json({ error: 'Token central inválido' }, 401);
+    const centralUser = await authResp.json();
+    if (!centralUser?.id || !centralUser?.email) return json({ error: 'Token central inválido' }, 401);
 
     // Perfil completo do vpsistema, lido com o próprio token do usuário
     // (nunca com a service role do projeto central).
