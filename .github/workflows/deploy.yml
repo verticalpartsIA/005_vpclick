@@ -62,10 +62,17 @@ jobs:
 
           mkdir -p ~/.ssh
           ssh-keyscan -p 65002 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # "dist/*" é expandido pelo Bash ANTES do scp rodar, e por padrão o
+          # glob "*" não pega arquivos começando com ponto — o .htaccess do
+          # build nunca era enviado (confirmado: PRs #45/#47 setavam headers
+          # de cache que nunca chegavam ao servidor). "dist/." não passa por
+          # glob nenhum (não tem "*"), então o scp -r copia o CONTEÚDO do
+          # diretório, .htaccess incluído, sem criar uma pasta "dist" aninhada
+          # no destino — mesma semântica de "cp -r origem/. destino/".
           if ! scp -i deploy_key -P 65002 \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=~/.ssh/known_hosts \
-            -r dist/* \
+            -r dist/. \
             "$SSH_USER@$SSH_HOST:/home/$SSH_USER/domains/vpclick.vpsistema.com/public_html/"; then
             echo ''
             echo '❌ DEPLOY FALHOU: o servidor recusou a autenticação SSH.'

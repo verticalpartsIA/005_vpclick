@@ -23,6 +23,18 @@
   </FilesMatch>
 </IfModule>
 
+# Reforço específico pro LiteSpeed Cache (LSCache) da Hostinger: o
+# Cache Manager do hPanel roda nessa camada, separada do Apache puro, e pode
+# cachear o index.html por conta própria mesmo com o Cache-Control acima.
+# X-LiteSpeed-Cache-Control é o jeito documentado do LSCache respeitar
+# "não cachear esta resposta" por arquivo. Fica sem efeito (inofensivo) se o
+# módulo não estiver ativo.
+<IfModule LiteSpeed>
+  <FilesMatch "^index\.html$">
+    Header set X-LiteSpeed-Cache-Control "no-cache"
+  </FilesMatch>
+</IfModule>
+
 # SPA: qualquer rota sem arquivo físico correspondente cai no index.html
 # (o roteamento de tela é feito em JS, não por múltiplos arquivos HTML).
 <IfModule mod_rewrite.c>
