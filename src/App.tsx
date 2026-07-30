@@ -322,6 +322,41 @@ export default function App() {
   useEffect(() => startVersionCheck(), []);
 
   // --- SSO LOGIC ---
+  // "Failed to send a request to the Edge Function" é o erro que o supabase-js
+  // lança quando o fetch em si falha (rede instável, blip momentâneo do
+  // provedor) — não é o sso-exchange recusando o token. Nesses casos vale a
+  // pena tentar de novo antes de travar o usuário na tela de erro; já um erro
+  // que o sso-exchange respondeu de verdade (token inválido/expirado) não
+  // melhora com retry, então esse caso segue direto pro catch sem tentativas.
+  const invokeSSOExchange = useCallback(async (token: string) => {
+    const MAX_ATTEMPTS = 3;
+    const RETRY_DELAY_MS = 800;
+    let lastNetworkError: unknown;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const { data, error: exchangeError } = await supabase.functions.invoke('sso-exchange', {
+        body: { token },
+      });
+
+      if (!exchangeError) {
+        if (data?.error) throw new Error(data.error);
+        return data;
+      }
+
+      const isNetworkFailure = exchangeError.name === 'FunctionsFetchError'
+        || /failed to send a request/i.test(exchangeError.message ?? '');
+      if (!isNetworkFailure) throw new Error(exchangeError.message || 'Falha ao validar SSO');
+
+      lastNetworkError = exchangeError;
+      console.warn(`SSO: falha de rede ao chamar sso-exchange (tentativa ${attempt}/${MAX_ATTEMPTS})`, exchangeError);
+      if (attempt < MAX_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * attempt));
+      }
+    }
+
+    throw lastNetworkError instanceof Error ? lastNetworkError : new Error('Falha ao validar SSO');
+  }, []);
+
   const handleSSOToken = useCallback(async (token: string) => {
     try {
       console.log("SSO: Iniciando validação de token...");
@@ -331,13 +366,7 @@ export default function App() {
       // sso-exchange, com a service_role key só no servidor. O front nunca
       // vê essa chave — só recebe de volta o token_hash de um magic link
       // recém-gerado e de uso único, que troca por sessão a seguir.
-      const { data, error: exchangeError } = await supabase.functions.invoke('sso-exchange', {
-        body: { token },
-      });
-
-      if (exchangeError || data?.error) {
-        throw new Error(data?.error || exchangeError?.message || 'Falha ao validar SSO');
-      }
+      const data = await invokeSSOExchange(token);
 
       const tokenHash = data?.token_hash;
       if (!tokenHash) throw new Error("hashed_token ausente");
@@ -358,7 +387,7 @@ export default function App() {
       toast.error("Falha no login via SSO");
       setIsLoadingAuth(false);
     }
-  }, []);
+  }, [invokeSSOExchange]);
 
   useEffect(() => {
     // O token já foi lido e removido da URL antes do app montar; aqui só
