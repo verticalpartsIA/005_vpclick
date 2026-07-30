@@ -103,14 +103,26 @@ jobs:
             exit 1
           fi
 
+          # Conferir só o código HTTP não basta: o fallback de SPA do .htaccess
+          # respondia 200 com o conteúdo do index.html para qualquer arquivo
+          # ausente, então um bundle faltando passava como "ok" aqui. Agora o
+          # /assets/ está fora do fallback (asset ausente = 404 de verdade), e
+          # esta checagem também exige que o tipo do conteúdo seja de fato
+          # JS/CSS — se algum dia o fallback voltar a pegar /assets/, o HTML
+          # disfarçado de bundle é detectado na hora em vez de passar batido.
           FALHAS=0
           for asset in $ASSETS; do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$SITE$asset")
-            if [ "$CODE" = "200" ]; then
-              echo "  ok   $asset"
-            else
+            LINHA=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$SITE$asset")
+            CODE=${LINHA%% *}
+            TIPO=${LINHA#* }
+            if [ "$CODE" != "200" ]; then
               echo "  FALHA $asset (HTTP $CODE)"
               FALHAS=$((FALHAS + 1))
+            elif printf '%s' "$TIPO" | grep -qi 'text/html'; then
+              echo "  FALHA $asset (HTTP 200 mas veio HTML: '$TIPO' — arquivo não existe no servidor)"
+              FALHAS=$((FALHAS + 1))
+            else
+              echo "  ok   $asset ($TIPO)"
             fi
           done
 
