@@ -71,7 +71,25 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
         if (payload.new) setNotifications((prev) => [mapRow(payload.new), ...prev].slice(0, 30));
       })
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
+
+    // Self-heal: o socket do Realtime pode morrer em segundo plano (aba
+    // minimizada, máquina em sleep) sem que a subscription note e sem
+    // reconectar sozinha — o sino fica desatualizado até um F5. Refaz a
+    // busca quando a aba recupera o foco depois de tempo suficiente parada.
+    let hiddenAt: number | null = null;
+    const onVisibilityChange = () => {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (hiddenAt !== null && Date.now() - hiddenAt > 15000) loadNotifications();
+      hiddenAt = null;
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('online', loadNotifications);
+
+    return () => {
+      supabase.removeChannel(channel);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('online', loadNotifications);
+    };
   }, [currentUser.id, loadNotifications]);
 
   // Fecha o dropdown ao clicar fora

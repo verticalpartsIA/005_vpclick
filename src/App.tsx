@@ -1119,6 +1119,29 @@ export default function App() {
     }
   }, [session, loadAllUsers, loadInitialData]);
 
+  // Recarrega spaces/folders/lists direto do banco — usado tanto pelo evento
+  // de realtime de user_access quanto pelo self-heal de visibilidade abaixo.
+  const reloadSpacesFoldersLists = useCallback(async () => {
+    const { data: spacesData } = await supabase.from('spaces').select('*');
+    if (spacesData) {
+      setSpaces(spacesData.map((s: any) => ({
+        id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon, isSystem: s.is_system ?? false
+      })));
+    }
+    const { data: foldersData } = await supabase.from('folders').select('*');
+    if (foldersData) {
+      setFolders(foldersData.map((f: any) => ({
+        id: f.id, name: f.name, spaceId: f.space_id
+      })));
+    }
+    const { data: listsData } = await supabase.from('lists').select('*');
+    if (listsData) {
+      setLists(listsData.map((l: any) => ({
+        id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id
+      })));
+    }
+  }, []);
+
   // Realtime: atualiza userAccess + recarrega spaces/folders quando admin alterar permissões
   useEffect(() => {
     if (!session?.user?.id) return;
@@ -1143,29 +1166,12 @@ export default function App() {
           }));
           // Recarrega spaces e folders para garantir que novos espaços criados
           // após o login do usuário sejam incluídos no array
-          const { data: spacesData } = await supabase.from('spaces').select('*');
-          if (spacesData) {
-            setSpaces(spacesData.map((s: any) => ({
-              id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon, isSystem: s.is_system ?? false
-            })));
-          }
-          const { data: foldersData } = await supabase.from('folders').select('*');
-          if (foldersData) {
-            setFolders(foldersData.map((f: any) => ({
-              id: f.id, name: f.name, spaceId: f.space_id
-            })));
-          }
-          const { data: listsData } = await supabase.from('lists').select('*');
-          if (listsData) {
-            setLists(listsData.map((l: any) => ({
-              id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id
-            })));
-          }
+          await reloadSpacesFoldersLists();
         }
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
-  }, [session?.user?.id]);
+  }, [session?.user?.id, reloadSpacesFoldersLists]);
 
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -1335,6 +1341,48 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_comments' }, scheduleReload)
       .subscribe();
     return () => { if (timer) clearTimeout(timer); supabase.removeChannel(channel); };
+  }, [session?.user?.id]);
+
+  // Refs sempre atualizadas para o self-heal de visibilidade abaixo não
+  // precisar recriar listeners a cada mudança de identidade dessas funções.
+  const loadInitialDataRef = useRef(loadInitialData);
+  useEffect(() => { loadInitialDataRef.current = loadInitialData; }, [loadInitialData]);
+  const reloadSpacesFoldersListsRef = useRef(reloadSpacesFoldersLists);
+  useEffect(() => { reloadSpacesFoldersListsRef.current = reloadSpacesFoldersLists; }, [reloadSpacesFoldersLists]);
+
+  // Self-heal ao voltar de segundo plano: o socket do Realtime (e os timers da
+  // aba) suspendem quando ela fica em background por um tempo ou a máquina
+  // dorme. Qualquer evento perdido nesse intervalo nunca chega, e como as
+  // subscriptions não têm retry, a tela fica desatualizada pra sempre — tarefa
+  // "sumida", menção que não aparece, Kanban sem grupos — até um F5 manual.
+  // Recarregar tudo quando a aba recupera o foco corrige isso sem depender do
+  // socket ter sobrevivido; é o mesmo padrão usado por bibliotecas de data
+  // fetching (refetch-on-focus).
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    let hiddenAt: number | null = null;
+    const resync = () => {
+      loadTasksRef.current?.();
+      loadInitialDataRef.current?.();
+      reloadSpacesFoldersListsRef.current?.();
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+        return;
+      }
+      // Só refaz o fetch se a aba ficou em segundo plano tempo suficiente pro
+      // socket ter chance real de ter morrido — evita rajadas de request ao
+      // só trocar de aba rapidamente.
+      if (hiddenAt !== null && Date.now() - hiddenAt > 15000) resync();
+      hiddenAt = null;
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('online', resync);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('online', resync);
+    };
   }, [session?.user?.id]);
 
   // ── Dashboard global: carrega TODAS as tarefas sem filtro de escopo ─────────
