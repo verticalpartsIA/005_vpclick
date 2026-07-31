@@ -682,7 +682,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Erro ao carregar perfil:', err);
-      if (err?.message?.includes('LockManager')) {
+      if (err?.isAcquireTimeout || err?.message?.includes('LockManager')) {
         if (!isSSOProcessing.current) setSessionConflict(true);
       } else {
         toast.error('Erro ao carregar dados do usuário. Tente recarregar.');
@@ -698,7 +698,7 @@ export default function App() {
     try {
       const { data: { session: s }, error } = await supabase.auth.getSession();
       if (error) {
-        if (error.message?.includes('LockManager')) {
+        if (error?.isAcquireTimeout || error.message?.includes('LockManager')) {
           if (!isSSOProcessing.current) setSessionConflict(true);
         } else {
           console.error("Erro ao obter sessão:", error);
@@ -715,7 +715,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Erro fatal ao verificar sessão:", err);
-      if (err?.message?.includes('LockManager')) {
+      if (err?.isAcquireTimeout || err?.message?.includes('LockManager')) {
         if (!isSSOProcessing.current) setSessionConflict(true);
       } else {
         toast.error("Erro ao verificar sessão. Por favor, recarregue a página.");

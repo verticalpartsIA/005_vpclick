@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js';
+import { createClient, processLock } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
@@ -18,6 +18,18 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
         persistSession: true,
         detectSessionInUrl: true,
         storageKey: 'vp-click-user-auth', // Garante que a chave de armazenamento seja única
+        // Por padrão, o supabase-js serializa auth.getSession()/refresh entre
+        // TODAS as abas do mesmo storageKey via navigator.locks (10s de timeout).
+        // Uma aba em segundo plano que o navegador throttla (comportamento padrão
+        // pra economizar CPU) pode segurar esse lock sem conseguir liberá-lo a
+        // tempo — toda aba ATIVA que dependa da mesma chave trava por até 10s e
+        // falha com "Acquiring an exclusive Navigator LockManager lock ... timed
+        // out" (issues #38, #41). processLock serializa só DENTRO da mesma aba,
+        // sem esperar outras abas — elimina esse travamento cruzado. O trade-off
+        // aceito: duas abas podem, raramente, tentar renovar o token ao mesmo
+        // tempo; o pior caso é uma delas precisar buscar sessão de novo, não um
+        // travamento de 10s pro usuário.
+        lock: processLock,
     },
 });
 
