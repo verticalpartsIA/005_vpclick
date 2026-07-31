@@ -62,11 +62,27 @@ jobs:
 
           mkdir -p ~/.ssh
           ssh-keyscan -p 65002 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          REMOTE_DIR="/home/$SSH_USER/domains/vpclick.vpsistema.com/public_html"
+
+          # O scp só soma arquivos — nunca apagou os de deploys anteriores.
+          # Bundles antigos (com bugs já corrigidos) ficavam acumulados e
+          # continuavam sendo servidos pra quem tinha o index.html antigo em
+          # cache, de forma indefinida. Limpa o conteúdo do diretório remoto
+          # antes de enviar o build atual, para que só o build corrente exista.
+          if ! ssh -i deploy_key -p 65002 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "$SSH_USER@$SSH_HOST" \
+            "find '$REMOTE_DIR' -mindepth 1 -delete"; then
+            echo '⚠️  Não foi possível limpar o diretório remoto antes do upload (seguindo mesmo assim).'
+          fi
+
           if ! scp -i deploy_key -P 65002 \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=~/.ssh/known_hosts \
             -r dist/* \
-            "$SSH_USER@$SSH_HOST:/home/$SSH_USER/domains/vpclick.vpsistema.com/public_html/"; then
+            "$SSH_USER@$SSH_HOST:$REMOTE_DIR/"; then
             echo ''
             echo '❌ DEPLOY FALHOU: o servidor recusou a autenticação SSH.'
             echo 'CORREÇÃO: copie a chave pública exibida acima (linha começando com ssh-)'
