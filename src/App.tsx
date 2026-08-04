@@ -947,6 +947,17 @@ export default function App() {
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [userAccess, setUserAccess] = useState<Record<string, { spaceIds: string[]; folderIds: string[] }>>({});
 
+  // Conta de serviço usada para o rastro de atividade cross-sistema (ver
+  // src/lib/trackActivity.ts) — tem perfil em `profiles` (por isso aparece em
+  // adminUsers), mas não é uma pessoa de verdade: não deve ser selecionável
+  // como responsável de tarefa, menção ou membro de equipe. Continua visível
+  // em adminUsers (cru) só no Painel Admin, pra quem precisar geri-la.
+  const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
+  const assignableUsers = useMemo(
+    () => adminUsers.filter(u => u.email !== AI_AGENT_EMAIL),
+    [adminUsers]
+  );
+
   // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
   const [dashboardTasks, setDashboardTasks] = useState<Task[]>([]);
   const [dashboardLists, setDashboardLists] = useState<{ id: string; name: string }[]>([]);
@@ -3208,7 +3219,7 @@ export default function App() {
               )}
               <NotificationBell
                 currentUser={currentUser}
-                users={adminUsers}
+                users={assignableUsers}
                 onOpenTask={(taskId) => setSelectedTaskId(taskId)}
               />
 
@@ -3401,7 +3412,7 @@ export default function App() {
                   }
                 }}
                 currentUser={currentUser}
-                users={adminUsers}
+                users={assignableUsers}
                 statusGroups={statusGroups}
                 onBulkStatusChange={handleBulkStatusChange}
                 onBulkPriorityChange={handleBulkPriorityChange}
@@ -3421,7 +3432,7 @@ export default function App() {
                   setPrefilledTaskData(prefill || null);
                   setIsTaskModalOpen(true);
                 }}
-                users={adminUsers}
+                users={assignableUsers}
                 statusGroups={statusGroups}
                 lists={lists}
                 activeListId={activeListId}
@@ -3445,7 +3456,7 @@ export default function App() {
                 // Fallback para scopeTasks enquanto carrega pela primeira vez
                 <DashboardView
                   tasks={dashboardTasks.length > 0 ? dashboardTasks : scopeTasks}
-                  users={adminUsers}
+                  users={assignableUsers}
                   statusGroups={statusGroups}
                   activeListId={activeListId}
                   lists={lists}
@@ -3455,9 +3466,9 @@ export default function App() {
               )
             )}
             {activeView === 'Calendar' && (
-              <CalendarView 
-                tasks={filteredTasks} 
-                users={adminUsers} 
+              <CalendarView
+                tasks={filteredTasks}
+                users={assignableUsers}
                 onTaskClick={setSelectedTaskId} 
                 onAddTaskAtDate={(date) => {
                   setPrefilledTaskData({ dueDate: formatLocalDate(date) });
@@ -3476,7 +3487,7 @@ export default function App() {
                 tasks={filteredTasks}
                 customFields={customFields}
                 fieldValues={fieldValues}
-                users={adminUsers}
+                users={assignableUsers}
                 onTaskClick={setSelectedTaskId}
                 onUpdateTask={handleUpdateTask}
                 onUpdateFieldValue={handleUpdateFieldValue}
@@ -3514,7 +3525,7 @@ export default function App() {
           <TaskDetailModal
             key={selectedTask.id}
             task={selectedTask}
-            users={adminUsers}
+            users={assignableUsers}
             tasks={tasks}
             onClose={() => {
               setSelectedTaskId(null);
@@ -3559,7 +3570,7 @@ export default function App() {
           onClose={() => setIsTeamsModalOpen(false)}
           teams={teams}
           setTeams={setTeams}
-          users={adminUsers}
+          users={assignableUsers}
           currentUser={currentUser}
         />
 
@@ -3571,7 +3582,7 @@ export default function App() {
               setPrefilledTaskData(null);
             }}
             onCreate={handleCreateTask}
-            users={adminUsers}
+            users={assignableUsers}
             spaces={filteredSpaces}
             additionalTasks={tasks}
             folders={filteredFolders}
