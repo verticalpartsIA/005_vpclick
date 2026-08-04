@@ -15,7 +15,9 @@
 # "para sempre": um deploy novo gera nomes novos, nunca reaproveita um antigo.
 <IfModule mod_headers.c>
   <FilesMatch "^index\.html$">
-    Header set Cache-Control "no-cache, must-revalidate"
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
   </FilesMatch>
 
   <FilesMatch "\.(js|css|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|mp4|ico)$">
@@ -37,9 +39,26 @@
 
 # SPA: qualquer rota sem arquivo físico correspondente cai no index.html
 # (o roteamento de tela é feito em JS, não por múltiplos arquivos HTML).
+#
+# /assets/ fica FORA desse fallback de propósito. Lá dentro só existe arquivo
+# gerado pelo Vite com hash no nome — nunca uma rota de tela. Quando o fallback
+# pegava /assets/ também, um bundle inexistente respondia "200 text/html" com o
+# conteúdo do index.html em vez de 404, e isso quebrava de dois jeitos:
+#
+#   1. Navegador com index.html velho em cache pede o bundle antigo, recebe
+#      HTML disfarçado de JS e o script morre sem erro claro — a tela abre mas
+#      o app nunca monta (sintoma investigado nas issues #38/#40/#41).
+#   2. A verificação de deploy (.github/workflows/deploy.yml) conferia só o
+#      código HTTP, então qualquer asset faltando passava como 200/OK. A rede
+#      de proteção criada justamente pro caso "index.html subiu mas o JS não"
+#      nunca conseguiria disparar.
+#
+# Sem o fallback, asset ausente vira 404 de verdade: o navegador reporta o erro
+# e a verificação de deploy consegue enxergar a falha.
 <IfModule mod_rewrite.c>
   RewriteEngine On
   RewriteBase /
+  RewriteCond %{REQUEST_URI} !^/assets/
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteCond %{REQUEST_FILENAME} !-d
   RewriteRule . /index.html [L]
