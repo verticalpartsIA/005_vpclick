@@ -4531,6 +4531,19 @@ function Sidebar({
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
   const [secEspacosOpen, setSecEspacosOpen] = useState(true);
 
+  // Busca na sidebar (filtra espaços, pastas e listas pelo nome)
+  const [showSidebarSearch, setShowSidebarSearch] = useState(false);
+  const [sidebarSearchQuery, setSidebarSearchQuery] = useState('');
+  const sidebarQuery = sidebarSearchQuery.trim().toLowerCase();
+  const isSidebarSearching = sidebarQuery.length > 0;
+  const listMatchesSearch = (list: List) => list.name.toLowerCase().includes(sidebarQuery);
+  const folderMatchesSearch = (folder: Folder) =>
+    folder.name.toLowerCase().includes(sidebarQuery) || (lists as List[]).some((l) => l.folderId === folder.id && listMatchesSearch(l));
+  const spaceMatchesSearch = (space: Space) =>
+    space.name.toLowerCase().includes(sidebarQuery) || (folders as Folder[]).some((f) => f.spaceId === space.id && folderMatchesSearch(f));
+  const filteredSpaces = isSidebarSearching ? spaces.filter(spaceMatchesSearch) : spaces;
+  const filteredFavorites = (favorites || []).filter((fav: any) => !isSidebarSearching || fav.name.toLowerCase().includes(sidebarQuery));
+
   // Largura redimensionável da sidebar (arrastar borda direita; duplo clique restaura)
   const SIDEBAR_DEFAULT_W = 240;
   const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
@@ -4674,8 +4687,27 @@ function Sidebar({
 
           {/* Header */}
           <div className="flex items-center gap-1 px-2 py-2 border-b border-sidebar-border">
-            <span className="text-sm font-semibold text-sidebar-foreground flex-1 truncate px-1">Início</span>
-            <button title="Pesquisar" className="p-1.5 rounded hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors">
+            {showSidebarSearch ? (
+              <div className="relative flex-1">
+                <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-sidebar-foreground/40" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M11 11l3 3"/></svg>
+                <input
+                  type="text"
+                  autoFocus
+                  value={sidebarSearchQuery}
+                  onChange={(e) => setSidebarSearchQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Escape') { setShowSidebarSearch(false); setSidebarSearchQuery(''); } }}
+                  placeholder="Buscar espaços, pastas ou listas..."
+                  className="w-full pl-6 pr-2 py-1 text-xs bg-sidebar-accent/40 border border-sidebar-border rounded focus:outline-none focus:ring-1 focus:ring-primary text-sidebar-foreground placeholder:text-sidebar-foreground/40"
+                />
+              </div>
+            ) : (
+              <span className="text-sm font-semibold text-sidebar-foreground flex-1 truncate px-1">Início</span>
+            )}
+            <button
+              title={showSidebarSearch ? 'Fechar busca' : 'Pesquisar'}
+              onClick={() => setShowSidebarSearch(v => { if (v) setSidebarSearchQuery(''); return !v; })}
+              className={`p-1.5 rounded hover:bg-sidebar-accent transition-colors ${showSidebarSearch ? 'text-primary' : 'text-sidebar-foreground/50 hover:text-sidebar-foreground'}`}
+            >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M11 11l3 3"/></svg>
             </button>
             <button title="Criar tarefa" onClick={() => { }} className="p-1.5 rounded hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors">
@@ -4754,18 +4786,21 @@ function Sidebar({
                 className="w-full flex items-center gap-1 px-3 py-2 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors group"
                 onClick={() => setSecFavoritosOpen(v => !v)}
               >
-                <svg className={`w-3 h-3 transition-transform shrink-0 ${secFavoritosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                <svg className={`w-3 h-3 transition-transform shrink-0 ${secFavoritosOpen || isSidebarSearching ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
                 Favoritos
               </button>
-              {secFavoritosOpen && (
+              {(secFavoritosOpen || isSidebarSearching) && (
                 <div className="pb-1">
-                  {favorites && favorites.length === 0 && (
+                  {favorites && favorites.length === 0 && !isSidebarSearching && (
                     <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5 px-4 py-2">
                       <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
                       Passe o mouse sobre uma lista ou pasta e clique ★
                     </p>
                   )}
-                  {(favorites || []).map((fav: any) => {
+                  {isSidebarSearching && filteredFavorites.length === 0 && favorites && favorites.length > 0 && (
+                    <p className="text-[11px] text-sidebar-foreground/40 px-4 py-2">Nenhum favorito encontrado</p>
+                  )}
+                  {filteredFavorites.map((fav: any) => {
                     const isActiveList = fav.type === 'list' && activeListId === fav.id;
                     const isActiveFolder = fav.type === 'folder' && activeScope.type === 'folder' && activeScope.id === fav.id;
                     const isActiveSpace = fav.type === 'space' && activeScope.type === 'space' && activeScope.id === fav.id;
@@ -4803,7 +4838,7 @@ function Sidebar({
                   className="flex items-center gap-1 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors flex-1 text-left"
                   onClick={() => setSecEspacosOpen(v => !v)}
                 >
-                  <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                  <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen || isSidebarSearching ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
                   Espaços
                 </button>
                 <button
@@ -4815,10 +4850,13 @@ function Sidebar({
                 </button>
               </div>
 
-              {secEspacosOpen && (
+              {(secEspacosOpen || isSidebarSearching) && (
                 <div className="pb-2">
-                  {spaces.map((space: Space) => {
-                    const isExpanded = expandedSpaces.includes(space.id);
+                  {isSidebarSearching && filteredSpaces.length === 0 && (
+                    <p className="text-[11px] text-sidebar-foreground/40 px-4 py-2">Nenhum espaço, pasta ou lista encontrado para "{sidebarSearchQuery}"</p>
+                  )}
+                  {filteredSpaces.map((space: Space) => {
+                    const isExpanded = isSidebarSearching ? true : expandedSpaces.includes(space.id);
                     const isSpaceDropTarget = dropTarget?.type === 'space' && dropTarget.id === space.id && dragItem?.type === 'folder';
                     return (
                       <div key={space.id} className="mb-0.5">
@@ -4902,8 +4940,8 @@ function Sidebar({
                                 </div>
                               </div>
                             )}
-                            {folders.filter((f: Folder) => f.spaceId === space.id).map((folder: Folder) => {
-                              const isFolderExpanded = expandedFolders.includes(folder.id);
+                            {folders.filter((f: Folder) => f.spaceId === space.id && (!isSidebarSearching || folderMatchesSearch(f))).map((folder: Folder) => {
+                              const isFolderExpanded = isSidebarSearching ? true : expandedFolders.includes(folder.id);
                               return (
                                 <div key={folder.id}>
                                   <div
@@ -5007,7 +5045,7 @@ function Sidebar({
 
                                   {isFolderExpanded && (
                                     <div className="ml-5 mt-0.5 space-y-0.5 border-l border-sidebar-border pl-2">
-                                      {(lists as List[]).filter((l) => l.folderId === folder.id).map((list: List) => {
+                                      {(lists as List[]).filter((l) => l.folderId === folder.id && (!isSidebarSearching || listMatchesSearch(l))).map((list: List) => {
                                         const isActive = activeListId === list.id;
                                         return (
                                           <div
