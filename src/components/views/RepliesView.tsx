@@ -3,20 +3,11 @@ import { isToday, isYesterday } from 'date-fns';
 import { supabase } from '../../lib/supabase';
 import { AppNotification, User } from '../../types';
 
-interface InboxViewProps {
+interface RepliesViewProps {
   currentUser: User;
   users: User[];
   onOpenTask: (taskId: string) => void;
 }
-
-const TYPE_ICONS: Record<string, string> = {
-  mention: '💬',
-  team_mention: '👥',
-  assignment: '📌',
-  comment: '💬',
-  automation: '⚡',
-  reply: '↩️',
-};
 
 function relativeTime(date: string) {
   const diffMs = Date.now() - new Date(date).getTime();
@@ -40,12 +31,22 @@ function dateGroupLabel(date: string) {
   return 'Mais antigas';
 }
 
+interface ReplyThread {
+  key: string;
+  commentId: string | undefined;
+  taskId: string | undefined;
+  latest: AppNotification;
+  items: AppNotification[];
+  read: boolean;
+}
+
 /**
- * Caixa de entrada (aba "Principal", inspirada no Inbox do ClickUp): a mesma
- * fonte de dados do sino de notificações, mas em página cheia — sem limite de
- * 30 itens, com filtro lido/não lido e agrupamento por data.
+ * Respostas (aba "Respostas" da sidebar, item 2 do Início estilo ClickUp):
+ * notificações do tipo 'reply', agrupadas por thread (mesmo comment_id) para
+ * não repetir uma linha por resposta — igual ao agrupamento por tarefa do
+ * ClickUp.
  */
-export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
+export function RepliesView({ currentUser, users, onOpenTask }: RepliesViewProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
   const [isLoading, setIsLoading] = useState(true);
@@ -69,6 +70,7 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
       .from('notifications')
       .select('*')
       .eq('user_id', currentUser.id)
+      .eq('type', 'reply')
       .order('created_at', { ascending: false })
       .limit(200);
     if (data) setNotifications(data.map(mapRow));
@@ -78,19 +80,20 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
   useEffect(() => {
     loadNotifications();
     const channel = supabase
-      .channel(`inbox-${currentUser.id}`)
+      .channel(`replies-${currentUser.id}`)
       .on('postgres_changes', {
         event: 'INSERT',
         schema: 'public',
         table: 'notifications',
         filter: `user_id=eq.${currentUser.id}`,
       }, (payload: any) => {
-        if (payload.new) setNotifications((prev) => [mapRow(payload.new), ...prev].slice(0, 200));
+        if (payload.new && payload.new.type === 'reply') {
+          setNotifications((prev) => [mapRow(payload.new), ...prev].slice(0, 200));
+        }
       })
       .on('postgres_changes', {
-        // Reflete leituras feitas em outro lugar (sino do topo, outra aba)
-        // enquanto esta página está aberta — sem isso o badge de não lidas e
-        // o filtro "Não lidas" aqui ficavam desatualizados até recarregar.
+        // Reflete leituras feitas em outro lugar (sino, Caixa de entrada, outra
+        // aba) enquanto esta página está aberta.
         event: 'UPDATE',
         schema: 'public',
         table: 'notifications',
@@ -110,29 +113,48 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
     await supabase.from('notifications').update({ read: true }).in('id', ids);
   };
 
-  const handleClickNotification = (n: AppNotification) => {
-    if (!n.read) markAsRead([n.id]);
-    if (n.taskId) onOpenTask(n.taskId);
-  };
+  // Agrupa por thread (mesmo comment_id = comentário raiz da conversa) para
+  // mostrar "fulano e mais 2 responderam" em vez de uma linha por resposta.
+  const threads = useMemo<ReplyThread[]>(() => {
+    const byKey = new Map<string, ReplyThread>();
+    const order: string[] = [];
+    notifications.forEach((n) => {
+      const key = n.commentId || n.id;
+      if (!byKey.has(key)) {
+        byKey.set(key, { key, commentId: n.commentId, taskId: n.taskId, latest: n, items: [], read: true });
+        order.push(key);
+      }
+      const thread = byKey.get(key)!;
+      thread.items.push(n);
+      if (!n.read) thread.read = false;
+    });
+    return order.map((key) => byKey.get(key)!);
+  }, [notifications]);
 
-  const visible = filter === 'unread' ? notifications.filter((n) => !n.read) : notifications;
+  const visibleThreads = filter === 'unread' ? threads.filter((t) => !t.read) : threads;
 
   const groups = useMemo(() => {
     const order = ['Hoje', 'Ontem', 'Esta semana', 'Mais antigas'];
-    const byLabel = new Map<string, AppNotification[]>();
-    visible.forEach((n) => {
-      const label = dateGroupLabel(n.createdAt);
+    const byLabel = new Map<string, ReplyThread[]>();
+    visibleThreads.forEach((t) => {
+      const label = dateGroupLabel(t.latest.createdAt);
       if (!byLabel.has(label)) byLabel.set(label, []);
-      byLabel.get(label)!.push(n);
+      byLabel.get(label)!.push(t);
     });
     return order.filter((label) => byLabel.has(label)).map((label) => ({ label, items: byLabel.get(label)! }));
-  }, [visible]);
+  }, [visibleThreads]);
+
+  const handleClickThread = (t: ReplyThread) => {
+    const unreadIds = t.items.filter((n) => !n.read).map((n) => n.id);
+    if (unreadIds.length > 0) markAsRead(unreadIds);
+    if (t.taskId) onOpenTask(t.taskId);
+  };
 
   return (
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <h1 className="text-xl font-bold text-gray-800">Caixa de entrada</h1>
+          <h1 className="text-xl font-bold text-gray-800">Respostas</h1>
           {unreadCount > 0 && (
             <span className="bg-orange-100 text-orange-600 text-xs font-bold px-2 py-0.5 rounded-full">{unreadCount} não lida{unreadCount === 1 ? '' : 's'}</span>
           )}
@@ -166,9 +188,9 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
         {isLoading && (
           <p className="p-8 text-sm text-gray-400 text-center">Carregando...</p>
         )}
-        {!isLoading && visible.length === 0 && (
+        {!isLoading && visibleThreads.length === 0 && (
           <p className="p-8 text-sm text-gray-400 text-center">
-            {filter === 'unread' ? 'Nenhuma notificação não lida. 🎉' : 'Nenhuma notificação por aqui. 🎉'}
+            {filter === 'unread' ? 'Nenhuma resposta não lida. 🎉' : 'Nenhuma resposta por aqui ainda.'}
           </p>
         )}
         {!isLoading && groups.map((group) => (
@@ -176,27 +198,37 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
             <div className="px-4 py-2 text-[11px] font-bold text-gray-400 uppercase tracking-widest bg-gray-50/70 border-b border-gray-100">
               {group.label}
             </div>
-            {group.items.map((n) => {
-              const actor = users.find((u) => u.id === n.actorId);
+            {group.items.map((t) => {
+              const actor = users.find((u) => u.id === t.latest.actorId);
+              const otherActorNames = [...new Set(t.items.map((n) => n.actorId))]
+                .filter((id) => id && id !== t.latest.actorId)
+                .map((id) => users.find((u) => u.id === id)?.name)
+                .filter(Boolean);
               return (
                 <button
-                  key={n.id}
-                  onClick={() => handleClickNotification(n)}
-                  className={`w-full text-left px-4 py-3 border-b border-gray-100 last:border-b-0 flex gap-3 hover:bg-gray-50 transition-colors ${!n.read ? 'bg-orange-50/50' : ''}`}
+                  key={t.key}
+                  onClick={() => handleClickThread(t)}
+                  className={`w-full text-left px-4 py-3 border-b border-gray-100 last:border-b-0 flex gap-3 hover:bg-gray-50 transition-colors ${!t.read ? 'bg-orange-50/50' : ''}`}
                 >
                   {actor ? (
                     <img src={actor.avatar} className="w-9 h-9 rounded-full shrink-0 mt-0.5" alt="" />
                   ) : (
-                    <span className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5 text-base">
-                      {TYPE_ICONS[n.type] || '🔔'}
-                    </span>
+                    <span className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5 text-base">💬</span>
                   )}
                   <div className="min-w-0 flex-1">
-                    <p className={`text-sm leading-snug ${!n.read ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>{n.title}</p>
-                    {n.body && <p className="text-xs text-gray-400 truncate mt-0.5">{n.body}</p>}
-                    <p className="text-[11px] text-gray-300 mt-1">{relativeTime(n.createdAt)}</p>
+                    <p className={`text-sm leading-snug ${!t.read ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>
+                      {t.latest.title}
+                      {otherActorNames.length > 0 && (
+                        <span className="text-gray-400 font-normal"> e mais {otherActorNames.length}</span>
+                      )}
+                    </p>
+                    {t.latest.body && <p className="text-xs text-gray-400 truncate mt-0.5">{t.latest.body}</p>}
+                    <p className="text-[11px] text-gray-300 mt-1">
+                      {relativeTime(t.latest.createdAt)}
+                      {t.items.length > 1 && ` · ${t.items.length} respostas`}
+                    </p>
                   </div>
-                  {!n.read && <span className="w-2 h-2 rounded-full bg-orange-500 shrink-0 mt-2"></span>}
+                  {!t.read && <span className="w-2 h-2 rounded-full bg-orange-500 shrink-0 mt-2"></span>}
                 </button>
               );
             })}

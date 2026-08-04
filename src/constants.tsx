@@ -171,6 +171,9 @@ export const Icons = {
   Bell: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg>
   ),
+  Reply: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
+    <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>
+  ),
   Columns: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" /><path d="M15 3v18" /></svg>
   ),

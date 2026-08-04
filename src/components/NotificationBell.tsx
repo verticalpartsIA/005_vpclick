@@ -14,6 +14,7 @@ const TYPE_ICONS: Record<string, string> = {
   assignment: '📌',
   comment: '💬',
   automation: '⚡',
+  reply: '↩️',
 };
 
 function relativeTime(date: string) {

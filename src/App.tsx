@@ -19,6 +19,7 @@ import { TableView } from './components/views/TableView';
 import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
 import { InboxView } from './components/views/InboxView';
+import { RepliesView } from './components/views/RepliesView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
@@ -30,7 +31,7 @@ import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
 import { MentionTextarea } from './components/MentionTextarea';
 import { AIPanel } from './components/AIPanel';
-import { MentionText, notifyMentions, notifyAssignment } from './lib/mentions';
+import { MentionText, notifyMentions, notifyAssignment, notifyReply } from './lib/mentions';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
@@ -212,12 +213,12 @@ const THEME_PRESETS: Record<ThemePresetId, { label: string; vars: Record<string,
   },
 };
 
-// ── CommentItem: comentário com edição/exclusão inline ────────────────────
-function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, formatDate }: {
+// ── ReplyItem: resposta de comentário (edição/exclusão inline, sem sub-respostas) ──
+function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete, formatDate }: {
   item: any;
   users: any[];
   teams: any[];
-  isOwn: boolean;
+  currentUserId: string;
   taskId: string;
   onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
   onDelete: (taskId: string, commentId: string) => Promise<void>;
@@ -227,6 +228,7 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
   const [editText, setEditText] = React.useState(item.text);
   const [saving, setSaving] = React.useState(false);
   const author = users.find((u: any) => u.id === item.userId);
+  const isOwn = item.userId === currentUserId;
 
   const handleSave = async () => {
     if (!editText.trim() || editText === item.text) { setEditing(false); return; }
@@ -235,7 +237,7 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
       await onEdit(taskId, item.id, editText.trim());
       setEditing(false);
     } catch (err) {
-      console.error('Erro ao salvar comentário:', err);
+      console.error('Erro ao salvar resposta:', err);
     } finally {
       setSaving(false);
     }
@@ -243,14 +245,14 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
 
   return (
     <div className="relative group/comment">
-      <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
+      <div className="absolute -left-[22px] top-0 w-5 h-5 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
         <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
       </div>
-      <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
-        <div className="flex items-center justify-between mb-2">
+      <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-sm">
+        <div className="flex items-center justify-between mb-1.5">
           <span className="text-xs font-bold text-gray-900">{author?.name}</span>
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-gray-300">{formatDate(item.date)}{item.updatedAt ? ' · editado' : ''}</span>
+            <span className="text-[10px] text-gray-300">{formatDate(item.timestamp)}{item.updatedAt ? ' · editado' : ''}</span>
             {isOwn && !editing && (
               <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
                 <button onClick={() => { setEditText(item.text); setEditing(true); }} className="text-[10px] text-gray-400 hover:text-blue-500 font-semibold px-1.5 py-0.5 rounded hover:bg-blue-50 transition-all">Editar</button>
@@ -265,7 +267,7 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
               value={editText}
               onChange={e => setEditText(e.target.value)}
               className="w-full text-sm p-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white"
-              rows={3}
+              rows={2}
               autoFocus
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === 'Escape') setEditing(false); }}
             />
@@ -280,6 +282,156 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
           </p>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── CommentItem: comentário com edição/exclusão inline + thread de respostas ──
+function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdit, onDelete, onReply, formatDate }: {
+  item: any;
+  replies: any[];
+  users: any[];
+  teams: any[];
+  currentUserId: string;
+  taskId: string;
+  onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
+  onDelete: (taskId: string, commentId: string) => Promise<void>;
+  onReply: (taskId: string, parentCommentId: string, text: string) => Promise<boolean>;
+  formatDate: (d: string) => string;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [editText, setEditText] = React.useState(item.text);
+  const [saving, setSaving] = React.useState(false);
+  const [showReplyBox, setShowReplyBox] = React.useState(false);
+  const [replyText, setReplyText] = React.useState('');
+  const [sendingReply, setSendingReply] = React.useState(false);
+  const [repliesOpen, setRepliesOpen] = React.useState(false);
+  const author = users.find((u: any) => u.id === item.userId);
+  const isOwn = item.userId === currentUserId;
+
+  const handleSave = async () => {
+    if (!editText.trim() || editText === item.text) { setEditing(false); return; }
+    setSaving(true);
+    try {
+      await onEdit(taskId, item.id, editText.trim());
+      setEditing(false);
+    } catch (err) {
+      console.error('Erro ao salvar comentário:', err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSendReply = async () => {
+    if (!replyText.trim()) return;
+    setSendingReply(true);
+    try {
+      const ok = await onReply(taskId, item.id, replyText.trim());
+      if (ok) {
+        setReplyText('');
+        setShowReplyBox(false);
+        setRepliesOpen(true);
+      }
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="relative group/comment">
+        <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
+          <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
+        </div>
+        <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-bold text-gray-900">{author?.name}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-300">{formatDate(item.date)}{item.updatedAt ? ' · editado' : ''}</span>
+              {isOwn && !editing && (
+                <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                  <button onClick={() => { setEditText(item.text); setEditing(true); }} className="text-[10px] text-gray-400 hover:text-blue-500 font-semibold px-1.5 py-0.5 rounded hover:bg-blue-50 transition-all">Editar</button>
+                  <button onClick={() => onDelete(taskId, item.id)} className="text-[10px] text-gray-400 hover:text-red-500 font-semibold px-1.5 py-0.5 rounded hover:bg-red-50 transition-all">Excluir</button>
+                </div>
+              )}
+            </div>
+          </div>
+          {editing ? (
+            <div className="space-y-2">
+              <textarea
+                value={editText}
+                onChange={e => setEditText(e.target.value)}
+                className="w-full text-sm p-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white"
+                rows={3}
+                autoFocus
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === 'Escape') setEditing(false); }}
+              />
+              <div className="flex gap-2 justify-end">
+                <button onClick={() => setEditing(false)} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
+                <button onClick={handleSave} disabled={saving || !editText.trim()} className="text-xs bg-orange-500 text-white font-bold px-3 py-1 rounded-lg hover:brightness-110 disabled:opacity-50">{saving ? '...' : 'Salvar'}</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                <MentionText text={item.text} users={users || []} teams={teams} />
+              </p>
+              <div className="flex items-center gap-3 mt-2">
+                <button
+                  onClick={() => setShowReplyBox(v => !v)}
+                  className="text-[11px] font-semibold text-gray-400 hover:text-orange-500 flex items-center gap-1 transition-colors"
+                >
+                  <Icons.Reply className="w-3 h-3" /> Responder
+                </button>
+                {replies.length > 0 && (
+                  <button
+                    onClick={() => setRepliesOpen(v => !v)}
+                    className="text-[11px] font-semibold text-blue-500 hover:underline"
+                  >
+                    {repliesOpen ? 'Ocultar' : 'Ver'} {replies.length} resposta{replies.length === 1 ? '' : 's'}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {showReplyBox && (
+        <div className="ml-8 mt-2 bg-gray-50 rounded-xl p-3 border border-gray-100">
+          <MentionTextarea
+            placeholder="Escreva uma resposta... use @ para mencionar"
+            value={replyText}
+            onChange={setReplyText}
+            onSubmit={handleSendReply}
+            users={users || []}
+            teams={teams}
+            className="w-full bg-transparent border-none focus:ring-0 text-sm p-0 resize-none min-h-[40px]"
+          />
+          <div className="flex justify-end gap-2 mt-2">
+            <button onClick={() => { setShowReplyBox(false); setReplyText(''); }} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
+            <button onClick={handleSendReply} disabled={sendingReply || !replyText.trim()} className="text-xs bg-orange-500 text-white font-bold px-3 py-1 rounded-lg hover:brightness-110 disabled:opacity-50">{sendingReply ? '...' : 'Responder'}</button>
+          </div>
+        </div>
+      )}
+
+      {repliesOpen && replies.length > 0 && (
+        <div className="ml-8 mt-2 space-y-2 border-l-2 border-gray-100 pl-4">
+          {replies.map((r: any) => (
+            <ReplyItem
+              key={r.id}
+              item={r}
+              users={users}
+              teams={teams}
+              currentUserId={currentUserId}
+              taskId={taskId}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              formatDate={formatDate}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -528,14 +680,15 @@ export default function App() {
     toast.success('Anexo excluído.');
   }, []);
 
-  const saveTaskComment = useCallback(async (taskId: string, text: string) => {
+  const saveTaskComment = useCallback(async (taskId: string, text: string, parentCommentId?: string) => {
     if (!currentUser) return false;
     const { data, error } = await supabase
       .from('task_comments')
       .insert({
         task_id: taskId,
         user_id: currentUser.id,
-        text: text
+        text: text,
+        parent_comment_id: parentCommentId || null,
       })
       .select()
       .single();
@@ -549,7 +702,8 @@ export default function App() {
               id: data.id,
               userId: data.user_id,
               text: data.text,
-              timestamp: data.created_at
+              timestamp: data.created_at,
+              parentCommentId: data.parent_comment_id || undefined,
             }]
           };
         }
@@ -574,14 +728,17 @@ export default function App() {
   }, []);
 
   const deleteTaskComment = useCallback(async (taskId: string, commentId: string) => {
+    // Exclui o comentário e, junto, as respostas da thread (soft delete não
+    // aciona o ON DELETE CASCADE do banco — sem isso as respostas ficariam
+    // órfãs: continuariam na tabela mas sem comentário raiz pra aparecer).
     const { error } = await supabase
       .from('task_comments')
       .update({ deleted_at: new Date().toISOString() })
-      .eq('id', commentId);
+      .or(`id.eq.${commentId},parent_comment_id.eq.${commentId}`);
     if (error) { toast.error('Erro ao excluir comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
-      comments: (t.comments || []).filter(c => c.id !== commentId),
+      comments: (t.comments || []).filter(c => c.id !== commentId && c.parentCommentId !== commentId),
     }));
     toast.success('Comentário excluído.');
   }, []);
@@ -912,7 +1069,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -1329,6 +1486,7 @@ export default function App() {
           text: c.text,
           timestamp: c.created_at,
           updatedAt: c.updated_at || undefined,
+          parentCommentId: c.parent_comment_id || undefined,
         }));
 
         const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
@@ -3509,6 +3667,13 @@ export default function App() {
                 onOpenTask={setSelectedTaskId}
               />
             )}
+            {activeView === 'Replies' && (
+              <RepliesView
+                currentUser={currentUser}
+                users={adminUsers}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Table' && (
               <TableView
                 tasks={filteredTasks}
@@ -4778,6 +4943,16 @@ function Sidebar({
                     <div className="w-3 h-3 shrink-0" />
                     <Icons.Bell />
                     <span className="flex-1 truncate">Caixa de entrada</span>
+                  </div>
+
+                  {/* Respostas */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'Replies' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Respostas'); onViewChange('Replies'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.Reply />
+                    <span className="flex-1 truncate">Respostas</span>
                   </div>
 
                   {/* Minhas Tarefas (expandível) */}
@@ -7660,7 +7835,9 @@ function TaskDetailModal(props: any) {
 
   const unifiedTimeline = useMemo(() => {
     const all = [
-      ...(task.comments || []).map((c: any) => ({ ...c, unifiedType: 'COMMENT', date: c.timestamp })),
+      // Respostas (task.comments com parentCommentId) não entram na timeline
+      // principal: aparecem aninhadas sob o comentário raiz (ver CommentItem).
+      ...(task.comments || []).filter((c: any) => !c.parentCommentId).map((c: any) => ({ ...c, unifiedType: 'COMMENT', date: c.timestamp })),
       ...(task.activities || []).map((a: any) => ({ ...a, unifiedType: 'ACTIVITY', date: a.createdAt || a.date })),
       ...(task.extensionHistory || []).map((e: any) => ({ ...e, unifiedType: 'EXTENSION', date: e.timestamp }))
     ];
@@ -7934,6 +8111,35 @@ function TaskDetailModal(props: any) {
         });
       }
     }
+  };
+
+  const handleAddReply = async (taskIdArg: string, parentCommentId: string, text: string) => {
+    if (!saveComment) return false;
+    const success = await saveComment(taskIdArg, text, parentCommentId);
+    if (success) {
+      // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
+      notifyMentions({
+        text,
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        actor: currentUser,
+        users: users || [],
+        teams,
+      });
+      // Notifica quem já participou da thread (autor do comentário raiz + demais respostas)
+      const threadParticipantIds = (task.comments || [])
+        .filter((c: any) => c.id === parentCommentId || c.parentCommentId === parentCommentId)
+        .map((c: any) => c.userId);
+      notifyReply({
+        text,
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        parentCommentId,
+        threadParticipantIds,
+        actor: currentUser,
+      });
+    }
+    return success;
   };
 
   const handleAddLink = async () => {
@@ -8638,17 +8844,21 @@ function TaskDetailModal(props: any) {
                   }
 
                   if (item.unifiedType === 'COMMENT') {
-                    const isOwn = item.userId === currentUser.id;
+                    const replies = (task.comments || [])
+                      .filter((c: any) => c.parentCommentId === item.id)
+                      .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
                     return (
                       <CommentItem
                         key={item.id}
                         item={item}
+                        replies={replies}
                         users={users}
                         teams={teams}
-                        isOwn={isOwn}
+                        currentUserId={currentUser.id}
                         taskId={task.id}
                         onEdit={editComment}
                         onDelete={deleteComment}
+                        onReply={handleAddReply}
                         formatDate={formatDate}
                       />
                     );
