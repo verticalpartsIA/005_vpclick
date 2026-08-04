@@ -230,9 +230,14 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
   const handleSave = async () => {
     if (!editText.trim() || editText === item.text) { setEditing(false); return; }
     setSaving(true);
-    await onEdit(taskId, item.id, editText.trim());
-    setSaving(false);
-    setEditing(false);
+    try {
+      await onEdit(taskId, item.id, editText.trim());
+      setEditing(false);
+    } catch (err) {
+      console.error('Erro ao salvar comentário:', err);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -1195,6 +1200,20 @@ export default function App() {
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [session?.user?.id]);
+
+  // Realtime: mantém adminUsers (usado no autocomplete de menção "@") atualizado
+  // quando um perfil é criado/ativado após a sessão já estar aberta — sem isso,
+  // usuários provisionados depois do login só apareciam nas menções após reload.
+  useEffect(() => {
+    if (!session) return;
+    const channel = supabase
+      .channel('profiles-mentions')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
+        loadAllUsers();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [session, loadAllUsers]);
 
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -3493,6 +3512,7 @@ export default function App() {
 
         {selectedTask && (
           <TaskDetailModal
+            key={selectedTask.id}
             task={selectedTask}
             users={adminUsers}
             tasks={tasks}
