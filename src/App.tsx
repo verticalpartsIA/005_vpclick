@@ -4786,10 +4786,10 @@ function Sidebar({
                 className="w-full flex items-center gap-1 px-3 py-2 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors group"
                 onClick={() => setSecFavoritosOpen(v => !v)}
               >
-                <svg className={`w-3 h-3 transition-transform shrink-0 ${secFavoritosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                <svg className={`w-3 h-3 transition-transform shrink-0 ${secFavoritosOpen || isSidebarSearching ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
                 Favoritos
               </button>
-              {secFavoritosOpen && (
+              {(secFavoritosOpen || isSidebarSearching) && (
                 <div className="pb-1">
                   {favorites && favorites.length === 0 && !isSidebarSearching && (
                     <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5 px-4 py-2">
@@ -4838,7 +4838,7 @@ function Sidebar({
                   className="flex items-center gap-1 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors flex-1 text-left"
                   onClick={() => setSecEspacosOpen(v => !v)}
                 >
-                  <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                  <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen || isSidebarSearching ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
                   Espaços
                 </button>
                 <button
@@ -4850,7 +4850,7 @@ function Sidebar({
                 </button>
               </div>
 
-              {secEspacosOpen && (
+              {(secEspacosOpen || isSidebarSearching) && (
                 <div className="pb-2">
                   {isSidebarSearching && filteredSpaces.length === 0 && (
                     <p className="text-[11px] text-sidebar-foreground/40 px-4 py-2">Nenhum espaço, pasta ou lista encontrado para "{sidebarSearchQuery}"</p>
