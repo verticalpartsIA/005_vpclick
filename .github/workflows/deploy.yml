@@ -63,19 +63,27 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p 65002 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          REMOTE_DIR="/home/$SSH_USER/domains/vpclick.vpsistema.com/public_html"
+          REMOTE_BASE="/home/$SSH_USER/domains/vpclick.vpsistema.com"
+          LIVE_DIR="$REMOTE_BASE/public_html"
+          STAGING_DIR="$REMOTE_BASE/public_html_staging"
+          PREV_DIR="$REMOTE_BASE/public_html_prev"
 
-          # O scp só soma arquivos — nunca apagou os de deploys anteriores.
-          # Bundles antigos (com bugs já corrigidos) ficavam acumulados e
-          # continuavam sendo servidos pra quem tinha o index.html antigo em
-          # cache, de forma indefinida. Limpa o conteúdo do diretório remoto
-          # antes de enviar o build atual, para que só o build corrente exista.
+          # Versão anterior apagava o site no ar (find -delete) ANTES de enviar o
+          # build novo: se o scp falhasse ou fosse interrompido no meio (queda de
+          # rede, cota cheia), o site ficava vazio até o próximo deploy dar certo —
+          # o "reparo" virava um jeito novo de tirar o site do ar (revisão do
+          # Codex na PR #50). Agora o build novo vai pra um diretório de staging
+          # que não afeta o site no ar, e só é trocado depois de enviado por
+          # inteiro. O diretório que estava no ar vira "prev" em vez de ser
+          # apagado na hora: abas já abertas que ainda vão carregar um chunk lazy
+          # com hash do build anterior continuam funcionando por mais um ciclo de
+          # deploy inteiro, em vez de quebrarem no segundo em que o deploy termina.
           if ! ssh -i deploy_key -p 65002 \
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=~/.ssh/known_hosts \
             "$SSH_USER@$SSH_HOST" \
-            "find '$REMOTE_DIR' -mindepth 1 -delete"; then
-            echo '⚠️  Não foi possível limpar o diretório remoto antes do upload (seguindo mesmo assim).'
+            "rm -rf '$STAGING_DIR' '$PREV_DIR' && mkdir -p '$STAGING_DIR'"; then
+            echo '⚠️  Não foi possível preparar o diretório de staging (seguindo mesmo assim).'
           fi
 
           # "dist/*" é expandido pelo Bash ANTES do scp rodar, e por padrão o
@@ -89,12 +97,29 @@ jobs:
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=~/.ssh/known_hosts \
             -r dist/. \
-            "$SSH_USER@$SSH_HOST:$REMOTE_DIR/"; then
+            "$SSH_USER@$SSH_HOST:$STAGING_DIR/"; then
             echo ''
-            echo '❌ DEPLOY FALHOU: o servidor recusou a autenticação SSH.'
+            echo '❌ DEPLOY FALHOU: upload do build pro staging falhou (o site no ar continua intacto).'
             echo 'CORREÇÃO: copie a chave pública exibida acima (linha começando com ssh-)'
             echo 'e cadastre no painel da Hostinger: hPanel → Avançado → Acesso SSH → Adicionar chave SSH.'
             echo 'Depois, rode este workflow de novo (aba Actions → Deploy → Run workflow).'
+            rm -f deploy_key
+            exit 1
+          fi
+
+          # Troca atômica: o site no ar vira "prev", o staging (já enviado por
+          # inteiro) vira o site no ar. Cada `mv` é uma renomeação no mesmo
+          # filesystem — não copia dado, então a janela em que o domínio fica
+          # sem pasta é da ordem de milissegundos, não dos vários segundos que
+          # o scp leva.
+          if ! ssh -i deploy_key -p 65002 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=~/.ssh/known_hosts \
+            "$SSH_USER@$SSH_HOST" \
+            "if [ -d '$LIVE_DIR' ]; then mv '$LIVE_DIR' '$PREV_DIR'; fi && mv '$STAGING_DIR' '$LIVE_DIR'"; then
+            echo ''
+            echo '❌ DEPLOY FALHOU: troca do diretório no ar falhou a meio caminho.'
+            echo "Verifique manualmente via SSH: $LIVE_DIR e $PREV_DIR podem estar trocados ou ausentes."
             rm -f deploy_key
             exit 1
           fi
