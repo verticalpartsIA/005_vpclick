@@ -70,6 +70,17 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
       }, (payload: any) => {
         if (payload.new) setNotifications((prev) => [mapRow(payload.new), ...prev].slice(0, 30));
       })
+      .on('postgres_changes', {
+        // Reflete leituras feitas em outro lugar (ex: página da Caixa de
+        // Entrada) — sem isso o badge de não lidas do sino ficava desatualizado
+        // até a próxima notificação nova chegar.
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'notifications',
+        filter: `user_id=eq.${currentUser.id}`,
+      }, (payload: any) => {
+        if (payload.new) setNotifications((prev) => prev.map((n) => (n.id === payload.new.id ? mapRow(payload.new) : n)));
+      })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [currentUser.id, loadNotifications]);
