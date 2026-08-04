@@ -1422,7 +1422,12 @@ export default function App() {
       while (true) {
         const { data: page, error: pageErr } = await supabase
           .from('tasks')
-          .select('*')
+          // Só as colunas que o Dashboard realmente usa (contadores, radar de
+          // saúde, performance por usuário). `select('*')` baixava `description`
+          // (texto rico, o maior peso por linha) e outros campos não exibidos
+          // aqui pras 7000+ tarefas do workspace inteiro — payload gigante e
+          // caminho crítico de ~16s no Lighthouse, sem nenhum ganho visível.
+          .select('id, title, status, priority, main_assignee_id, start_date, due_date, extension_count, list_id, created_at')
           .range(from, from + pageSize - 1);
         if (pageErr || !page || page.length === 0) break;
         allData = [...allData, ...page];

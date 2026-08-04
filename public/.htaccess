@@ -23,6 +23,19 @@
   <FilesMatch "\.(js|css|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|mp4|ico)$">
     Header set Cache-Control "public, max-age=31536000, immutable"
   </FilesMatch>
+
+  # Cabeçalhos de segurança básicos (auditoria Lighthouse). CSP fica de fora
+  # por ora: exige mapear com cuidado toda origem externa usada pelo app
+  # (Supabase, avatares, fontes, etc.) e um jeito de validar em produção antes
+  # de publicar — errar a CSP quebra o app inteiro sem aviso. Sem risco disso
+  # aqui: nenhum dos headers abaixo depende de allowlist de origem, e o app
+  # não usa iframe/window.opener (entrada é sempre por redirect do SSO, não
+  # embed), então SAMEORIGIN/COOP não interferem no login.
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Cross-Origin-Opener-Policy "same-origin"
 </IfModule>
 
 # Reforço específico pro LiteSpeed Cache (LSCache) da Hostinger: o
