@@ -1238,16 +1238,21 @@ export default function App() {
 
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
 
+  // Guarda contra corrida: se o escopo mudar (ou o realtime disparar outro
+  // reload) enquanto uma chamada de loadTasks() ainda está em andamento, uma
+  // resposta antiga que chegue depois de uma mais nova sobrescreveria `tasks`
+  // com os dados do escopo errado — a lista parece ter tarefas e "fecha"
+  // sozinha (some) pouco depois, até um F5 disparar uma única chamada limpa.
+  // Cada chamada carimba um id crescente; só grava quem tiver um id mais novo
+  // que o da última chamada que efetivamente gravou (loadTasksCommittedIdRef)
+  // — não simplesmente "quem for a mais recente em voo", pra uma chamada mais
+  // nova que falhe (erro de rede) não invalidar/descartar o resultado bom de
+  // uma mais antiga que ainda está terminando.
   const loadTasksRequestIdRef = useRef(0);
+  const loadTasksCommittedIdRef = useRef(0);
   const loadTasks = useCallback(async () => {
     if (!session) return;
 
-    // Guarda contra corrida: se o escopo mudar (ou o realtime disparar outro
-    // reload) enquanto esta chamada ainda está em andamento, uma resposta
-    // antiga que chegue depois de uma mais nova sobrescreveria `tasks` com os
-    // dados do escopo errado — a lista parece ter tarefas e "fecha" sozinha
-    // (some) pouco depois, até um F5 disparar uma única chamada limpa.
-    // Cada chamada carimba um id; só quem for o mais recente pode gravar.
     const requestId = ++loadTasksRequestIdRef.current;
 
     let query = supabase.from('tasks').select('*');
@@ -1266,7 +1271,7 @@ export default function App() {
     }
 
     const { data, error } = await query;
-    if (requestId !== loadTasksRequestIdRef.current) return; // uma chamada mais nova já assumiu
+    if (requestId < loadTasksCommittedIdRef.current) return; // resultado mais novo já foi gravado
 
     if (data && !error) {
       const taskIds = data.map((d: any) => d.id);
@@ -1304,8 +1309,9 @@ export default function App() {
         fetchInChunks((ids) => supabase.from('task_activities').select('*').in('task_id', ids), 'task_activities'),
         fetchInChunks((ids) => supabase.from('task_watchers').select('task_id, user_id').in('task_id', ids), 'task_watchers'),
       ]);
-      if (requestId !== loadTasksRequestIdRef.current) return; // idem: ficou obsoleta durante os lotes
+      if (requestId < loadTasksCommittedIdRef.current) return; // idem: um resultado mais novo já foi gravado durante os lotes
 
+      loadTasksCommittedIdRef.current = requestId;
       setTasks(data.map((d: any) => {
         const tAttachments = (attData || []).filter((a: any) => a.task_id === d.id).map((a: any) => ({
           id: a.id,
