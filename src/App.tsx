@@ -3,7 +3,7 @@ import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIco
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
-  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team
+  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -18,6 +18,7 @@ import bootLogoVideo from './assets/logo-limpo-video.mp4';
 import { TableView } from './components/views/TableView';
 import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
+import { InboxView } from './components/views/InboxView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, isTaskBlocked } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
@@ -911,7 +912,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -3496,9 +3497,16 @@ export default function App() {
               />
             )}
             {activeView === 'Gantt' && (
-              <GanttView 
-                tasks={filteredTasks} 
-                onTaskClick={setSelectedTaskId} 
+              <GanttView
+                tasks={filteredTasks}
+                onTaskClick={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'Inbox' && (
+              <InboxView
+                currentUser={currentUser}
+                users={adminUsers}
+                onOpenTask={setSelectedTaskId}
               />
             )}
             {activeView === 'Table' && (
@@ -4762,6 +4770,16 @@ function Sidebar({
               </button>
               {secInicioOpen && (
                 <div className="pb-1">
+                  {/* Caixa de entrada */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'Inbox' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Caixa de entrada'); onViewChange('Inbox'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.Bell />
+                    <span className="flex-1 truncate">Caixa de entrada</span>
+                  </div>
+
                   {/* Minhas Tarefas (expandível) */}
                   <div>
                     <div
