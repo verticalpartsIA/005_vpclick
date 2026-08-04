@@ -19,6 +19,10 @@ interface Suggestion {
   color?: string;
 }
 
+// Conta de serviço do rastro de atividade cross-sistema (ver src/lib/trackActivity.ts):
+// não é uma pessoa de verdade, então não deve aparecer no autocomplete de menção "@".
+const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
+
 /**
  * Textarea de comentário com autocomplete de menções estilo ClickUp:
  * digite "@" seguido do nome para mencionar um usuário ou uma Equipe.
@@ -36,7 +40,7 @@ export function MentionTextarea({ value, onChange, onSubmit, users, teams, place
       .filter((t) => t.name.toLowerCase().includes(q))
       .map((t) => ({ id: t.id, name: t.name, kind: 'team', color: t.color }));
     const userItems: Suggestion[] = users
-      .filter((u) => u.name.toLowerCase().includes(q))
+      .filter((u) => u.email !== AI_AGENT_EMAIL && u.name.toLowerCase().includes(q))
       .map((u) => ({ id: u.id, name: u.name, kind: 'user', avatar: u.avatar }));
     return [...teamItems, ...userItems].slice(0, 8);
   }, [mentionQuery, users, teams]);

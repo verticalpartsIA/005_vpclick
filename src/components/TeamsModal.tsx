@@ -14,6 +14,11 @@ interface TeamsModalProps {
 
 const TEAM_COLORS = ['#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4', '#f97316'];
 
+// Conta de serviço do rastro de atividade cross-sistema (ver src/lib/trackActivity.ts):
+// não deve ser oferecida como opção nova de membro de equipe, mas se por algum
+// motivo já for membro de uma equipe, continua aparecendo nela pra poder ser removida.
+const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
+
 /**
  * Gestão de Equipes (grupos de usuários, estilo ClickUp Teams).
  * Criação/edição restrita a ADMIN e GESTOR; demais usuários visualizam.
@@ -200,7 +205,7 @@ export function TeamsModal({ isOpen, onClose, teams, setTeams, users, currentUse
                       />
                     )}
                     <div className="max-h-52 overflow-y-auto custom-scrollbar space-y-0.5">
-                      {(canManage ? filteredUsers : members).map((u) => {
+                      {(canManage ? filteredUsers.filter((u) => u.email !== AI_AGENT_EMAIL || team.memberIds.includes(u.id)) : members).map((u) => {
                         const isMember = team.memberIds.includes(u.id);
                         return (
                           <button
