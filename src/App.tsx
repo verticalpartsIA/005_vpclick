@@ -292,6 +292,14 @@ const FALLBACK_USER: User = {
   role: UserRole.COLABORADOR,
 };
 
+// Conta de serviço usada para o rastro de atividade cross-sistema (ver
+// src/lib/trackActivity.ts) — tem perfil em `profiles` (por isso aparece em
+// adminUsers), mas não é uma pessoa de verdade: não deve ser oferecida como
+// opção nova de responsável de tarefa, menção ou membro de equipe. Continua
+// resolvível normalmente (avatar, nome) onde já estiver referenciada, e
+// continua visível/gerenciável no Painel Admin.
+const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User>(FALLBACK_USER);
   const [workspace] = useState<Workspace>(INITIAL_WORKSPACE);
@@ -946,17 +954,6 @@ export default function App() {
   // Admin - carregado do Supabase
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [userAccess, setUserAccess] = useState<Record<string, { spaceIds: string[]; folderIds: string[] }>>({});
-
-  // Conta de serviço usada para o rastro de atividade cross-sistema (ver
-  // src/lib/trackActivity.ts) — tem perfil em `profiles` (por isso aparece em
-  // adminUsers), mas não é uma pessoa de verdade: não deve ser selecionável
-  // como responsável de tarefa, menção ou membro de equipe. Continua visível
-  // em adminUsers (cru) só no Painel Admin, pra quem precisar geri-la.
-  const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
-  const assignableUsers = useMemo(
-    () => adminUsers.filter(u => u.email !== AI_AGENT_EMAIL),
-    [adminUsers]
-  );
 
   // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
   const [dashboardTasks, setDashboardTasks] = useState<Task[]>([]);
@@ -3219,7 +3216,7 @@ export default function App() {
               )}
               <NotificationBell
                 currentUser={currentUser}
-                users={assignableUsers}
+                users={adminUsers}
                 onOpenTask={(taskId) => setSelectedTaskId(taskId)}
               />
 
@@ -3412,7 +3409,7 @@ export default function App() {
                   }
                 }}
                 currentUser={currentUser}
-                users={assignableUsers}
+                users={adminUsers}
                 statusGroups={statusGroups}
                 onBulkStatusChange={handleBulkStatusChange}
                 onBulkPriorityChange={handleBulkPriorityChange}
@@ -3432,7 +3429,7 @@ export default function App() {
                   setPrefilledTaskData(prefill || null);
                   setIsTaskModalOpen(true);
                 }}
-                users={assignableUsers}
+                users={adminUsers}
                 statusGroups={statusGroups}
                 lists={lists}
                 activeListId={activeListId}
@@ -3456,7 +3453,7 @@ export default function App() {
                 // Fallback para scopeTasks enquanto carrega pela primeira vez
                 <DashboardView
                   tasks={dashboardTasks.length > 0 ? dashboardTasks : scopeTasks}
-                  users={assignableUsers}
+                  users={adminUsers}
                   statusGroups={statusGroups}
                   activeListId={activeListId}
                   lists={lists}
@@ -3468,7 +3465,7 @@ export default function App() {
             {activeView === 'Calendar' && (
               <CalendarView
                 tasks={filteredTasks}
-                users={assignableUsers}
+                users={adminUsers}
                 onTaskClick={setSelectedTaskId} 
                 onAddTaskAtDate={(date) => {
                   setPrefilledTaskData({ dueDate: formatLocalDate(date) });
@@ -3487,7 +3484,7 @@ export default function App() {
                 tasks={filteredTasks}
                 customFields={customFields}
                 fieldValues={fieldValues}
-                users={assignableUsers}
+                users={adminUsers}
                 onTaskClick={setSelectedTaskId}
                 onUpdateTask={handleUpdateTask}
                 onUpdateFieldValue={handleUpdateFieldValue}
@@ -3525,7 +3522,7 @@ export default function App() {
           <TaskDetailModal
             key={selectedTask.id}
             task={selectedTask}
-            users={assignableUsers}
+            users={adminUsers}
             tasks={tasks}
             onClose={() => {
               setSelectedTaskId(null);
@@ -3570,7 +3567,7 @@ export default function App() {
           onClose={() => setIsTeamsModalOpen(false)}
           teams={teams}
           setTeams={setTeams}
-          users={assignableUsers}
+          users={adminUsers}
           currentUser={currentUser}
         />
 
@@ -3582,7 +3579,7 @@ export default function App() {
               setPrefilledTaskData(null);
             }}
             onCreate={handleCreateTask}
-            users={assignableUsers}
+            users={adminUsers}
             spaces={filteredSpaces}
             additionalTasks={tasks}
             folders={filteredFolders}
@@ -7437,7 +7434,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                       value={mainAssigneeId}
                       onChange={(e) => setMainAssigneeId(e.target.value)}
                     >
-                      {[...users].sort((a: User, b: User) => a.name.localeCompare(b.name, 'pt-BR')).map((u: User) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                      {[...users].filter((u: User) => u.email !== AI_AGENT_EMAIL || u.id === mainAssigneeId).sort((a: User, b: User) => a.name.localeCompare(b.name, 'pt-BR')).map((u: User) => <option key={u.id} value={u.id}>{u.name}</option>)}
                     </select>
                   </div>
                   <div>
@@ -7452,6 +7449,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                     <div className="max-h-32 overflow-y-auto border rounded p-2 bg-gray-50 space-y-1 custom-scrollbar">
                       {users
                         .filter((u: User) => u.id !== mainAssigneeId)
+                        .filter((u: User) => u.email !== AI_AGENT_EMAIL || secondaryAssigneeIds.includes(u.id))
                         .filter((u: User) => u.name.toLowerCase().includes(assigneeSearch.toLowerCase()))
                         .sort((a: User, b: User) => a.name.localeCompare(b.name, 'pt-BR'))
                         .map((u: User) => (
@@ -8108,7 +8106,7 @@ function TaskDetailModal(props: any) {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="w-64 max-h-80 overflow-y-auto">
                         <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Principal</div>
-                        {[...users].sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
+                        {[...users].filter((u: any) => u.email !== AI_AGENT_EMAIL || u.id === task.mainAssigneeId).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleSetMainAssignee(u.id)} className="flex items-center gap-3 py-2">
                             <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
                             <span className={`text-sm ${task.mainAssigneeId === u.id ? 'font-bold text-gray-900' : 'text-gray-600'}`}>{u.name}</span>
@@ -8117,7 +8115,7 @@ function TaskDetailModal(props: any) {
                         ))}
                         <DropdownMenuSeparator />
                         <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Adicionais</div>
-                        {users.filter((u: any) => u.id !== task.mainAssigneeId).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
+                        {users.filter((u: any) => u.id !== task.mainAssigneeId && (u.email !== AI_AGENT_EMAIL || (task.secondaryAssigneeIds || []).includes(u.id))).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleToggleSecondaryAssignee(u.id)} className="flex items-center gap-3 py-2">
                             <div className="relative">
                               <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
