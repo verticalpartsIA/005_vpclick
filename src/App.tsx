@@ -8126,10 +8126,16 @@ function TaskDetailModal(props: any) {
         users: users || [],
         teams,
       });
-      // Notifica quem já participou da thread (autor do comentário raiz + demais respostas)
-      const threadParticipantIds = (task.comments || [])
-        .filter((c: any) => c.id === parentCommentId || c.parentCommentId === parentCommentId)
-        .map((c: any) => c.userId);
+      // Notifica quem já participou da thread (autor do comentário raiz + demais respostas).
+      // Busca no banco em vez de usar o `task.comments` local: se duas pessoas
+      // responderem quase ao mesmo tempo, o estado local pode não ter a resposta
+      // alheia ainda, e essa pessoa ficaria de fora da notificação.
+      const { data: threadRows } = await supabase
+        .from('task_comments')
+        .select('user_id')
+        .or(`id.eq.${parentCommentId},parent_comment_id.eq.${parentCommentId}`)
+        .is('deleted_at', null);
+      const threadParticipantIds = (threadRows || []).map((r: any) => r.user_id);
       notifyReply({
         text,
         taskId: taskIdArg,
