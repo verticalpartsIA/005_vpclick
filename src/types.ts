@@ -132,6 +132,8 @@ export interface Meeting {
   id: string;
   title: string;
   meetingDate: string;
+  endDate?: string;
+  roomId?: string;
   participantIds: string[];
   notes: string;
   summary?: string;
@@ -139,6 +141,15 @@ export interface Meeting {
   createdAt: string;
   updatedAt?: string;
   actionItems: MeetingActionItem[];
+}
+
+// ── Salas de reunião (reserva com detecção de conflito de horário) ───────
+export interface MeetingRoom {
+  id: string;
+  name: string;
+  isActive: boolean;
+  createdBy?: string;
+  createdAt: string;
 }
 
 export interface Attachment {
