@@ -3559,6 +3559,7 @@ export default function App() {
           activeListId={activeListId}
           onSetActiveListId={setActiveListId}
           onEnsurePersonalList={ensurePersonalList}
+          onOpenAdminPanel={openAdminPanel}
           onNavigate={handleNavigate}
           onViewChange={setActiveView}
           isCollapsed={isSidebarCollapsed}
@@ -5106,7 +5107,7 @@ function SidebarDocItem({ doc, allDocs, depth, activeDocId, folder, onSetActiveD
 
 function Sidebar({
   themePreset,
-  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onEnsurePersonalList, onNavigate, onViewChange, isCollapsed, onToggle,
+  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onEnsurePersonalList, onOpenAdminPanel, onNavigate, onViewChange, isCollapsed, onToggle,
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder, onBulkDeleteFolders,
   onDeleteList, onRenameList, onDuplicateList,
@@ -5123,6 +5124,42 @@ function Sidebar({
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
   const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
+
+  // "Mais" (item 9 do Início, estilo ClickUp): escolher um item no dropdown
+  // "fixa" ele na sidebar, substituindo o que estava fixado antes — só o
+  // mecanismo de fixar, decidido com o usuário (os destinos reais do
+  // ClickUp ali são Chat/Posts/Canais, que o VP Click não tem).
+  const [pinnedMoreKey, setPinnedMoreKey] = useState<string | null>(() => localStorage.getItem('vp_pinned_more_item'));
+  const moreCandidates = [
+    {
+      // Escopo global com um nome diferente de 'Minhas Tarefas' — o único
+      // filtro de "só as minhas" em filteredTasks olha esse nome exato, então
+      // isso mostra de verdade todas as tarefas permitidas (sem escopo de
+      // pasta/espaço), ao contrário de picar um space is_system arbitrário
+      // (existem 4 marcados assim — Requisições/Propostas/Visitas/Pós-Venda —
+      // sem ordem garantida, o que apontaria pro space errado às vezes).
+      key: 'all-tasks',
+      label: 'Todas as tarefas',
+      icon: <Icons.List className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Todas as tarefas'); onViewChange('List'); },
+      isActive: activeView === 'List' && activeScope.type === 'global' && activeScope.name === 'Todas as tarefas',
+    },
+    (userRole === 'ADMIN' || userRole === 'GESTOR') && {
+      key: 'admin',
+      label: 'Painel do Administrador',
+      icon: <Icons.Shield className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => onOpenAdminPanel(),
+      isActive: activeView === 'Admin',
+    },
+  ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; onSelect: () => void; isActive: boolean }[];
+  const pinnedMoreItem = moreCandidates.find((c) => c.key === pinnedMoreKey);
+
+  const selectMoreItem = (key: string) => {
+    setPinnedMoreKey(key);
+    localStorage.setItem('vp_pinned_more_item', key);
+    moreCandidates.find((c) => c.key === key)?.onSelect();
+  };
+
   const [secInicioOpen, setSecInicioOpen] = useState(true);
   const [secMinhasTarefasOpen, setSecMinhasTarefasOpen] = useState(false);
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
@@ -5419,6 +5456,40 @@ function Sidebar({
                       </div>
                     )}
                   </div>
+
+                  {/* Item fixado via "Mais" */}
+                  {pinnedMoreItem && (
+                    <div
+                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${pinnedMoreItem.isActive ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                      onClick={pinnedMoreItem.onSelect}
+                    >
+                      <div className="w-3 h-3 shrink-0" />
+                      {pinnedMoreItem.icon}
+                      <span className="flex-1 truncate">{pinnedMoreItem.label}</span>
+                    </div>
+                  )}
+
+                  {/* "Mais": escolher um item aqui fixa ele acima, substituindo o anterior */}
+                  {moreCandidates.length > 0 && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <div className="flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 text-sidebar-foreground/60 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors text-sm">
+                          <div className="w-3 h-3 shrink-0" />
+                          <span className="text-sm leading-none tracking-wider">•••</span>
+                          <span className="flex-1 truncate">Mais</span>
+                        </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-56">
+                        {moreCandidates.map((c) => (
+                          <DropdownMenuItem key={c.key} onClick={() => selectMoreItem(c.key)} className="flex items-center gap-2 text-sm">
+                            {c.icon}
+                            {c.label}
+                            {pinnedMoreKey === c.key && <Icons.Check className="w-3.5 h-3.5 ml-auto text-orange-500" />}
+                          </DropdownMenuItem>
+                        ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
 
                   {/* Ir para Dashboard */}
                   <div
