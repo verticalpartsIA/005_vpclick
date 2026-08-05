@@ -21,6 +21,7 @@ import { GanttView } from './components/views/GanttView';
 import { InboxView } from './components/views/InboxView';
 import { RepliesView } from './components/views/RepliesView';
 import { AssignedCommentsView } from './components/views/AssignedCommentsView';
+import { MeetingsView } from './components/views/MeetingsView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
@@ -1221,7 +1222,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -2881,6 +2882,65 @@ export default function App() {
     }
   };
 
+  // Converte um item de ação de reunião (ver MeetingsView) numa tarefa de
+  // verdade — precisa de uma lista escolhida na hora, já que o resto do app
+  // (handleCreateTask) trata list_id como obrigatório mesmo a coluna sendo
+  // nullable no banco.
+  const createTaskFromMeetingActionItem = useCallback(async (item: { id: string; text: string }, listId: string): Promise<string | null> => {
+    const list = lists.find(l => l.id === listId);
+    const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
+    const defaultStatus = group && group.options.length > 0 ? group.options[0].label : 'A fazer';
+
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        title: item.text,
+        status: defaultStatus,
+        priority: TaskPriority.MEDIA,
+        main_assignee_id: currentUser.id,
+        secondary_assignee_ids: [],
+        start_date: formatLocalDate(new Date()),
+        due_date: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+        list_id: listId,
+        created_by: currentUser.id,
+      })
+      .select()
+      .single();
+
+    if (error || !data) {
+      toast.error('Erro ao criar tarefa: ' + error?.message);
+      return null;
+    }
+
+    const newTask: Task = {
+      id: data.id,
+      title: data.title,
+      description: data.description || '',
+      status: data.status,
+      priority: data.priority as TaskPriority,
+      mainAssigneeId: data.main_assignee_id,
+      secondaryAssigneeIds: data.secondary_assignee_ids || [],
+      startDate: data.start_date,
+      dueDate: data.due_date,
+      extensionCount: data.extension_count || 0,
+      extensionHistory: [],
+      checklists: [],
+      comments: [],
+      attachments: [],
+      activities: [],
+      listId: data.list_id,
+      projectId: data.project_id,
+      parentId: data.parent_id,
+      createdAt: data.created_at,
+    };
+    setTasks(prev => [newTask, ...prev]);
+
+    const { error: linkError } = await supabase.from('meeting_action_items').update({ task_id: data.id }).eq('id', item.id);
+    if (linkError) console.error('Erro ao vincular tarefa ao item de ação:', linkError);
+    toast.success('Tarefa criada a partir do item de ação.');
+    return data.id;
+  }, [lists, statusGroups, currentUser]);
+
   const handleDuplicateTask = async (sourceTask: Task, options: DuplicateTaskOptions) => {
     if (!sourceTask || isDuplicatingTask) return;
     const title = options.title.trim();
@@ -3869,6 +3929,15 @@ export default function App() {
                 currentUser={currentUser}
                 users={adminUsers}
                 onOpenTask={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'Meetings' && (
+              <MeetingsView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                onOpenTask={setSelectedTaskId}
+                onCreateTaskFromActionItem={createTaskFromMeetingActionItem}
               />
             )}
             {activeView === 'Table' && (
@@ -5162,6 +5231,16 @@ function Sidebar({
                     <div className="w-3 h-3 shrink-0" />
                     <Icons.UserCheck />
                     <span className="flex-1 truncate">Comentários atribuídos</span>
+                  </div>
+
+                  {/* Reuniões */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'Meetings' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Reuniões'); onViewChange('Meetings'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.Video />
+                    <span className="flex-1 truncate">Reuniões</span>
                   </div>
 
                   {/* Minhas Tarefas (expandível) */}
