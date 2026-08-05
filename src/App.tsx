@@ -23,6 +23,7 @@ import { RepliesView } from './components/views/RepliesView';
 import { AssignedCommentsView } from './components/views/AssignedCommentsView';
 import { MeetingsView } from './components/views/MeetingsView';
 import { MyTasksView, recordRecentTaskId } from './components/views/MyTasksView';
+import { RemindersView } from './components/views/RemindersView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
@@ -1228,7 +1229,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -1305,12 +1306,20 @@ export default function App() {
       // Carregar Lists
       const { data: listsData } = await supabase.from('lists').select('*');
       if (listsData) {
-        setLists(listsData.map((l: any) => ({
-          id: l.id,
-          name: l.name,
-          folderId: l.folder_id,
-          statusGroupId: l.status_group_id
-        })));
+        // Lista pessoal (ver migration 18): privacidade só no client — a RLS
+        // é permissiva, então o próprio carregamento do estado local precisa
+        // excluir listas pessoais de outros usuários, senão qualquer lugar
+        // que itere `lists` (paleta de comando, etc.) vaza pra qualquer um.
+        const myId = session?.user?.id;
+        setLists(listsData
+          .filter((l: any) => !l.owner_id || l.owner_id === myId)
+          .map((l: any) => ({
+            id: l.id,
+            name: l.name,
+            folderId: l.folder_id,
+            statusGroupId: l.status_group_id,
+            ownerId: l.owner_id || undefined
+          })));
       }
 
       // Carregar Custom Fields
@@ -1440,7 +1449,7 @@ export default function App() {
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
     }
-  }, []);
+  }, [session]);
 
   const loadAllUsers = useCallback(async () => {
     const { data } = await supabase
@@ -1516,9 +1525,11 @@ export default function App() {
           }
           const { data: listsData } = await supabase.from('lists').select('*');
           if (listsData) {
-            setLists(listsData.map((l: any) => ({
-              id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id
-            })));
+            setLists(listsData
+              .filter((l: any) => !l.owner_id || l.owner_id === session?.user?.id)
+              .map((l: any) => ({
+                id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id, ownerId: l.owner_id || undefined
+              })));
           }
         }
       })
@@ -2903,7 +2914,9 @@ export default function App() {
   // verdade — precisa de uma lista escolhida na hora, já que o resto do app
   // (handleCreateTask) trata list_id como obrigatório mesmo a coluna sendo
   // nullable no banco.
-  const createTaskFromMeetingActionItem = useCallback(async (item: { id: string; text: string }, listId: string): Promise<string | null> => {
+  // Base compartilhada por "criar tarefa a partir de X" (item de ação de
+  // reunião, lembrete) — só muda qual tabela recebe o vínculo task_id depois.
+  const createTaskFromTitle = useCallback(async (title: string, listId: string): Promise<Task | null> => {
     const list = lists.find(l => l.id === listId);
     const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
     const defaultStatus = group && group.options.length > 0 ? group.options[0].label : 'A fazer';
@@ -2911,7 +2924,7 @@ export default function App() {
     const { data, error } = await supabase
       .from('tasks')
       .insert({
-        title: item.text,
+        title,
         status: defaultStatus,
         priority: TaskPriority.MEDIA,
         main_assignee_id: currentUser.id,
@@ -2949,13 +2962,58 @@ export default function App() {
       projectId: data.project_id,
       parentId: data.parent_id,
       createdAt: data.created_at,
+      createdBy: data.created_by || undefined,
     };
     setTasks(prev => [newTask, ...prev]);
+    return newTask;
+  }, [lists, statusGroups, currentUser]);
 
-    const { error: linkError } = await supabase.from('meeting_action_items').update({ task_id: data.id }).eq('id', item.id);
+  const createTaskFromMeetingActionItem = useCallback(async (item: { id: string; text: string }, listId: string): Promise<string | null> => {
+    const newTask = await createTaskFromTitle(item.text, listId);
+    if (!newTask) return null;
+    const { error: linkError } = await supabase.from('meeting_action_items').update({ task_id: newTask.id }).eq('id', item.id);
     if (linkError) console.error('Erro ao vincular tarefa ao item de ação:', linkError);
     toast.success('Tarefa criada a partir do item de ação.');
-    return data.id;
+    return newTask.id;
+  }, [createTaskFromTitle]);
+
+  const createTaskFromReminder = useCallback(async (reminder: { id: string; title: string }, listId: string): Promise<string | null> => {
+    const newTask = await createTaskFromTitle(reminder.title, listId);
+    if (!newTask) return null;
+    const { error: linkError } = await supabase.from('reminders').update({ task_id: newTask.id }).eq('id', reminder.id);
+    if (linkError) console.error('Erro ao vincular tarefa ao lembrete:', linkError);
+    toast.success('Tarefa criada a partir do lembrete.');
+    return newTask.id;
+  }, [createTaskFromTitle]);
+
+  // Garante que exista uma lista pessoal (fora de qualquer pasta, ver
+  // migration 18) pro usuário atual, criando na primeira vez que ele abre
+  // "Lista pessoal". Privacidade só no client — a lista não aparece em
+  // nenhuma árvore de Espaço/Pasta, só é alcançada por este caminho.
+  const ensurePersonalList = useCallback(async (): Promise<string | null> => {
+    const existing = lists.find(l => l.ownerId === currentUser.id);
+    if (existing) return existing.id;
+
+    const defaultGroupId = statusGroups.find(g => g.name === 'Padrão')?.id || statusGroups[0]?.id;
+    if (!defaultGroupId) {
+      toast.error('Nenhum grupo de status configurado no workspace.');
+      return null;
+    }
+
+    const { data, error } = await supabase
+      .from('lists')
+      .insert({ name: 'Lista pessoal', folder_id: null, status_group_id: defaultGroupId, owner_id: currentUser.id })
+      .select()
+      .single();
+
+    if (error || !data) {
+      toast.error('Erro ao criar lista pessoal: ' + (error?.message || 'tente novamente'));
+      return null;
+    }
+
+    const newList: List = { id: data.id, name: data.name, folderId: data.folder_id, statusGroupId: data.status_group_id, ownerId: data.owner_id || undefined };
+    setLists(prev => [...prev, newList]);
+    return newList.id;
   }, [lists, statusGroups, currentUser]);
 
   const handleDuplicateTask = async (sourceTask: Task, options: DuplicateTaskOptions) => {
@@ -3500,6 +3558,7 @@ export default function App() {
           activeScope={activeScope}
           activeListId={activeListId}
           onSetActiveListId={setActiveListId}
+          onEnsurePersonalList={ensurePersonalList}
           onNavigate={handleNavigate}
           onViewChange={setActiveView}
           isCollapsed={isSidebarCollapsed}
@@ -3987,6 +4046,15 @@ export default function App() {
                 users={adminUsers}
                 tasks={tasks}
                 onOpenTask={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'Reminders' && (
+              <RemindersView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                onOpenTask={setSelectedTaskId}
+                onCreateTaskFromReminder={createTaskFromReminder}
               />
             )}
             {activeView === 'Table' && (
@@ -5038,7 +5106,7 @@ function SidebarDocItem({ doc, allDocs, depth, activeDocId, folder, onSetActiveD
 
 function Sidebar({
   themePreset,
-  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onNavigate, onViewChange, isCollapsed, onToggle,
+  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onEnsurePersonalList, onNavigate, onViewChange, isCollapsed, onToggle,
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder, onBulkDeleteFolders,
   onDeleteList, onRenameList, onDuplicateList,
@@ -5320,17 +5388,33 @@ function Sidebar({
                       <div className="ml-7 border-l border-sidebar-border pl-2 mt-0.5 space-y-0.5">
                         <button
                           onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
-                          className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors"
+                          className={`w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] transition-colors ${activeView === 'List' && activeScope.name === 'Minhas Tarefas' && !lists.find((l: List) => l.id === activeListId)?.ownerId ? 'bg-sidebar-accent text-sidebar-foreground font-semibold' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}
                         >
                           <svg className="w-3.5 h-3.5 shrink-0 text-sidebar-foreground/40" fill="currentColor" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/></svg>
                           Atribuídas a mim
                         </button>
                         <button
-                          onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
-                          className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors"
+                          onClick={() => { onNavigate('global', null, 'Hoje e atrasadas'); onViewChange('Reminders'); }}
+                          className={`w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] transition-colors ${activeView === 'Reminders' ? 'bg-sidebar-accent text-sidebar-foreground font-semibold' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}
                         >
                           <Icons.Calendar />
                           Hoje e atrasadas
+                        </button>
+                        <button
+                          onClick={async () => {
+                            // onNavigate reseta activeListId pra null e troca o nome do escopo —
+                            // por isso vem ANTES de aplicar o id da lista pessoal de verdade.
+                            // Sem isso, o escopo ficava "grudado" em 'Minhas Tarefas' (deixado por
+                            // um clique anterior em "Atribuídas a mim"), vazando o filtro de
+                            // "Mostrar concluídas" pra dentro da lista pessoal.
+                            onNavigate('global', null, 'Lista pessoal');
+                            const listId = await onEnsurePersonalList();
+                            if (listId) { onSetActiveListId(listId); onViewChange('List'); }
+                          }}
+                          className={`w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] transition-colors ${activeView === 'List' && lists.find((l: List) => l.id === activeListId)?.ownerId ? 'bg-sidebar-accent text-sidebar-foreground font-semibold' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}
+                        >
+                          <Icons.List className="w-3.5 h-3.5 shrink-0" />
+                          Lista pessoal
                         </button>
                       </div>
                     )}
@@ -7758,14 +7842,20 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
         }
       }
     } else if (activeListId) {
-      // Se há uma lista ativa selecionada na sidebar, usá-la diretamente
+      // Se há uma lista ativa selecionada na sidebar, usá-la diretamente.
+      // Lista pessoal (ver migration 18) não tem pasta — sem o list.folderId
+      // resolver pra um folder de verdade, o cascading Espaço→Pasta→Lista
+      // nunca achava a lista e selectedListId ficava vazio, bloqueando a
+      // criação de tarefa com "Selecione um Espaço, Pasta e Lista". Seta
+      // selectedListId sempre que a lista existir; espaço/pasta só quando
+      // aplicável (a lista pessoal fica sem esses dois, o que é esperado).
       const list = lists.find((l: List) => l.id === activeListId);
       if (list) {
+        setSelectedListId(activeListId);
         const folder = folders.find((f: Folder) => f.id === list.folderId);
         if (folder) {
           setSelectedSpaceId(folder.spaceId);
           setSelectedFolderId(folder.id);
-          setSelectedListId(activeListId);
         }
       }
     } else if (initialScope.type === 'space') {
