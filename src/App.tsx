@@ -36,6 +36,7 @@ import { MentionTextarea } from './components/MentionTextarea';
 import { AIPanel } from './components/AIPanel';
 import { MentionText, notifyMentions, notifyAssignment, notifyReply, notifyCommentAssigned, notifyCommentResolved } from './lib/mentions';
 import { linkifyText } from './lib/linkify';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
@@ -4001,49 +4002,58 @@ export default function App() {
         />
 
         {selectedTask && (
-          <TaskDetailModal
+          <ErrorBoundary
             key={selectedTask.id}
-            task={selectedTask}
-            users={adminUsers}
-            tasks={tasks}
             onClose={() => {
               setSelectedTaskId(null);
               const url = new URL(window.location.href);
               url.searchParams.delete('taskId');
               window.history.replaceState({}, '', url.toString());
             }}
-            onUpdate={updateTask}
-            currentUser={currentUser}
-            customFields={customFields}
-            fieldValues={fieldValues}
-            onUpdateFieldValue={handleUpdateFieldValue}
-            onDelete={() => handleDeleteTask(selectedTask.id)}
-            onDuplicate={() => setTaskToDuplicate(selectedTask)}
-            onSelectTask={setSelectedTaskId}
-            onQuickCreate={(prefill?: any) => {
-              setPrefilledTaskData(prefill || null);
-              setIsTaskModalOpen(true);
-            }}
-            saveAttachment={saveTaskAttachment}
-            removeAttachment={removeTaskAttachment}
-            saveComment={saveTaskComment}
-            editComment={editTaskComment}
-            deleteComment={deleteTaskComment}
-            assignComment={assignTaskComment}
-            resolveComment={resolveTaskComment}
-            toggleWatcher={toggleWatcher}
-            saveExtensionLog={saveExtensionLog}
-            saveTaskActivity={saveTaskActivity}
-            uploadFile={uploadFile}
-            statusGroups={statusGroups}
-            lists={lists}
-            folders={folders}
-            workspaceId={workspace.id}
-            teams={teams}
-            onTagsChange={(taskId: string, tags: string[]) =>
-              setTasks(prev => prev.map(t => t.id === taskId ? { ...t, tags } : t))
-            }
-          />
+          >
+            <TaskDetailModal
+              task={selectedTask}
+              users={adminUsers}
+              tasks={tasks}
+              onClose={() => {
+                setSelectedTaskId(null);
+                const url = new URL(window.location.href);
+                url.searchParams.delete('taskId');
+                window.history.replaceState({}, '', url.toString());
+              }}
+              onUpdate={updateTask}
+              currentUser={currentUser}
+              customFields={customFields}
+              fieldValues={fieldValues}
+              onUpdateFieldValue={handleUpdateFieldValue}
+              onDelete={() => handleDeleteTask(selectedTask.id)}
+              onDuplicate={() => setTaskToDuplicate(selectedTask)}
+              onSelectTask={setSelectedTaskId}
+              onQuickCreate={(prefill?: any) => {
+                setPrefilledTaskData(prefill || null);
+                setIsTaskModalOpen(true);
+              }}
+              saveAttachment={saveTaskAttachment}
+              removeAttachment={removeTaskAttachment}
+              saveComment={saveTaskComment}
+              editComment={editTaskComment}
+              deleteComment={deleteTaskComment}
+              assignComment={assignTaskComment}
+              resolveComment={resolveTaskComment}
+              toggleWatcher={toggleWatcher}
+              saveExtensionLog={saveExtensionLog}
+              saveTaskActivity={saveTaskActivity}
+              uploadFile={uploadFile}
+              statusGroups={statusGroups}
+              lists={lists}
+              folders={folders}
+              workspaceId={workspace.id}
+              teams={teams}
+              onTagsChange={(taskId: string, tags: string[]) =>
+                setTasks(prev => prev.map(t => t.id === taskId ? { ...t, tags } : t))
+              }
+            />
+          </ErrorBoundary>
         )}
 
         <TeamsModal
@@ -6177,7 +6187,7 @@ function ListView({
   const taskCustomFields = useMemo(() => {
     return (customFields as CustomField[])
       .filter((f) => f.target === 'TASK')
-      .filter((f) => (f.visibleTo as UserRole[]).includes(currentUser.role))
+      .filter((f) => ((f.visibleTo as UserRole[] | undefined) ?? []).includes(currentUser.role))
       .filter((f) => !hiddenTaskFieldIdsForActiveList.includes(f.id));
   }, [customFields, currentUser.role, hiddenTaskFieldIdsForActiveList]);
 
@@ -8187,7 +8197,7 @@ function TaskDetailModal(props: any) {
 
   const taskCustomFields = useMemo(() => {
     return (customFields || []).filter((f: CustomField) =>
-      f.target === 'TASK' && f.visibleTo.includes(currentUser.role)
+      f.target === 'TASK' && (f.visibleTo ?? []).includes(currentUser.role)
     );
   }, [customFields, currentUser.role]);
 
