@@ -43,20 +43,29 @@ export function AIPanel({ context, onClose }: AIPanelProps) {
     setLoading(true);
     setMessages((prev) => [...prev, { role: 'user', content: q }]);
 
-    const { data, error } = await supabase.functions.invoke('ask-ai', {
-      body: { context, question: q, history: messages },
-    });
+    try {
+      const { data, error } = await supabase.functions.invoke('ask-ai', {
+        body: { context, question: q, history: messages },
+      });
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: 'assistant',
-        content: error || data?.error
-          ? '⚠️ Não consegui consultar a IA agora. Verifique se a função "ask-ai" está publicada e tente novamente.'
-          : (data.answer as string),
-      },
-    ]);
-    setLoading(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: error || data?.error
+            ? '⚠️ Não consegui consultar a IA agora. Verifique se a função "ask-ai" está publicada e tente novamente.'
+            : (data.answer as string),
+        },
+      ]);
+    } catch (err) {
+      console.error('Erro ao consultar IA:', err);
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: '⚠️ Não consegui consultar a IA agora. Tente novamente.' },
+      ]);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const copy = (text: string) => navigator.clipboard.writeText(text);
