@@ -67,14 +67,20 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
 
   const loadNotifications = useCallback(async () => {
     setIsLoading(true);
-    const { data } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', currentUser.id)
-      .order('created_at', { ascending: false })
-      .limit(200);
-    if (data) setNotifications(data.map(mapRow));
-    setIsLoading(false);
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', currentUser.id)
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (error) throw error;
+      if (data) setNotifications(data.map(mapRow));
+    } catch (err) {
+      console.error('Erro ao carregar caixa de entrada:', err);
+    } finally {
+      setIsLoading(false);
+    }
   }, [currentUser.id]);
 
   useEffect(() => {

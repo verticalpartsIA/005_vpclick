@@ -52,13 +52,18 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
   });
 
   const loadNotifications = useCallback(async () => {
-    const { data } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', currentUser.id)
-      .order('created_at', { ascending: false })
-      .limit(30);
-    if (data) setNotifications(data.map(mapRow));
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', currentUser.id)
+        .order('created_at', { ascending: false })
+        .limit(30);
+      if (error) throw error;
+      if (data) setNotifications(data.map(mapRow));
+    } catch (err) {
+      console.error('Erro ao carregar notificações:', err);
+    }
   }, [currentUser.id]);
 
   useEffect(() => {
