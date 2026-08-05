@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
-import { Meeting, MeetingActionItem, List, User } from '../../types';
+import { Meeting, MeetingActionItem, MeetingRoom, List, User } from '../../types';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,11 +17,21 @@ interface MeetingsViewProps {
   onCreateTaskFromActionItem: (item: { id: string; text: string }, listId: string) => Promise<string | null>;
 }
 
+const DURATION_OPTIONS = [
+  { minutes: 30, label: '30 min' },
+  { minutes: 60, label: '1h' },
+  { minutes: 90, label: '1h30' },
+  { minutes: 120, label: '2h' },
+  { minutes: 180, label: '3h' },
+];
+
 function mapMeetingRow(m: any, items: any[]): Meeting {
   return {
     id: m.id,
     title: m.title,
     meetingDate: m.meeting_date,
+    endDate: m.end_date || undefined,
+    roomId: m.room_id || undefined,
     participantIds: m.participant_ids || [],
     notes: m.notes || '',
     summary: m.summary || undefined,
@@ -32,6 +42,23 @@ function mapMeetingRow(m: any, items: any[]): Meeting {
       .filter((i: any) => i.meeting_id === m.id)
       .map((i: any) => mapActionItemRow(i)),
   };
+}
+
+function mapRoomRow(r: any): MeetingRoom {
+  return {
+    id: r.id,
+    name: r.name,
+    isActive: r.is_active,
+    createdBy: r.created_by || undefined,
+    createdAt: r.created_at,
+  };
+}
+
+function formatTimeRange(start: string, end?: string) {
+  const s = new Date(start).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  if (!end) return s;
+  const e = new Date(end).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  return `${s} – ${e}`;
 }
 
 function mapActionItemRow(i: any): MeetingActionItem {
@@ -66,10 +93,17 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDate, setNewDate] = useState('');
+  const [newDurationMinutes, setNewDurationMinutes] = useState(60);
+  const [newRoomId, setNewRoomId] = useState<string>('');
+  const [isAddingRoom, setIsAddingRoom] = useState(false);
+  const [newRoomName, setNewRoomName] = useState('');
+  const [savingRoom, setSavingRoom] = useState(false);
   const [newParticipantIds, setNewParticipantIds] = useState<string[]>([]);
   const [participantSearch, setParticipantSearch] = useState('');
   const [newNotes, setNewNotes] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+
+  const [rooms, setRooms] = useState<MeetingRoom[]>([]);
 
   const [notesDraft, setNotesDraft] = useState('');
   const [savingNotes, setSavingNotes] = useState(false);
@@ -91,6 +125,65 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     setIsLoading(false);
   }, []);
 
+  // Carrega todas as salas (inclusive arquivadas) — o seletor de criação só
+  // lista as ativas, mas reuniões antigas continuam mostrando o nome certo
+  // mesmo se a sala tiver sido arquivada depois.
+  const loadRooms = useCallback(async () => {
+    const { data } = await supabase.from('meeting_rooms').select('*').order('name');
+    setRooms((data || []).map(mapRoomRow));
+  }, []);
+
+  useEffect(() => { loadRooms(); }, [loadRooms]);
+
+  const createRoom = async () => {
+    if (!newRoomName.trim()) return;
+    setSavingRoom(true);
+    const { data, error } = await supabase
+      .from('meeting_rooms')
+      .insert({ name: newRoomName.trim(), created_by: currentUser.id })
+      .select()
+      .single();
+    setSavingRoom(false);
+    if (error || !data) {
+      toast.error('Não consegui criar a sala.');
+      return;
+    }
+    const room = mapRoomRow(data);
+    setRooms((prev) => [...prev, room].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')));
+    setNewRoomId(room.id);
+    setNewRoomName('');
+    setIsAddingRoom(false);
+  };
+
+  // Conflito de sala: só avisa (não bloqueia) — mostra quem mais já reservou
+  // aquela sala num horário que sobrepõe o que está sendo escolhido agora.
+  // Consulta o Supabase direto (em vez de filtrar a lista `meetings` já
+  // carregada, que só traz as 200 reuniões de meeting_date mais recente/
+  // futuro): a partir de um certo volume de reuniões futuras, essa lista
+  // em cache deixaria de conter reservas que ainda precisam ser checadas.
+  const [roomConflicts, setRoomConflicts] = useState<{ id: string; title: string; meetingDate: string; endDate: string }[]>([]);
+  useEffect(() => {
+    if (!newRoomId || !newDate) {
+      setRoomConflicts([]);
+      return;
+    }
+    let cancelled = false;
+    const start = new Date(newDate);
+    const end = new Date(start.getTime() + newDurationMinutes * 60_000);
+    supabase
+      .from('meetings')
+      .select('id, title, meeting_date, end_date')
+      .eq('room_id', newRoomId)
+      .not('end_date', 'is', null)
+      .lt('meeting_date', end.toISOString())
+      .gt('end_date', start.toISOString())
+      .then(({ data }) => {
+        if (cancelled) return;
+        setRoomConflicts((data || []).map((m: any) => ({ id: m.id, title: m.title, meetingDate: m.meeting_date, endDate: m.end_date })));
+      });
+    return () => { cancelled = true; };
+  }, [newRoomId, newDate, newDurationMinutes]);
+
   useEffect(() => { loadMeetings(); }, [loadMeetings]);
 
   const selected = meetings.find((m) => m.id === selectedId) || null;
@@ -110,6 +203,10 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     setShowCreateForm(false);
     setNewTitle('');
     setNewDate('');
+    setNewDurationMinutes(60);
+    setNewRoomId('');
+    setIsAddingRoom(false);
+    setNewRoomName('');
     setNewParticipantIds([]);
     setParticipantSearch('');
     setNewNotes('');
@@ -118,11 +215,15 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   const createMeeting = async () => {
     if (!newTitle.trim()) return;
     setIsCreating(true);
+    const start = newDate ? new Date(newDate) : new Date();
+    const end = new Date(start.getTime() + newDurationMinutes * 60_000);
     const { data, error } = await supabase
       .from('meetings')
       .insert({
         title: newTitle.trim(),
-        meeting_date: newDate ? new Date(newDate).toISOString() : new Date().toISOString(),
+        meeting_date: start.toISOString(),
+        end_date: end.toISOString(),
+        room_id: newRoomId || null,
         participant_ids: newParticipantIds,
         notes: newNotes,
         created_by: currentUser.id,
@@ -208,7 +309,16 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 mb-4">
           <h1 className="text-xl font-bold text-gray-800">{selected.title}</h1>
-          <p className="text-xs text-gray-400 mt-1">{formatMeetingDate(selected.meetingDate)}</p>
+          <p className="text-xs text-gray-400 mt-1">
+            {formatMeetingDate(selected.meetingDate)}
+            {selected.endDate && ` (${formatTimeRange(selected.meetingDate, selected.endDate)})`}
+          </p>
+          {selected.roomId && rooms.find((r) => r.id === selected.roomId) && (
+            <p className="text-xs text-gray-500 mt-1 flex items-center gap-1">
+              <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a2 2 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+              {rooms.find((r) => r.id === selected.roomId)!.name}
+            </p>
+          )}
           {selected.participantIds.length > 0 && (
             <div className="flex items-center -space-x-1.5 mt-2">
               {selected.participantIds.map((id) => {
@@ -325,12 +435,81 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
             className="w-full text-sm p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-300"
             autoFocus
           />
-          <input
-            type="datetime-local"
-            value={newDate}
-            onChange={(e) => setNewDate(e.target.value)}
-            className="w-full text-sm p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-300"
-          />
+          <div className="flex gap-2">
+            <input
+              type="datetime-local"
+              value={newDate}
+              onChange={(e) => setNewDate(e.target.value)}
+              className="flex-1 text-sm p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-300"
+            />
+            <select
+              value={newDurationMinutes}
+              onChange={(e) => setNewDurationMinutes(Number(e.target.value))}
+              className="text-sm p-2 border rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"
+            >
+              {DURATION_OPTIONS.map((d) => (
+                <option key={d.minutes} value={d.minutes}>{d.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <p className="text-[10px] text-gray-400 font-bold mb-1 uppercase">Sala (opcional)</p>
+            {!isAddingRoom ? (
+              <div className="flex gap-2">
+                <select
+                  value={newRoomId}
+                  onChange={(e) => setNewRoomId(e.target.value)}
+                  className="flex-1 text-sm p-2 border rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"
+                >
+                  <option value="">Sem sala</option>
+                  {rooms.filter((r) => r.isActive).map((r) => (
+                    <option key={r.id} value={r.id}>{r.name}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setIsAddingRoom(true)}
+                  className="text-xs font-semibold text-gray-500 hover:text-purple-600 px-2 rounded-lg border hover:bg-gray-50 shrink-0"
+                >
+                  + Nova sala
+                </button>
+              </div>
+            ) : (
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  autoFocus
+                  value={newRoomName}
+                  onChange={(e) => setNewRoomName(e.target.value)}
+                  placeholder="Nome da sala (ex: 2º Andar | Diretoria)"
+                  className="flex-1 text-sm p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-300"
+                />
+                <button
+                  type="button"
+                  onClick={createRoom}
+                  disabled={savingRoom || !newRoomName.trim()}
+                  className="text-xs font-bold bg-purple-500 text-white px-3 rounded-lg hover:brightness-110 disabled:opacity-50 shrink-0"
+                >
+                  {savingRoom ? '...' : 'Salvar'}
+                </button>
+                <button type="button" onClick={() => { setIsAddingRoom(false); setNewRoomName(''); }} className="text-xs text-gray-500 hover:text-gray-700 px-2 shrink-0">
+                  Cancelar
+                </button>
+              </div>
+            )}
+            {roomConflicts.length > 0 && (
+              <div className="mt-2 text-[11px] bg-amber-50 border border-amber-200 text-amber-700 rounded-lg p-2">
+                ⚠️ Sala já reservada nesse horário por:
+                <ul className="list-disc list-inside mt-0.5">
+                  {roomConflicts.map((m) => (
+                    <li key={m.id}>{m.title} ({formatTimeRange(m.meetingDate, m.endDate)})</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+
           <div>
             <p className="text-[10px] text-gray-400 font-bold mb-1 uppercase">Participantes</p>
             <input
@@ -385,6 +564,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
         )}
         {!isLoading && visibleMeetings.map((m) => {
           const pending = m.actionItems.filter((i) => !i.completed).length;
+          const room = m.roomId ? rooms.find((r) => r.id === m.roomId) : undefined;
           return (
             <button
               key={m.id}
@@ -397,15 +577,20 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
               </div>
               <p className="text-xs text-gray-500 truncate mt-0.5">{m.summary || m.notes || 'Sem notas ainda.'}</p>
               <div className="flex items-center justify-between mt-1.5">
-                <div className="flex items-center -space-x-1.5">
-                  {m.participantIds.slice(0, 5).map((id) => {
-                    const u = users.find((usr) => usr.id === id);
-                    if (!u) return null;
-                    return <img key={id} src={u.avatar} title={u.name} className="w-5 h-5 rounded-full border-2 border-white" alt="" />;
-                  })}
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center -space-x-1.5">
+                    {m.participantIds.slice(0, 5).map((id) => {
+                      const u = users.find((usr) => usr.id === id);
+                      if (!u) return null;
+                      return <img key={id} src={u.avatar} title={u.name} className="w-5 h-5 rounded-full border-2 border-white" alt="" />;
+                    })}
+                  </div>
+                  {room && (
+                    <span className="text-[11px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded truncate max-w-[160px]">{room.name}</span>
+                  )}
                 </div>
                 {pending > 0 && (
-                  <span className="text-[11px] font-semibold text-purple-600">{pending} item{pending === 1 ? '' : 's'} de ação pendente{pending === 1 ? '' : 's'}</span>
+                  <span className="text-[11px] font-semibold text-purple-600 shrink-0">{pending} item{pending === 1 ? '' : 's'} de ação pendente{pending === 1 ? '' : 's'}</span>
                 )}
               </div>
             </button>
