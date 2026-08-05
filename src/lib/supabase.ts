@@ -123,6 +123,23 @@ export async function isTaskBlocked(taskId: string): Promise<boolean> {
   });
 }
 
+// ── Comentários atribuídos ("Assign comments" do ClickUp) ──
+// Um comentário atribuído (raiz ou resposta) vira um item obrigatório: a
+// tarefa não pode ser fechada enquanto ele não for resolvido.
+export async function hasUnresolvedAssignedComments(taskId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('task_comments')
+    .select('id')
+    .eq('task_id', taskId)
+    .is('deleted_at', null)
+    .is('resolved_at', null)
+    .not('assigned_to', 'is', null)
+    .limit(1);
+
+  if (error) return false;
+  return (data ?? []).length > 0;
+}
+
 // ── Workspace Tags ─────────────────────────────────────────
 export async function fetchWorkspaceTags(workspaceId: string): Promise<WorkspaceTag[]> {
   const { data, error } = await supabase

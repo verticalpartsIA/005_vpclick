@@ -15,6 +15,8 @@ const TYPE_ICONS: Record<string, string> = {
   comment: '💬',
   automation: '⚡',
   reply: '↩️',
+  comment_assigned: '📝',
+  comment_resolved: '✅',
 };
 
 function relativeTime(date: string) {
