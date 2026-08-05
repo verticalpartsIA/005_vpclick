@@ -1195,6 +1195,9 @@ export default function App() {
   const [workspaceTags, setWorkspaceTags] = useState<WorkspaceTag[]>([]);
   const [filterTags, setFilterTags] = useState<string[]>([]);
   const [sortConfig, setSortConfig] = useState<{ field: 'created' | 'title' | 'priority' | 'dueDate' | 'status'; direction: 'asc' | 'desc' }>({ field: 'created', direction: 'asc' });
+  // "Atribuídas a mim" (item 6 da sidebar "Início"): igual ao ClickUp, tarefas
+  // concluídas ficam escondidas por padrão nessa visualização específica.
+  const [showClosedInMyTasks, setShowClosedInMyTasks] = useState(false);
   const [teams, setTeams] = useState<Team[]>([]);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
 
@@ -3328,6 +3331,16 @@ export default function App() {
     // Filter "Minhas Tarefas" view for ALL users
     if (activeScope.name === 'Minhas Tarefas') {
       result = result.filter(t => t.mainAssigneeId === currentUser.id || t.secondaryAssigneeIds?.includes(currentUser.id));
+      // "Atribuídas a mim": esconde concluídas por padrão (igual ao ClickUp),
+      // com toggle pra mostrar — mesmo critério de "fechada" já usado nos
+      // badges de contagem por lista logo acima.
+      if (!showClosedInMyTasks) {
+        result = result.filter(t => {
+          const s = (t.status || '').toLowerCase();
+          const isClosed = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+          return !isClosed;
+        });
+      }
     }
 
     // No escopo global (Início / sem espaço selecionado), COLABORADOR vê só suas tarefas.
@@ -3365,7 +3378,7 @@ export default function App() {
     });
 
     return result;
-  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig]);
+  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig, showClosedInMyTasks]);
 
   // O modal "Gerenciar Campos Personalizados" precisa saber qual lista está
   // ativa pra ler/gravar quais campos estão ocultos — usa a mesma resolução
@@ -3582,6 +3595,17 @@ export default function App() {
                     )}
                   </PopoverContent>
                 </Popover>
+              )}
+
+              {/* "Atribuídas a mim": concluídas ficam escondidas por padrão, igual ao ClickUp */}
+              {activeScope.name === 'Minhas Tarefas' && (
+                <button
+                  onClick={() => setShowClosedInMyTasks(v => !v)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${showClosedInMyTasks ? 'bg-orange-50 border-orange-300 text-orange-600' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'}`}
+                >
+                  <Icons.CheckCircle2 className="w-3.5 h-3.5" />
+                  {showClosedInMyTasks ? 'Ocultar concluídas' : 'Mostrar concluídas'}
+                </button>
               )}
 
               {/* Sort button */}
