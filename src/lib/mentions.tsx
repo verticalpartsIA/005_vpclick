@@ -1,5 +1,6 @@
 import React from 'react';
 import { supabase } from './supabase';
+import { linkifyText } from './linkify';
 import { Team, User, NotificationType } from '../types';
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -189,7 +190,7 @@ export function MentionText({ text, users, teams }: { text: string; users: User[
     ...teams.map((t) => ({ name: t.name, kind: 'team' as const })),
   ].sort((a, b) => b.name.length - a.name.length);
 
-  if (names.length === 0 || !text.includes('@')) return <>{text}</>;
+  if (names.length === 0 || !text.includes('@')) return <>{linkifyText(text)}</>;
 
   const pattern = new RegExp(`@(${names.map((n) => escapeRegex(n.name)).join('|')})`, 'g');
   const parts = text.split(pattern);
@@ -211,7 +212,7 @@ export function MentionText({ text, users, teams }: { text: string; users: User[
             </span>
           );
         }
-        return <React.Fragment key={i}>{part}</React.Fragment>;
+        return <React.Fragment key={i}>{linkifyText(part)}</React.Fragment>;
       })}
     </>
   );
