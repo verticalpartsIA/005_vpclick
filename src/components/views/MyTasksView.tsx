@@ -11,7 +11,12 @@ interface MyTasksViewProps {
 }
 
 const DONE_KEYWORDS = ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado'];
+// Mesma lista usada no ask-ai (supabase/functions/ask-ai/index.ts) — cancelada/
+// recusada é um status terminal, mas não "feito": sem isso, tarefa cancelada
+// contava como trabalho pendente em aberto/atrasado.
+const CANCEL_KEYWORDS = ['cancel', 'recusad'];
 const isDoneStatus = (status: string) => DONE_KEYWORDS.some((k) => (status || '').toLowerCase().includes(k));
+const isCancelledStatus = (status: string) => CANCEL_KEYWORDS.some((k) => (status || '').toLowerCase().includes(k));
 
 function todayLocalDateStr() {
   const d = new Date();
@@ -105,7 +110,7 @@ export function MyTasksView({ currentUser, users, tasks, onOpenTask }: MyTasksVi
     () => tasks.filter((t) => t.mainAssigneeId === currentUser.id || (t.secondaryAssigneeIds || []).includes(currentUser.id)),
     [tasks, currentUser.id]
   );
-  const pendingMine = useMemo(() => myTasks.filter((t) => !isDoneStatus(t.status)), [myTasks]);
+  const pendingMine = useMemo(() => myTasks.filter((t) => !isDoneStatus(t.status) && !isCancelledStatus(t.status)), [myTasks]);
   const doneMine = useMemo(() => myTasks.filter((t) => isDoneStatus(t.status)), [myTasks]);
   const delegated = useMemo(
     () => tasks.filter((t) => t.createdBy === currentUser.id && t.mainAssigneeId !== currentUser.id),
