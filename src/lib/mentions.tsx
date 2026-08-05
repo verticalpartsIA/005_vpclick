@@ -102,6 +102,56 @@ export async function notifyReply(params: {
   if (error) console.error('Erro ao criar notificação de resposta:', error);
 }
 
+/** Notifica o atribuído quando um comentário vira um item de ação ("Comentários atribuídos"). */
+export async function notifyCommentAssigned(params: {
+  text: string;
+  taskId: string;
+  taskTitle: string;
+  commentId: string;
+  assignedToId: string;
+  actor: User;
+}) {
+  const { text, taskId, taskTitle, commentId, assignedToId, actor } = params;
+  if (!assignedToId || assignedToId === actor.id) return;
+
+  const body = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  const { error } = await supabase.from('notifications').insert({
+    user_id: assignedToId,
+    actor_id: actor.id,
+    type: 'comment_assigned',
+    title: `${actor.name} atribuiu um comentário a você em "${taskTitle}"`,
+    body,
+    task_id: taskId,
+    comment_id: commentId,
+  });
+  if (error) console.error('Erro ao criar notificação de comentário atribuído:', error);
+}
+
+/** Notifica quem atribuiu o comentário quando o atribuído marca como resolvido. */
+export async function notifyCommentResolved(params: {
+  text: string;
+  taskId: string;
+  taskTitle: string;
+  commentId: string;
+  assignedById: string;
+  actor: User;
+}) {
+  const { text, taskId, taskTitle, commentId, assignedById, actor } = params;
+  if (!assignedById || assignedById === actor.id) return;
+
+  const body = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  const { error } = await supabase.from('notifications').insert({
+    user_id: assignedById,
+    actor_id: actor.id,
+    type: 'comment_resolved',
+    title: `${actor.name} resolveu o comentário atribuído em "${taskTitle}"`,
+    body,
+    task_id: taskId,
+    comment_id: commentId,
+  });
+  if (error) console.error('Erro ao criar notificação de comentário resolvido:', error);
+}
+
 /** Cria uma notificação de atribuição de tarefa (responsável principal/adicional/equipe). */
 export async function notifyAssignment(params: {
   userIds: string[];

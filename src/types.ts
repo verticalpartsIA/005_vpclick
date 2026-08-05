@@ -110,6 +110,10 @@ export interface Comment {
   timestamp: string;
   updatedAt?: string;
   parentCommentId?: string;
+  assignedTo?: string;
+  assignedBy?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
 }
 
 export interface Attachment {
@@ -166,7 +170,7 @@ export interface Team {
 }
 
 // ── Notificações in-app (sino) ────────────────────────────
-export type NotificationType = 'mention' | 'team_mention' | 'assignment' | 'comment' | 'automation' | 'reply';
+export type NotificationType = 'mention' | 'team_mention' | 'assignment' | 'comment' | 'automation' | 'reply' | 'comment_assigned' | 'comment_resolved';
 
 export interface AppNotification {
   id: string;

@@ -20,8 +20,9 @@ import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
 import { InboxView } from './components/views/InboxView';
 import { RepliesView } from './components/views/RepliesView';
+import { AssignedCommentsView } from './components/views/AssignedCommentsView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
-import { supabase, isTaskBlocked } from './lib/supabase';
+import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -31,7 +32,7 @@ import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
 import { MentionTextarea } from './components/MentionTextarea';
 import { AIPanel } from './components/AIPanel';
-import { MentionText, notifyMentions, notifyAssignment, notifyReply } from './lib/mentions';
+import { MentionText, notifyMentions, notifyAssignment, notifyReply, notifyCommentAssigned, notifyCommentResolved } from './lib/mentions';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
@@ -213,8 +214,76 @@ const THEME_PRESETS: Record<ThemePresetId, { label: string; vars: Record<string,
   },
 };
 
+// ── CommentAssignmentBar: linha de "Atribuir"/"Resolver" de um comentário ou
+// resposta ("Comentários atribuídos", item 3 da sidebar "Início", estilo
+// ClickUp). Compartilhada entre CommentItem e ReplyItem — o widget é
+// idêntico nos dois, só muda o que fica "por cima" dele. ──
+function CommentAssignmentBar({ item, users, currentUserId, formatDate, onAssign, onResolve }: {
+  item: any;
+  users: any[];
+  currentUserId: string;
+  formatDate: (d: string) => string;
+  onAssign: (userId: string | null) => void;
+  onResolve: () => void;
+}) {
+  const assignee = item.assignedTo ? users.find((u: any) => u.id === item.assignedTo) : null;
+  const isResolved = !!item.resolvedAt;
+  const canResolve = !isResolved && (item.assignedTo === currentUserId || item.assignedBy === currentUserId);
+  const assignableUsers = [...users]
+    .filter((u: any) => u.email !== AI_AGENT_EMAIL)
+    .sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR'));
+
+  return (
+    <div className="flex items-center gap-2 mt-2 flex-wrap">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            className={`text-[11px] font-semibold flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors ${
+              assignee
+                ? isResolved ? 'text-green-600 bg-green-50' : 'text-purple-600 bg-purple-50'
+                : 'text-gray-400 hover:text-purple-500 hover:bg-purple-50'
+            }`}
+          >
+            <Icons.UserCheck className="w-3 h-3" />
+            {assignee ? assignee.name : 'Atribuir'}
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-56 max-h-72 overflow-y-auto">
+          {assignee && (
+            <>
+              <DropdownMenuItem onClick={() => onAssign(null)} className="text-red-500 text-sm">Remover atribuição</DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {assignableUsers.map((u: any) => (
+            <DropdownMenuItem key={u.id} onClick={() => onAssign(u.id)} className="flex items-center gap-2 text-sm">
+              <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-5 h-5 rounded-full" alt="" />
+              {u.name}
+              {item.assignedTo === u.id && <Icons.Check className="w-3.5 h-3.5 ml-auto text-purple-500" />}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {assignee && (
+        isResolved ? (
+          <span className="text-[11px] font-semibold text-green-600 flex items-center gap-1" title={formatDate(item.resolvedAt)}>
+            <Icons.CheckCircle2 className="w-3 h-3" /> Resolvido
+          </span>
+        ) : canResolve ? (
+          <button onClick={onResolve} className="text-[11px] font-semibold text-gray-400 hover:text-green-600 flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-green-50 transition-colors">
+            <Icons.CheckCircle2 className="w-3 h-3" /> Resolver
+          </button>
+        ) : (
+          <span className="text-[11px] text-gray-300 font-medium">pendente</span>
+        )
+      )}
+    </div>
+  );
+}
+
 // ── ReplyItem: resposta de comentário (edição/exclusão inline, sem sub-respostas) ──
-function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete, formatDate }: {
+function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete, onAssign, onResolve, formatDate }: {
   item: any;
   users: any[];
   teams: any[];
@@ -222,6 +291,8 @@ function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete
   taskId: string;
   onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
   onDelete: (taskId: string, commentId: string) => Promise<void>;
+  onAssign: (taskId: string, commentId: string, userId: string | null) => void;
+  onResolve: (taskId: string, commentId: string) => void;
   formatDate: (d: string) => string;
 }) {
   const [editing, setEditing] = React.useState(false);
@@ -277,9 +348,19 @@ function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete
             </div>
           </div>
         ) : (
-          <p className="text-sm text-gray-600 leading-relaxed">
-            <MentionText text={item.text} users={users || []} teams={teams} />
-          </p>
+          <>
+            <p className="text-sm text-gray-600 leading-relaxed">
+              <MentionText text={item.text} users={users || []} teams={teams} />
+            </p>
+            <CommentAssignmentBar
+              item={item}
+              users={users}
+              currentUserId={currentUserId}
+              formatDate={formatDate}
+              onAssign={(userId) => onAssign(taskId, item.id, userId)}
+              onResolve={() => onResolve(taskId, item.id)}
+            />
+          </>
         )}
       </div>
     </div>
@@ -287,7 +368,7 @@ function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete
 }
 
 // ── CommentItem: comentário com edição/exclusão inline + thread de respostas ──
-function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdit, onDelete, onReply, formatDate }: {
+function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdit, onDelete, onReply, onAssign, onResolve, formatDate }: {
   item: any;
   replies: any[];
   users: any[];
@@ -297,6 +378,8 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
   onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
   onDelete: (taskId: string, commentId: string) => Promise<void>;
   onReply: (taskId: string, parentCommentId: string, text: string) => Promise<boolean>;
+  onAssign: (taskId: string, commentId: string, userId: string | null) => void;
+  onResolve: (taskId: string, commentId: string) => void;
   formatDate: (d: string) => string;
 }) {
   const [editing, setEditing] = React.useState(false);
@@ -392,6 +475,14 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
                   </button>
                 )}
               </div>
+              <CommentAssignmentBar
+                item={item}
+                users={users}
+                currentUserId={currentUserId}
+                formatDate={formatDate}
+                onAssign={(userId) => onAssign(taskId, item.id, userId)}
+                onResolve={() => onResolve(taskId, item.id)}
+              />
             </>
           )}
         </div>
@@ -427,6 +518,8 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
               taskId={taskId}
               onEdit={onEdit}
               onDelete={onDelete}
+              onAssign={onAssign}
+              onResolve={onResolve}
               formatDate={formatDate}
             />
           ))}
@@ -742,6 +835,50 @@ export default function App() {
     }));
     toast.success('Comentário excluído.');
   }, []);
+
+  // Atribui (ou remove a atribuição de) um comentário/resposta a alguém —
+  // "Comentários atribuídos" (item 3 da sidebar "Início", estilo ClickUp).
+  // Reatribuir ou remover a atribuição também limpa uma resolução anterior:
+  // o item volta a valer como pendente para o novo estado.
+  const assignTaskComment = useCallback(async (taskId: string, commentId: string, userId: string | null) => {
+    if (!currentUser) return;
+    const { error } = await supabase
+      .from('task_comments')
+      .update({
+        assigned_to: userId,
+        assigned_by: userId ? currentUser.id : null,
+        resolved_at: null,
+        resolved_by: null,
+      })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao atribuir comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).map(c => c.id === commentId ? {
+        ...c,
+        assignedTo: userId || undefined,
+        assignedBy: userId ? currentUser.id : undefined,
+        resolvedAt: undefined,
+        resolvedBy: undefined,
+      } : c),
+    }));
+  }, [currentUser]);
+
+  // Marca um comentário/resposta atribuído como resolvido — a tarefa deixa de
+  // ficar bloqueada por ele (ver hasUnresolvedAssignedComments).
+  const resolveTaskComment = useCallback(async (taskId: string, commentId: string) => {
+    if (!currentUser) return;
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from('task_comments')
+      .update({ resolved_at: now, resolved_by: currentUser.id })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao resolver comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).map(c => c.id === commentId ? { ...c, resolvedAt: now, resolvedBy: currentUser.id } : c),
+    }));
+  }, [currentUser]);
 
   // isWatching vem do call site para evitar referência circular com tasks
   const toggleWatcher = useCallback(async (taskId: string, isWatching: boolean) => {
@@ -1069,7 +1206,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -1487,6 +1624,10 @@ export default function App() {
           timestamp: c.created_at,
           updatedAt: c.updated_at || undefined,
           parentCommentId: c.parent_comment_id || undefined,
+          assignedTo: c.assigned_to || undefined,
+          assignedBy: c.assigned_by || undefined,
+          resolvedAt: c.resolved_at || undefined,
+          resolvedBy: c.resolved_by || undefined,
         }));
 
         const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
@@ -1697,9 +1838,16 @@ export default function App() {
       const isDone = ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado']
         .some(kw => newStatus.includes(kw));
       if (isDone) {
-        const bloqueada = await isTaskBlocked(taskId);
+        const [bloqueada, temComentarioPendente] = await Promise.all([
+          isTaskBlocked(taskId),
+          hasUnresolvedAssignedComments(taskId),
+        ]);
         if (bloqueada) {
           toast.warning('Esta tarefa está bloqueada por outra que ainda não foi concluída.');
+          return;
+        }
+        if (temComentarioPendente) {
+          toast.warning('Esta tarefa tem comentários atribuídos ainda não resolvidos.');
           return;
         }
       }
@@ -3674,6 +3822,13 @@ export default function App() {
                 onOpenTask={setSelectedTaskId}
               />
             )}
+            {activeView === 'AssignedComments' && (
+              <AssignedCommentsView
+                currentUser={currentUser}
+                users={adminUsers}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Table' && (
               <TableView
                 tasks={filteredTasks}
@@ -3742,6 +3897,8 @@ export default function App() {
             saveComment={saveTaskComment}
             editComment={editTaskComment}
             deleteComment={deleteTaskComment}
+            assignComment={assignTaskComment}
+            resolveComment={resolveTaskComment}
             toggleWatcher={toggleWatcher}
             saveExtensionLog={saveExtensionLog}
             saveTaskActivity={saveTaskActivity}
@@ -4953,6 +5110,16 @@ function Sidebar({
                     <div className="w-3 h-3 shrink-0" />
                     <Icons.Reply />
                     <span className="flex-1 truncate">Respostas</span>
+                  </div>
+
+                  {/* Comentários atribuídos */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'AssignedComments' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Comentários atribuídos'); onViewChange('AssignedComments'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.UserCheck />
+                    <span className="flex-1 truncate">Comentários atribuídos</span>
                   </div>
 
                   {/* Minhas Tarefas (expandível) */}
@@ -7777,6 +7944,8 @@ function TaskDetailModal(props: any) {
     saveComment,
     editComment,
     deleteComment,
+    assignComment,
+    resolveComment,
     toggleWatcher,
     saveExtensionLog,
     saveTaskActivity,
@@ -8146,6 +8315,38 @@ function TaskDetailModal(props: any) {
       });
     }
     return success;
+  };
+
+  const handleAssignComment = async (taskIdArg: string, commentId: string, userId: string | null) => {
+    if (!assignComment) return;
+    await assignComment(taskIdArg, commentId, userId);
+    if (userId) {
+      const comment = (task.comments || []).find((c: any) => c.id === commentId);
+      notifyCommentAssigned({
+        text: comment?.text || '',
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        commentId,
+        assignedToId: userId,
+        actor: currentUser,
+      });
+    }
+  };
+
+  const handleResolveComment = async (taskIdArg: string, commentId: string) => {
+    if (!resolveComment) return;
+    await resolveComment(taskIdArg, commentId);
+    const comment = (task.comments || []).find((c: any) => c.id === commentId);
+    if (comment?.assignedBy) {
+      notifyCommentResolved({
+        text: comment.text || '',
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        commentId,
+        assignedById: comment.assignedBy,
+        actor: currentUser,
+      });
+    }
   };
 
   const handleAddLink = async () => {
@@ -8865,6 +9066,8 @@ function TaskDetailModal(props: any) {
                         onEdit={editComment}
                         onDelete={deleteComment}
                         onReply={handleAddReply}
+                        onAssign={handleAssignComment}
+                        onResolve={handleResolveComment}
                         formatDate={formatDate}
                       />
                     );
