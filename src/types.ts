@@ -264,6 +264,7 @@ export interface Space {
   color: string;
   icon?: string;
   isSystem?: boolean; // true = space nativo do Hub, não pode ser deletado
+  createdAt?: string;
 }
 
 export interface Workspace {
