@@ -5130,14 +5130,19 @@ function Sidebar({
   // mecanismo de fixar, decidido com o usuário (os destinos reais do
   // ClickUp ali são Chat/Posts/Canais, que o VP Click não tem).
   const [pinnedMoreKey, setPinnedMoreKey] = useState<string | null>(() => localStorage.getItem('vp_pinned_more_item'));
-  const systemSpace = (spaces as Space[]).find((s) => s.isSystem);
   const moreCandidates = [
-    systemSpace && {
+    {
+      // Escopo global com um nome diferente de 'Minhas Tarefas' — o único
+      // filtro de "só as minhas" em filteredTasks olha esse nome exato, então
+      // isso mostra de verdade todas as tarefas permitidas (sem escopo de
+      // pasta/espaço), ao contrário de picar um space is_system arbitrário
+      // (existem 4 marcados assim — Requisições/Propostas/Visitas/Pós-Venda —
+      // sem ordem garantida, o que apontaria pro space errado às vezes).
       key: 'all-tasks',
       label: 'Todas as tarefas',
       icon: <Icons.List className="w-3.5 h-3.5 shrink-0" />,
-      onSelect: () => onNavigate('space', systemSpace.id, systemSpace.name),
-      isActive: activeScope.type === 'space' && activeScope.id === systemSpace.id,
+      onSelect: () => { onNavigate('global', null, 'Todas as tarefas'); onViewChange('List'); },
+      isActive: activeView === 'List' && activeScope.type === 'global' && activeScope.name === 'Todas as tarefas',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
