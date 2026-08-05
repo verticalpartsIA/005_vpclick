@@ -33,6 +33,7 @@ import { TeamsModal } from './components/TeamsModal';
 import { MentionTextarea } from './components/MentionTextarea';
 import { AIPanel } from './components/AIPanel';
 import { MentionText, notifyMentions, notifyAssignment, notifyReply, notifyCommentAssigned, notifyCommentResolved } from './lib/mentions';
+import { linkifyText } from './lib/linkify';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
@@ -5880,46 +5881,11 @@ function formatLocalDate(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-// Detecta URLs dentro de um texto solto (descrição de tarefa, nome de anexo
-// do tipo link etc.) e devolve nós React com essas URLs como <a> clicáveis,
-// preservando o resto do texto como está. Pontuação comum no fim de frase
-// (. , ; : ! ? ) ] ' ") fica de fora do link.
-const LINKIFY_URL_PATTERN = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
-
-export function linkifyText(text: string): React.ReactNode[] {
-  if (!text) return [];
-  const nodes: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  const regex = new RegExp(LINKIFY_URL_PATTERN);
-  while ((match = regex.exec(text)) !== null) {
-    let url = match[0];
-    let trailing = '';
-    while (url.length && /[.,;:!?)\]'"]$/.test(url)) {
-      trailing = url.slice(-1) + trailing;
-      url = url.slice(0, -1);
-    }
-    if (!url) { lastIndex = match.index + match[0].length; continue; }
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
-    const href = url.startsWith('http') ? url : `https://${url}`;
-    nodes.push(
-      <a
-        key={match.index}
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-blue-600 underline hover:text-blue-800"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {url}
-      </a>
-    );
-    if (trailing) nodes.push(trailing);
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-  return nodes;
-}
+// Reexportado para não quebrar `import { linkifyText } from './App'` já em uso
+// (ex.: src/test/linkifyText.test.tsx). A implementação vive em ./lib/linkify
+// porque MentionText (lib/mentions.tsx) também precisa dela, e mentions.tsx é
+// importado por este arquivo — importar de volta daqui criaria um ciclo.
+export { linkifyText };
 
 // Resolve qual lista deve ser considerada "ativa" quando `activeListId` está
 // vazio (ex: navegando por pasta/espaço em vez de uma lista específica): se
@@ -8033,6 +7999,7 @@ function TaskDetailModal(props: any) {
   const [isSavingExtension, setIsSavingExtension] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [newComment, setNewComment] = useState('');
+  const [isSendingComment, setIsSendingComment] = useState(false);
   const [showAIPanel, setShowAIPanel] = useState(false);
   const [newChecklistText, setNewChecklistText] = useState('');
   const [description, setDescription] = useState(task.description || '');
@@ -8304,22 +8271,32 @@ function TaskDetailModal(props: any) {
   };
 
   const handleAddComment = async () => {
-    if (!newComment.trim()) return;
+    // Sem essa guarda o botão nunca fica "ocupado" visualmente: se a rede
+    // demorar (ex.: mesmo cenário de lock/timeout do fetch do Supabase), o
+    // usuário via só um clique sem efeito nenhum e não dava pra distinguir
+    // "processando" de "travado" — dava clique de novo, disparando o mesmo
+    // comentário duplicado quando a primeira chamada finalmente respondia.
+    if (!newComment.trim() || isSendingComment) return;
 
     if (saveComment) {
       const text = newComment;
-      const success = await saveComment(task.id, text);
-      if (success) {
-        setNewComment('');
-        // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
-        notifyMentions({
-          text,
-          taskId: task.id,
-          taskTitle: task.title,
-          actor: currentUser,
-          users: users || [],
-          teams,
-        });
+      setIsSendingComment(true);
+      try {
+        const success = await saveComment(task.id, text);
+        if (success) {
+          setNewComment('');
+          // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
+          notifyMentions({
+            text,
+            taskId: task.id,
+            taskTitle: task.title,
+            actor: currentUser,
+            users: users || [],
+            teams,
+          });
+        }
+      } finally {
+        setIsSendingComment(false);
       }
     }
   };
@@ -9203,10 +9180,18 @@ function TaskDetailModal(props: any) {
                   </div>
                   <button
                     onClick={handleAddComment}
-                    disabled={!newComment.trim()}
+                    disabled={!newComment.trim() || isSendingComment}
+                    title={isSendingComment ? 'Enviando...' : undefined}
                     className="bg-orange-500 p-2 rounded-xl text-white hover:brightness-110 shadow-lg shadow-orange-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>
+                    {isSendingComment ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>
+                    )}
                   </button>
                 </div>
               </div>
