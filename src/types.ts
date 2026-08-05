@@ -116,6 +116,31 @@ export interface Comment {
   resolvedBy?: string;
 }
 
+// ── Reuniões (item 4 da sidebar "Início", estilo ClickUp) — versão manual +
+// IA: sem calendário nem bot entrando em chamada, o resumo/itens de ação vêm
+// de notas coladas à mão e processadas pela edge function summarize-meeting.
+export interface MeetingActionItem {
+  id: string;
+  meetingId: string;
+  text: string;
+  completed: boolean;
+  taskId?: string;
+  createdAt: string;
+}
+
+export interface Meeting {
+  id: string;
+  title: string;
+  meetingDate: string;
+  participantIds: string[];
+  notes: string;
+  summary?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt?: string;
+  actionItems: MeetingActionItem[];
+}
+
 export interface Attachment {
   id: string;
   name: string;

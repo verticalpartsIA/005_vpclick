@@ -186,4 +186,7 @@ export const Icons = {
   UserCheck: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><polyline points="16 11 18 13 22 9" /></svg>
   ),
+  Video: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
+    <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.934a.5.5 0 0 0-.777-.416L16 11" /><rect x="2" y="6" width="14" height="12" rx="2" /></svg>
+  ),
 };
