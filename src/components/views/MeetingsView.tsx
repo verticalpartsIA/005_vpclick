@@ -147,6 +147,22 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
   const generateSummary = async (meetingId: string) => {
     setGeneratingId(meetingId);
+
+    // A edge function lê meetings.notes do banco — se o textarea tiver texto
+    // ainda não salvo (usuário colou/editou e clicou direto em "Gerar resumo"
+    // sem passar por "Salvar notas"), salva primeiro pra IA não trabalhar em
+    // cima de notas desatualizadas ou vazias.
+    const persisted = meetings.find((m) => m.id === meetingId)?.notes || '';
+    if (meetingId === selected?.id && notesDraft !== persisted) {
+      const { error: saveError } = await supabase.from('meetings').update({ notes: notesDraft, updated_at: new Date().toISOString() }).eq('id', meetingId);
+      if (saveError) {
+        toast.error('Erro ao salvar as notas antes de gerar o resumo.');
+        setGeneratingId(null);
+        return;
+      }
+      setMeetings((prev) => prev.map((m) => (m.id === meetingId ? { ...m, notes: notesDraft } : m)));
+    }
+
     const { data, error } = await supabase.functions.invoke('summarize-meeting', { body: { meetingId } });
     if (error || data?.error) {
       toast.error(data?.error || 'Não consegui gerar o resumo agora. Tente novamente.');

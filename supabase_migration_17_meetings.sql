@@ -24,13 +24,16 @@ CREATE TABLE meetings (
 
 -- Itens de ação extraídos pela IA (ou adicionados à mão). task_id fica nulo
 -- até alguém clicar em "Criar tarefa" no item — a partir daí ele vira uma
--- tarefa de verdade e o item de ação só espelha o estado dela.
+-- tarefa de verdade e o item de ação só espelha o estado dela. ON DELETE SET
+-- NULL (mesmo precedente de automation_logs.task_id): se a tarefa vinculada
+-- for excluída, o item de ação sobrevive e volta a oferecer "Criar tarefa",
+-- em vez de a FK bloquear a exclusão da tarefa.
 CREATE TABLE meeting_action_items (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
   text TEXT NOT NULL,
   completed BOOLEAN NOT NULL DEFAULT false,
-  task_id UUID REFERENCES tasks(id),
+  task_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
