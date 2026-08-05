@@ -70,6 +70,38 @@ export async function notifyMentions(params: {
   if (error) console.error('Erro ao criar notificações de menção:', error);
 }
 
+/**
+ * Cria as notificações de resposta ("Respostas" da sidebar): avisa quem já
+ * participou da thread (autor do comentário raiz + quem já respondeu),
+ * exceto quem acabou de responder.
+ */
+export async function notifyReply(params: {
+  text: string;
+  taskId: string;
+  taskTitle: string;
+  parentCommentId: string;
+  threadParticipantIds: string[];
+  actor: User;
+}) {
+  const { text, taskId, taskTitle, parentCommentId, threadParticipantIds, actor } = params;
+  const targets = [...new Set(threadParticipantIds)].filter((id) => id && id !== actor.id);
+  if (targets.length === 0) return;
+
+  const body = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  const { error } = await supabase.from('notifications').insert(
+    targets.map((id) => ({
+      user_id: id,
+      actor_id: actor.id,
+      type: 'reply',
+      title: `${actor.name} respondeu em "${taskTitle}"`,
+      body,
+      task_id: taskId,
+      comment_id: parentCommentId,
+    }))
+  );
+  if (error) console.error('Erro ao criar notificação de resposta:', error);
+}
+
 /** Cria uma notificação de atribuição de tarefa (responsável principal/adicional/equipe). */
 export async function notifyAssignment(params: {
   userIds: string[];
