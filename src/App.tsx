@@ -1306,13 +1306,20 @@ export default function App() {
       // Carregar Lists
       const { data: listsData } = await supabase.from('lists').select('*');
       if (listsData) {
-        setLists(listsData.map((l: any) => ({
-          id: l.id,
-          name: l.name,
-          folderId: l.folder_id,
-          statusGroupId: l.status_group_id,
-          ownerId: l.owner_id || undefined
-        })));
+        // Lista pessoal (ver migration 18): privacidade só no client — a RLS
+        // é permissiva, então o próprio carregamento do estado local precisa
+        // excluir listas pessoais de outros usuários, senão qualquer lugar
+        // que itere `lists` (paleta de comando, etc.) vaza pra qualquer um.
+        const myId = session?.user?.id;
+        setLists(listsData
+          .filter((l: any) => !l.owner_id || l.owner_id === myId)
+          .map((l: any) => ({
+            id: l.id,
+            name: l.name,
+            folderId: l.folder_id,
+            statusGroupId: l.status_group_id,
+            ownerId: l.owner_id || undefined
+          })));
       }
 
       // Carregar Custom Fields
@@ -1442,7 +1449,7 @@ export default function App() {
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
     }
-  }, []);
+  }, [session]);
 
   const loadAllUsers = useCallback(async () => {
     const { data } = await supabase
@@ -1518,9 +1525,11 @@ export default function App() {
           }
           const { data: listsData } = await supabase.from('lists').select('*');
           if (listsData) {
-            setLists(listsData.map((l: any) => ({
-              id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id, ownerId: l.owner_id || undefined
-            })));
+            setLists(listsData
+              .filter((l: any) => !l.owner_id || l.owner_id === session?.user?.id)
+              .map((l: any) => ({
+                id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id, ownerId: l.owner_id || undefined
+              })));
           }
         }
       })
@@ -7833,14 +7842,20 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
         }
       }
     } else if (activeListId) {
-      // Se há uma lista ativa selecionada na sidebar, usá-la diretamente
+      // Se há uma lista ativa selecionada na sidebar, usá-la diretamente.
+      // Lista pessoal (ver migration 18) não tem pasta — sem o list.folderId
+      // resolver pra um folder de verdade, o cascading Espaço→Pasta→Lista
+      // nunca achava a lista e selectedListId ficava vazio, bloqueando a
+      // criação de tarefa com "Selecione um Espaço, Pasta e Lista". Seta
+      // selectedListId sempre que a lista existir; espaço/pasta só quando
+      // aplicável (a lista pessoal fica sem esses dois, o que é esperado).
       const list = lists.find((l: List) => l.id === activeListId);
       if (list) {
+        setSelectedListId(activeListId);
         const folder = folders.find((f: Folder) => f.id === list.folderId);
         if (folder) {
           setSelectedSpaceId(folder.spaceId);
           setSelectedFolderId(folder.id);
-          setSelectedListId(activeListId);
         }
       }
     } else if (initialScope.type === 'space') {

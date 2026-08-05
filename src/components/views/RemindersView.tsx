@@ -25,12 +25,20 @@ const NOTIFY_LABELS: Record<ReminderNotifyPreference, string> = {
   off: 'Desativado',
 };
 
-function todayLocalDateStr() {
-  const d = new Date();
+// YYYY-MM-DD em hora LOCAL — dueAt vem em UTC (timestamptz); usar
+// `dueAt.slice(0, 10)' direto pegaria a data em UTC, que em fusos negativos
+// (Brasil, EUA) empurra um lembrete de fim de noite pro dia seguinte,
+// classificando "hoje às 23h30" como "Próximo" em vez de "Hoje".
+function localDateStr(date: Date | string) {
+  const d = typeof date === 'string' ? new Date(date) : date;
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${y}-${m}-${day}`;
+}
+
+function todayLocalDateStr() {
+  return localDateStr(new Date());
 }
 
 // Formato aceito por <input type="datetime-local">: YYYY-MM-DDTHH:mm, em hora local.
@@ -172,7 +180,7 @@ export function RemindersView({ currentUser, users, lists, onOpenTask, onCreateT
   const buckets = useMemo(() => {
     const b = { hoje: [] as Reminder[], atraso: [] as Reminder[], proximo: [] as Reminder[] };
     pending.forEach((r) => {
-      const d = r.dueAt.slice(0, 10);
+      const d = localDateStr(r.dueAt);
       if (d < today) b.atraso.push(r);
       else if (d === today) b.hoje.push(r);
       else b.proximo.push(r);
@@ -183,7 +191,7 @@ export function RemindersView({ currentUser, users, lists, onOpenTask, onCreateT
   const pendingBadge = buckets.atraso.length + buckets.hoje.length;
 
   const renderRow = (r: Reminder, opts?: { showDelegatedTo?: boolean }) => {
-    const isOverdue = !r.completed && r.dueAt.slice(0, 10) < today;
+    const isOverdue = !r.completed && localDateStr(r.dueAt) < today;
     return (
       <div key={r.id} className="px-2 py-2 rounded-lg hover:bg-gray-50 transition-colors">
         <div className="flex items-center gap-2">
