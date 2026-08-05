@@ -23,6 +23,7 @@ import { RepliesView } from './components/views/RepliesView';
 import { AssignedCommentsView } from './components/views/AssignedCommentsView';
 import { MeetingsView } from './components/views/MeetingsView';
 import { MyTasksView, recordRecentTaskId } from './components/views/MyTasksView';
+import { RecentTasksView } from './components/views/RecentTasksView';
 import { RemindersView } from './components/views/RemindersView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
@@ -1229,7 +1230,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -1290,6 +1291,7 @@ export default function App() {
           color: s.color,
           icon: s.icon,
           isSystem: s.is_system ?? false,
+          createdAt: s.created_at,
         })));
       }
 
@@ -1514,7 +1516,7 @@ export default function App() {
           const { data: spacesData } = await supabase.from('spaces').select('*');
           if (spacesData) {
             setSpaces(spacesData.map((s: any) => ({
-              id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon, isSystem: s.is_system ?? false
+              id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon, isSystem: s.is_system ?? false, createdAt: s.created_at
             })));
           }
           const { data: foldersData } = await supabase.from('folders').select('*');
@@ -2709,7 +2711,8 @@ export default function App() {
         name: data.name,
         workspaceId: data.workspace_id,
         color: data.color,
-        icon: data.icon
+        icon: data.icon,
+        createdAt: data.created_at
       };
       setSpaces([...spaces, newSpace]);
 
@@ -4058,6 +4061,14 @@ export default function App() {
                 onCreateTaskFromReminder={createTaskFromReminder}
               />
             )}
+            {activeView === 'RecentTasks' && (
+              <RecentTasksView
+                currentUser={currentUser}
+                users={adminUsers}
+                tasks={tasks}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Table' && (
               <TableView
                 tasks={filteredTasks}
@@ -5130,19 +5141,25 @@ function Sidebar({
   // mecanismo de fixar, decidido com o usuário (os destinos reais do
   // ClickUp ali são Chat/Posts/Canais, que o VP Click não tem).
   const [pinnedMoreKey, setPinnedMoreKey] = useState<string | null>(() => localStorage.getItem('vp_pinned_more_item'));
+  const [showAllSpacesModal, setShowAllSpacesModal] = useState(false);
   const moreCandidates = [
     {
-      // Escopo global com um nome diferente de 'Minhas Tarefas' — o único
-      // filtro de "só as minhas" em filteredTasks olha esse nome exato, então
-      // isso mostra de verdade todas as tarefas permitidas (sem escopo de
-      // pasta/espaço), ao contrário de picar um space is_system arbitrário
-      // (existem 4 marcados assim — Requisições/Propostas/Visitas/Pós-Venda —
-      // sem ordem garantida, o que apontaria pro space errado às vezes).
+      key: 'all-spaces',
+      label: 'Todos os Espaços',
+      icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => setShowAllSpacesModal(true),
+      isActive: false,
+    },
+    {
+      // "Todas as tarefas" no ClickUp real não é "toda tarefa do workspace
+      // sem filtro" — é a lista de tarefas vistas recentemente (o que a
+      // busca/Ctrl+K também mostra). Reaproveita o registro de "recentes" já
+      // usado no card Recentes de Minhas Tarefas, numa view dedicada.
       key: 'all-tasks',
       label: 'Todas as tarefas',
       icon: <Icons.List className="w-3.5 h-3.5 shrink-0" />,
-      onSelect: () => { onNavigate('global', null, 'Todas as tarefas'); onViewChange('List'); },
-      isActive: activeView === 'List' && activeScope.type === 'global' && activeScope.name === 'Todas as tarefas',
+      onSelect: () => { onNavigate('global', null, 'Todas as tarefas'); onViewChange('RecentTasks'); },
+      isActive: activeView === 'RecentTasks',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -5160,6 +5177,26 @@ function Sidebar({
     moreCandidates.find((c) => c.key === key)?.onSelect();
   };
 
+  // "Todos os Espaços" (item "Mais" do Início, estilo ClickUp): espaços
+  // ocultos somem da árvore principal, mas continuam existindo — preferência
+  // só de cliente, mesmo nível/local de armazenamento já usado em
+  // vp_sidebar_width/vp_pinned_more_item/vp_favorites.
+  const [hiddenSpaceIds, setHiddenSpaceIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('vp_hidden_spaces');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const toggleHiddenSpace = (spaceId: string) => {
+    setHiddenSpaceIds((prev) => {
+      const next = prev.includes(spaceId) ? prev.filter((id) => id !== spaceId) : [...prev, spaceId];
+      localStorage.setItem('vp_hidden_spaces', JSON.stringify(next));
+      return next;
+    });
+  };
+
   const [secInicioOpen, setSecInicioOpen] = useState(true);
   const [secMinhasTarefasOpen, setSecMinhasTarefasOpen] = useState(false);
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
@@ -5175,7 +5212,8 @@ function Sidebar({
     folder.name.toLowerCase().includes(sidebarQuery) || (lists as List[]).some((l) => l.folderId === folder.id && listMatchesSearch(l));
   const spaceMatchesSearch = (space: Space) =>
     space.name.toLowerCase().includes(sidebarQuery) || (folders as Folder[]).some((f) => f.spaceId === space.id && folderMatchesSearch(f));
-  const filteredSpaces = isSidebarSearching ? spaces.filter(spaceMatchesSearch) : spaces;
+  const visibleSpaces = spaces.filter((s: Space) => !hiddenSpaceIds.includes(s.id));
+  const filteredSpaces = isSidebarSearching ? visibleSpaces.filter(spaceMatchesSearch) : visibleSpaces;
   const filteredFavorites = (favorites || []).filter((fav: any) => !isSidebarSearching || fav.name.toLowerCase().includes(sidebarQuery));
 
   // Largura redimensionável da sidebar (arrastar borda direita; duplo clique restaura)
@@ -5266,7 +5304,7 @@ function Sidebar({
         <div className="flex-1" />
 
         {/* Space quick-access avatars */}
-        {spaces.slice(0, 6).map((space: Space) => (
+        {visibleSpaces.slice(0, 6).map((space: Space) => (
           <button
             key={space.id}
             title={space.name}
@@ -5487,8 +5525,28 @@ function Sidebar({
                             {pinnedMoreKey === c.key && <Icons.Check className="w-3.5 h-3.5 ml-auto text-orange-500" />}
                           </DropdownMenuItem>
                         ))}
+                        {(userRole === 'ADMIN' || userRole === 'GESTOR') && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onClick={onOpenFields} className="flex items-center gap-2 text-sm">
+                              <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.22 3.22l1.42 1.42M11.36 11.36l1.42 1.42M3.22 12.78l1.42-1.42M11.36 4.64l1.42-1.42"/><circle cx="8" cy="8" r="3"/></svg>
+                              Personalizar
+                            </DropdownMenuItem>
+                          </>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
+                  )}
+
+                  {showAllSpacesModal && (
+                    <AllSpacesModal
+                      spaces={spaces}
+                      hiddenSpaceIds={hiddenSpaceIds}
+                      onToggleHidden={toggleHiddenSpace}
+                      onCreateSpace={onOpenCreateSpace}
+                      onNavigateToSpace={(id: string, name: string) => { onNavigate('space', id, name); onViewChange('Dashboard'); }}
+                      onClose={() => setShowAllSpacesModal(false)}
+                    />
                   )}
 
                   {/* Ir para Dashboard */}
@@ -5936,6 +5994,120 @@ function ViewTab({ active, onClick, label }: any) {
       {label}
       {active && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--primary-color)] animate-in fade-in duration-200" />}
     </button>
+  );
+}
+
+/**
+ * "Todos os Espaços" (item "Mais" do Início, estilo ClickUp): painel pra
+ * ver/ocultar/ordenar/buscar todos os Espaços do workspace e criar um novo,
+ * sem precisar navegar pela árvore. Ocultar aqui só esconde da árvore lateral
+ * (preferência de cliente, vp_hidden_spaces) — não afeta ninguém mais.
+ */
+function AllSpacesModal({ spaces, hiddenSpaceIds, onToggleHidden, onCreateSpace, onNavigateToSpace, onClose }: {
+  spaces: Space[];
+  hiddenSpaceIds: string[];
+  onToggleHidden: (id: string) => void;
+  onCreateSpace: () => void;
+  onNavigateToSpace: (id: string, name: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [sortBy, setSortBy] = useState<'recommended' | 'created' | 'alpha'>('recommended');
+
+  const q = query.trim().toLowerCase();
+  const matches = (s: Space) => !q || s.name.toLowerCase().includes(q);
+
+  const sorted = useMemo(() => {
+    const arr = spaces.filter(matches);
+    if (sortBy === 'alpha') return [...arr].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' }));
+    if (sortBy === 'created') return [...arr].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    return arr;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spaces, query, sortBy]);
+
+  const visible = sorted.filter((s) => !hiddenSpaceIds.includes(s.id));
+  const hidden = sorted.filter((s) => hiddenSpaceIds.includes(s.id));
+
+  const renderRow = (space: Space, isHidden: boolean) => (
+    <div key={space.id} className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 group">
+      <button
+        onClick={() => onNavigateToSpace(space.id, space.name)}
+        className="flex items-center gap-2 flex-1 min-w-0 text-left"
+      >
+        {space.icon ? (
+          (() => { const IconComponent = (Icons as any)[space.icon] || Icons.Layout; return <IconComponent className="w-4 h-4 shrink-0" color={space.color} />; })()
+        ) : (
+          <div className="w-5 h-5 rounded flex items-center justify-center shrink-0 font-bold text-[9px] text-white" style={{ backgroundColor: space.color }}>
+            {space.name.charAt(0).toUpperCase()}
+          </div>
+        )}
+        <span className="text-sm text-gray-700 truncate">{space.name}</span>
+      </button>
+      <button
+        onClick={() => onToggleHidden(space.id)}
+        className="text-[11px] font-semibold text-gray-400 hover:text-[var(--primary-color)] px-2 py-1 rounded-md hover:bg-gray-100 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+      >
+        {isHidden ? 'Mostrar na barra lateral' : 'Ocultar'}
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-5 pb-3">
+          <h2 className="font-bold text-gray-800 text-base">Todos os Espaços</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <div className="px-5 flex items-center gap-2 pb-3">
+          <div className="relative flex-1">
+            <input
+              autoFocus
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar espaços..."
+              className="w-full pl-8 pr-3 py-1.5 text-sm bg-gray-50 border rounded-md focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
+            />
+            <Icons.Search className="w-4 h-4 text-gray-400 absolute left-2 top-2" />
+          </div>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as any)}
+            className="text-xs border rounded-md px-2 py-1.5 bg-gray-50 text-gray-600 focus:outline-none"
+          >
+            <option value="recommended">Recomendado</option>
+            <option value="created">Data de criação</option>
+            <option value="alpha">Alfabética</option>
+          </select>
+        </div>
+
+        <div className="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2">
+          <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide px-3 pt-1 pb-1">Visíveis</p>
+          {visible.length === 0 ? (
+            <p className="text-xs text-gray-400 px-3 py-2">Nenhum espaço visível.</p>
+          ) : visible.map((s) => renderRow(s, false))}
+
+          {hidden.length > 0 && (
+            <>
+              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide px-3 pt-3 pb-1">Ocultos</p>
+              {hidden.map((s) => renderRow(s, true))}
+            </>
+          )}
+        </div>
+
+        <div className="border-t p-3">
+          <button
+            onClick={() => { onCreateSpace(); onClose(); }}
+            className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-600 hover:text-[var(--primary-color)] py-2 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            <Icons.Plus className="w-4 h-4" /> Novo Espaço
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
