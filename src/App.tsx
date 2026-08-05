@@ -22,6 +22,7 @@ import { InboxView } from './components/views/InboxView';
 import { RepliesView } from './components/views/RepliesView';
 import { AssignedCommentsView } from './components/views/AssignedCommentsView';
 import { MeetingsView } from './components/views/MeetingsView';
+import { MyTasksView, recordRecentTaskId } from './components/views/MyTasksView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
@@ -1223,7 +1224,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -1550,6 +1551,14 @@ export default function App() {
 
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
 
+  // Card "Recentes" de Minhas Tarefas: registra toda tarefa aberta, pra
+  // qualquer entrada (clique na lista, notificação, link direto etc.).
+  useEffect(() => {
+    if (selectedTaskId && currentUser?.id && currentUser.id !== 'loading') {
+      recordRecentTaskId(currentUser.id, selectedTaskId);
+    }
+  }, [selectedTaskId, currentUser?.id]);
+
   // Guarda contra corrida: se o escopo mudar (ou o realtime disparar outro
   // reload) enquanto uma chamada de loadTasks() ainda está em andamento, uma
   // resposta antiga que chegue depois de uma mais nova sobrescreveria `tasks`
@@ -1692,6 +1701,7 @@ export default function App() {
           projectId: d.project_id,
           parentId: d.parent_id,
           createdAt: d.created_at,
+          createdBy: d.created_by || undefined,
           tags: d.tags || [],
           watcherIds: (watchData || []).filter((w: any) => w.task_id === d.id).map((w: any) => w.user_id),
         };
@@ -2842,7 +2852,8 @@ export default function App() {
           due_date: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
           list_id: newTaskPartial.listId,
           project_id: newTaskPartial.projectId || null,
-          parent_id: newTaskPartial.parentId || null
+          parent_id: newTaskPartial.parentId || null,
+          created_by: currentUser.id
         })
         .select()
         .single();
@@ -2867,7 +2878,8 @@ export default function App() {
           listId: data.list_id,
           projectId: data.project_id,
           parentId: data.parent_id,
-          createdAt: data.created_at
+          createdAt: data.created_at,
+          createdBy: data.created_by || undefined
         };
         setTasks(prev => [newTask, ...prev]);
         setIsTaskModalOpen(false);
@@ -3941,6 +3953,14 @@ export default function App() {
                 onCreateTaskFromActionItem={createTaskFromMeetingActionItem}
               />
             )}
+            {activeView === 'MyTasks' && (
+              <MyTasksView
+                currentUser={currentUser}
+                users={adminUsers}
+                tasks={tasks}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Table' && (
               <TableView
                 tasks={filteredTasks}
@@ -4211,7 +4231,7 @@ export default function App() {
                 <span>Criar Nova Tarefa</span>
                 <span className="ml-auto text-xs text-muted-foreground">Ctrl+N</span>
               </CommandItem>
-              <CommandItem value="minhas tarefas" onSelect={() => { handleNavigate('global', null, 'Minhas Tarefas'); setActiveView('List'); setIsCommandOpen(false); }}>
+              <CommandItem value="minhas tarefas" onSelect={() => { handleNavigate('global', null, 'Minhas Tarefas'); setActiveView('MyTasks'); setIsCommandOpen(false); }}>
                 <Icons.Check className="mr-2 h-4 w-4" />
                 <span>Minhas Tarefas</span>
               </CommandItem>
@@ -5068,7 +5088,7 @@ function Sidebar({
   /* ── Icon Nav Bar items ── */
   const navItems = [
     { id: 'home', label: 'Início', icon: <Icons.Home />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }, active: activeView === 'Dashboard' && activeScope.type === 'global' },
-    { id: 'tasks', label: 'Minhas Tarefas', icon: <Icons.Check />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }, active: activeView === 'List' && activeScope.type === 'global' },
+    { id: 'tasks', label: 'Minhas Tarefas', icon: <Icons.Check />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Minhas Tarefas'); onViewChange('MyTasks'); }, active: activeView === 'MyTasks' && activeScope.type === 'global' },
     { id: 'calendar', label: 'Calendário', icon: <Icons.Calendar />, action: () => { if (isCollapsed) onToggle(); onViewChange('Calendar'); }, active: activeView === 'Calendar' },
     { id: 'gantt', label: 'Gantt', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="3" width="8" height="2" rx="1"/><rect x="1" y="7" width="6" height="2" rx="1"/><rect x="4" y="11" width="10" height="2" rx="1"/></svg>, action: () => { if (isCollapsed) onToggle(); onViewChange('Gantt'); }, active: activeView === 'Gantt' },
     { id: 'dashboard', label: 'Dashboards', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="8" width="4" height="6" rx="0.5"/><rect x="6" y="4" width="4" height="10" rx="0.5"/><rect x="11" y="2" width="4" height="12" rx="0.5"/></svg>, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }, active: false },
@@ -5247,8 +5267,8 @@ function Sidebar({
                   {/* Minhas Tarefas (expandível) */}
                   <div>
                     <div
-                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'List' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
-                      onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
+                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'MyTasks' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                      onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('MyTasks'); }}
                     >
                       <button
                         onClick={(e) => { e.stopPropagation(); setSecMinhasTarefasOpen(v => !v); }}
