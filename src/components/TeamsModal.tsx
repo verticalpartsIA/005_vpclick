@@ -62,31 +62,37 @@ export function TeamsModal({ isOpen, onClose, teams, setTeams, users, currentUse
       return;
     }
     setIsCreating(true);
-    const { data, error } = await supabase
-      .from('teams')
-      .insert({ name, color: newTeamColor, created_by: currentUser.id })
-      .select()
-      .single();
-    setIsCreating(false);
-    if (error || !data) {
-      console.error('Erro ao criar Equipe:', error);
-      if (error?.code === '23505') {
-        // UNIQUE em teams.name — a equipe existe no banco mas não estava na lista local
-        toast.error(`Já existe uma Equipe chamada "${name}" no banco (pode ter sido criada por outra pessoa). A lista foi atualizada.`);
-        await refreshTeams();
-      } else if (error?.code === '42501') {
-        toast.error('Sem permissão no banco para criar Equipes. Seu papel precisa ser ADMIN ou GESTOR (verifique seu perfil e recarregue a página).');
-      } else if (error?.code === '23503') {
-        toast.error('Seu perfil de usuário não foi encontrado no banco. Saia e entre novamente no sistema.');
-      } else {
-        toast.error(`Não foi possível criar a Equipe${error?.message ? `: ${error.message}` : '.'}`);
+    try {
+      const { data, error } = await supabase
+        .from('teams')
+        .insert({ name, color: newTeamColor, created_by: currentUser.id })
+        .select()
+        .single();
+      if (error || !data) {
+        console.error('Erro ao criar Equipe:', error);
+        if (error?.code === '23505') {
+          // UNIQUE em teams.name — a equipe existe no banco mas não estava na lista local
+          toast.error(`Já existe uma Equipe chamada "${name}" no banco (pode ter sido criada por outra pessoa). A lista foi atualizada.`);
+          await refreshTeams();
+        } else if (error?.code === '42501') {
+          toast.error('Sem permissão no banco para criar Equipes. Seu papel precisa ser ADMIN ou GESTOR (verifique seu perfil e recarregue a página).');
+        } else if (error?.code === '23503') {
+          toast.error('Seu perfil de usuário não foi encontrado no banco. Saia e entre novamente no sistema.');
+        } else {
+          toast.error(`Não foi possível criar a Equipe${error?.message ? `: ${error.message}` : '.'}`);
+        }
+        return;
       }
-      return;
+      setTeams((prev) => [...prev, { id: data.id, name: data.name, description: data.description || '', color: data.color, memberIds: [] }]);
+      setNewTeamName('');
+      setExpandedTeamId(data.id);
+      toast.success(`Equipe "${name}" criada. Adicione os membros.`);
+    } catch (err) {
+      console.error('Erro inesperado ao criar Equipe:', err);
+      toast.error('Erro inesperado ao criar Equipe. Tente novamente.');
+    } finally {
+      setIsCreating(false);
     }
-    setTeams((prev) => [...prev, { id: data.id, name: data.name, description: data.description || '', color: data.color, memberIds: [] }]);
-    setNewTeamName('');
-    setExpandedTeamId(data.id);
-    toast.success(`Equipe "${name}" criada. Adicione os membros.`);
   };
 
   const handleDeleteTeam = async (team: Team) => {

@@ -682,36 +682,44 @@ export default function App() {
 
   const saveTaskComment = useCallback(async (taskId: string, text: string, parentCommentId?: string) => {
     if (!currentUser) return false;
-    const { data, error } = await supabase
-      .from('task_comments')
-      .insert({
-        task_id: taskId,
-        user_id: currentUser.id,
-        text: text,
-        parent_comment_id: parentCommentId || null,
-      })
-      .select()
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from('task_comments')
+        .insert({
+          task_id: taskId,
+          user_id: currentUser.id,
+          text: text,
+          parent_comment_id: parentCommentId || null,
+        })
+        .select()
+        .single();
 
-    if (data && !error) {
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            comments: [...(t.comments || []), {
-              id: data.id,
-              userId: data.user_id,
-              text: data.text,
-              timestamp: data.created_at,
-              parentCommentId: data.parent_comment_id || undefined,
-            }]
-          };
-        }
-        return t;
-      }));
-      return true;
+      if (data && !error) {
+        setTasks(prev => prev.map(t => {
+          if (t.id === taskId) {
+            return {
+              ...t,
+              comments: [...(t.comments || []), {
+                id: data.id,
+                userId: data.user_id,
+                text: data.text,
+                timestamp: data.created_at,
+                parentCommentId: data.parent_comment_id || undefined,
+              }]
+            };
+          }
+          return t;
+        }));
+        return true;
+      }
+      console.error('Erro ao salvar comentário:', error);
+      toast.error('Erro ao salvar comentário: ' + (error?.message || 'tente novamente.'));
+      return false;
+    } catch (err) {
+      console.error('Erro inesperado ao salvar comentário:', err);
+      toast.error('Erro inesperado ao salvar comentário. Tente novamente.');
+      return false;
     }
-    return false;
   }, [currentUser]);
 
   const editTaskComment = useCallback(async (taskId: string, commentId: string, newText: string) => {
@@ -9601,7 +9609,11 @@ function CreateWikiModal({ spaces, onClose, onCreate }: any) {
   const handleConfirm = async () => {
     if (!spaceId || isCreating) return;
     setIsCreating(true);
-    await onCreate(spaceId);
+    try {
+      await onCreate(spaceId);
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   return (

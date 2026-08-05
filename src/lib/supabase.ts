@@ -7,6 +7,34 @@ if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error('Supabase URL e Anon Key são obrigatórios. Verifique o arquivo .env');
 }
 
+// Toda request do supabase-js (auth, PostgREST, Storage, Functions) passa por
+// aqui. Sem isso, um fetch que trava depois que a aba volta de segundo plano
+// (throttling do navegador suspende a conexão em andamento, ex.: o refresh de
+// token automático) nunca resolve nem rejeita — e como esse fetch roda DENTRO
+// do processLock acima, o lock nunca é liberado e toda chamada seguinte na
+// mesma aba (criar tarefa, salvar comentário, etc.) fica presa esperando o
+// lock para sempre, sem erro nenhum na tela. Um timeout por request garante
+// que o fetch sempre rejeita, o que libera o lock e deixa o catch/finally de
+// cada handler (ex.: handleCreateTask) rodar normalmente e mostrar o erro.
+// Upload de anexo (Storage) ganha um teto maior: é o único fluxo onde uma
+// requisição legitimamente lenta (arquivo grande, rede ruim) é esperada.
+const DEFAULT_FETCH_TIMEOUT_MS = 20_000;
+const STORAGE_FETCH_TIMEOUT_MS = 120_000;
+
+const fetchWithTimeout: typeof fetch = (input, init) => {
+    const url = typeof input === 'string' ? input : (input as Request).url;
+    const timeoutMs = url.includes('/storage/v1/') ? STORAGE_FETCH_TIMEOUT_MS : DEFAULT_FETCH_TIMEOUT_MS;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    // Se o chamador já passou um signal (raro hoje, mas respeitamos), aborta
+    // também quando ele abortar, sem perder o timeout acima.
+    init?.signal?.addEventListener('abort', () => controller.abort());
+
+    return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+};
+
 // Cliente público (para autenticação de usuários)
 // NUNCA crie um cliente com a service_role key aqui: qualquer env VITE_* é
 // embutida em texto claro no bundle JS público. Operações privilegiadas
@@ -30,6 +58,9 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
         // tempo; o pior caso é uma delas precisar buscar sessão de novo, não um
         // travamento de 10s pro usuário.
         lock: processLock,
+    },
+    global: {
+        fetch: fetchWithTimeout,
     },
 });
 
