@@ -66,15 +66,21 @@ export function RepliesView({ currentUser, users, onOpenTask }: RepliesViewProps
 
   const loadNotifications = useCallback(async () => {
     setIsLoading(true);
-    const { data } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', currentUser.id)
-      .eq('type', 'reply')
-      .order('created_at', { ascending: false })
-      .limit(200);
-    if (data) setNotifications(data.map(mapRow));
-    setIsLoading(false);
+    try {
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', currentUser.id)
+        .eq('type', 'reply')
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (error) throw error;
+      if (data) setNotifications(data.map(mapRow));
+    } catch (err) {
+      console.error('Erro ao carregar respostas:', err);
+    } finally {
+      setIsLoading(false);
+    }
   }, [currentUser.id]);
 
   useEffect(() => {

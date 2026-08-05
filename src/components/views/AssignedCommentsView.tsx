@@ -63,15 +63,21 @@ export function AssignedCommentsView({ currentUser, users, onOpenTask }: Assigne
 
   const loadComments = useCallback(async () => {
     setIsLoading(true);
-    const { data } = await supabase
-      .from('task_comments')
-      .select('*, task:tasks(title)')
-      .or(`assigned_to.eq.${currentUser.id},assigned_by.eq.${currentUser.id}`)
-      .is('deleted_at', null)
-      .order('created_at', { ascending: false })
-      .limit(200);
-    if (data) setComments(data.map(mapRow));
-    setIsLoading(false);
+    try {
+      const { data, error } = await supabase
+        .from('task_comments')
+        .select('*, task:tasks(title)')
+        .or(`assigned_to.eq.${currentUser.id},assigned_by.eq.${currentUser.id}`)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false })
+        .limit(200);
+      if (error) throw error;
+      if (data) setComments(data.map(mapRow));
+    } catch (err) {
+      console.error('Erro ao carregar comentários atribuídos:', err);
+    } finally {
+      setIsLoading(false);
+    }
   }, [currentUser.id]);
 
   useEffect(() => {
