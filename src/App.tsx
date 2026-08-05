@@ -256,7 +256,14 @@ function CommentAssignmentBar({ item, users, currentUserId, formatDate, onAssign
             </>
           )}
           {assignableUsers.map((u: any) => (
-            <DropdownMenuItem key={u.id} onClick={() => onAssign(u.id)} className="flex items-center gap-2 text-sm">
+            <DropdownMenuItem
+              key={u.id}
+              // Clicar em quem já está atribuído seria um no-op visual, mas
+              // assignTaskComment sempre limpa resolved_at/resolved_by — sem
+              // essa guarda, reabriria como pendente um item já resolvido.
+              onClick={() => { if (u.id !== item.assignedTo) onAssign(u.id); }}
+              className="flex items-center gap-2 text-sm"
+            >
               <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-5 h-5 rounded-full" alt="" />
               {u.name}
               {item.assignedTo === u.id && <Icons.Check className="w-3.5 h-3.5 ml-auto text-purple-500" />}
@@ -1829,27 +1836,35 @@ export default function App() {
     }
   }, []);
 
+  const isDoneLikeStatus = (status: string) => {
+    const s = status.toLowerCase();
+    return ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado'].some(kw => s.includes(kw));
+  };
+
+  // Motivo de bloqueio de fechamento (dependência pendente ou comentário
+  // atribuído não resolvido), ou null se a tarefa pode ser fechada. Chamado a
+  // partir de TODO caminho que grava status diretamente (edição avulsa, drag
+  // no Kanban, edição em massa) — não só handleUpdateTask, senão os outros
+  // dois driblam o mesmo invariante.
+  const getTaskCloseBlockReason = async (taskId: string): Promise<string | null> => {
+    const [bloqueada, temComentarioPendente] = await Promise.all([
+      isTaskBlocked(taskId),
+      hasUnresolvedAssignedComments(taskId),
+    ]);
+    if (bloqueada) return 'Esta tarefa está bloqueada por outra que ainda não foi concluída.';
+    if (temComentarioPendente) return 'Esta tarefa tem comentários atribuídos ainda não resolvidos.';
+    return null;
+  };
+
   const handleUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
-    if (updates.status) {
-      const newStatus = updates.status.toLowerCase();
-      const isDone = ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado']
-        .some(kw => newStatus.includes(kw));
-      if (isDone) {
-        const [bloqueada, temComentarioPendente] = await Promise.all([
-          isTaskBlocked(taskId),
-          hasUnresolvedAssignedComments(taskId),
-        ]);
-        if (bloqueada) {
-          toast.warning('Esta tarefa está bloqueada por outra que ainda não foi concluída.');
-          return;
-        }
-        if (temComentarioPendente) {
-          toast.warning('Esta tarefa tem comentários atribuídos ainda não resolvidos.');
-          return;
-        }
+    if (updates.status && isDoneLikeStatus(updates.status)) {
+      const blockReason = await getTaskCloseBlockReason(taskId);
+      if (blockReason) {
+        toast.warning(blockReason);
+        return;
       }
     }
 
@@ -1858,10 +1873,21 @@ export default function App() {
 
   // --- Bulk Actions (T701) ---
   const handleBulkStatusChange = async (ids: string[], status: string) => {
-    const { error } = await supabase.from('tasks').update({ status }).in('id', ids);
+    let targetIds = ids;
+    if (isDoneLikeStatus(status)) {
+      const blockReasons = await Promise.all(ids.map(id => getTaskCloseBlockReason(id)));
+      targetIds = ids.filter((_, i) => !blockReasons[i]);
+      const blockedCount = ids.length - targetIds.length;
+      if (blockedCount > 0) {
+        toast.warning(`${blockedCount} tarefa(s) não foram alteradas: bloqueadas por dependência ou comentário atribuído pendente.`);
+      }
+      if (targetIds.length === 0) return;
+    }
+
+    const { error } = await supabase.from('tasks').update({ status }).in('id', targetIds);
     if (!error) {
-      setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, status } : t));
-      toast.success(`${ids.length} tarefa(s) atualizadas para "${status}"`);
+      setTasks(prev => prev.map(t => targetIds.includes(t.id) ? { ...t, status } : t));
+      toast.success(`${targetIds.length} tarefa(s) atualizadas para "${status}"`);
     } else {
       toast.error('Erro ao alterar status: ' + error.message);
     }
@@ -2408,6 +2434,14 @@ export default function App() {
   };
 
   const handleStatusChange = useCallback(async (taskId: string, newStatus: string) => {
+    if (isDoneLikeStatus(newStatus)) {
+      const blockReason = await getTaskCloseBlockReason(taskId);
+      if (blockReason) {
+        toast.warning(blockReason);
+        return;
+      }
+    }
+
     const { error } = await supabase
       .from('tasks')
       .update({ status: newStatus })
