@@ -3597,8 +3597,11 @@ export default function App() {
                 </Popover>
               )}
 
-              {/* "Atribuídas a mim": concluídas ficam escondidas por padrão, igual ao ClickUp */}
-              {activeScope.name === 'Minhas Tarefas' && (
+              {/* "Atribuídas a mim": concluídas ficam escondidas por padrão, igual ao ClickUp.
+                  Só faz sentido nas views que consomem filteredTasks (List/Table/Kanban) —
+                  o dashboard "Minhas Tarefas" (MyTasksView) usa a lista de tarefas própria,
+                  então o botão apareceria ali sem fazer nada. */}
+              {activeScope.name === 'Minhas Tarefas' && activeView !== 'MyTasks' && (
                 <button
                   onClick={() => setShowClosedInMyTasks(v => !v)}
                   className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${showClosedInMyTasks ? 'bg-orange-50 border-orange-300 text-orange-600' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'}`}
