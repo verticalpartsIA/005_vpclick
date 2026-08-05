@@ -180,6 +180,7 @@ export interface Task {
   projectId: string;
   parentId?: string;
   createdAt?: string;
+  createdBy?: string;
   dependencies?: TaskDependency[];
   tags?: string[];
   watcherIds?: string[];
