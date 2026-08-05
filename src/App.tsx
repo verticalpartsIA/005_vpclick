@@ -5544,7 +5544,7 @@ function Sidebar({
                       hiddenSpaceIds={hiddenSpaceIds}
                       onToggleHidden={toggleHiddenSpace}
                       onCreateSpace={onOpenCreateSpace}
-                      onNavigateToSpace={(id: string, name: string) => onNavigate('space', id, name)}
+                      onNavigateToSpace={(id: string, name: string) => { onNavigate('space', id, name); onViewChange('Dashboard'); }}
                       onClose={() => setShowAllSpacesModal(false)}
                     />
                   )}
