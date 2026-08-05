@@ -229,6 +229,26 @@ export interface List {
   name: string;
   folderId: string;
   statusGroupId: string;
+  ownerId?: string;
+}
+
+// ── Lembretes ("Hoje e atrasadas", item 7 da sidebar "Início") ───────────
+export type ReminderNotifyPreference = 'on_due' | '10_min_before' | '1_hour_before' | 'custom' | 'off';
+
+export interface Reminder {
+  id: string;
+  title: string;
+  details?: string;
+  dueAt: string;
+  notifyPreference: ReminderNotifyPreference;
+  customNotifyAt?: string;
+  userId: string;
+  createdBy?: string;
+  completed: boolean;
+  completedAt?: string;
+  taskId?: string;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Folder {
