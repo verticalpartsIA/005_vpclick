@@ -157,17 +157,32 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
   // Conflito de sala: só avisa (não bloqueia) — mostra quem mais já reservou
   // aquela sala num horário que sobrepõe o que está sendo escolhido agora.
-  const roomConflicts = useMemo(() => {
-    if (!newRoomId || !newDate) return [];
+  // Consulta o Supabase direto (em vez de filtrar a lista `meetings` já
+  // carregada, que só traz as 200 reuniões de meeting_date mais recente/
+  // futuro): a partir de um certo volume de reuniões futuras, essa lista
+  // em cache deixaria de conter reservas que ainda precisam ser checadas.
+  const [roomConflicts, setRoomConflicts] = useState<{ id: string; title: string; meetingDate: string; endDate: string }[]>([]);
+  useEffect(() => {
+    if (!newRoomId || !newDate) {
+      setRoomConflicts([]);
+      return;
+    }
+    let cancelled = false;
     const start = new Date(newDate);
     const end = new Date(start.getTime() + newDurationMinutes * 60_000);
-    return meetings.filter((m) => {
-      if (m.roomId !== newRoomId || !m.endDate) return false;
-      const mStart = new Date(m.meetingDate);
-      const mEnd = new Date(m.endDate);
-      return mStart < end && start < mEnd;
-    });
-  }, [meetings, newRoomId, newDate, newDurationMinutes]);
+    supabase
+      .from('meetings')
+      .select('id, title, meeting_date, end_date')
+      .eq('room_id', newRoomId)
+      .not('end_date', 'is', null)
+      .lt('meeting_date', end.toISOString())
+      .gt('end_date', start.toISOString())
+      .then(({ data }) => {
+        if (cancelled) return;
+        setRoomConflicts((data || []).map((m: any) => ({ id: m.id, title: m.title, meetingDate: m.meeting_date, endDate: m.end_date })));
+      });
+    return () => { cancelled = true; };
+  }, [newRoomId, newDate, newDurationMinutes]);
 
   useEffect(() => { loadMeetings(); }, [loadMeetings]);
 
