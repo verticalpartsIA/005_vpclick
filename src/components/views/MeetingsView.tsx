@@ -330,6 +330,18 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     setGeneratingId(null);
   };
 
+  const cancelMeeting = async (meeting: Meeting) => {
+    if (!window.confirm(`Desmarcar a reunião "${meeting.title}"? Isso libera a sala e não pode ser desfeito.`)) return;
+    const { error } = await supabase.from('meetings').delete().eq('id', meeting.id);
+    if (error) {
+      toast.error('Erro ao desmarcar a reunião: ' + error.message);
+      return;
+    }
+    setMeetings((prev) => prev.filter((m) => m.id !== meeting.id));
+    if (selectedId === meeting.id) setSelectedId(null);
+    toast.success('Reunião desmarcada.');
+  };
+
   const toggleActionItem = async (item: MeetingActionItem) => {
     const completed = !item.completed;
     setMeetings((prev) => prev.map((m) => (m.id !== item.meetingId ? m : {
@@ -360,7 +372,15 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
         </button>
 
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 mb-4">
-          <h1 className="text-xl font-bold text-gray-800">{selected.title}</h1>
+          <div className="flex items-start justify-between gap-2">
+            <h1 className="text-xl font-bold text-gray-800">{selected.title}</h1>
+            <button
+              onClick={() => cancelMeeting(selected)}
+              className="text-xs font-semibold text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg px-2 py-1 transition-colors shrink-0"
+            >
+              Desmarcar reunião
+            </button>
+          </div>
           <p className="text-xs text-gray-400 mt-1">
             {formatMeetingDate(selected.meetingDate)}
             {selected.endDate && ` (${formatTimeRange(selected.meetingDate, selected.endDate)})`}
