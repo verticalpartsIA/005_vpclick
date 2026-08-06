@@ -190,13 +190,33 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
   // Abre direto a reunião apontada por uma notificação (sino/Caixa de
   // entrada), depois de carregar a lista — só uma vez, pra não sequestrar de
-  // volta a tela caso o usuário navegue pra outra reunião em seguida.
+  // volta a tela caso o usuário navegue pra outra reunião em seguida. Se a
+  // reunião notificada ficou de fora do cache truncado (200 mais recentes por
+  // data — ex: mais de 200 reuniões futuras cadastradas), busca ela direto
+  // por id em vez de deixar o clique na notificação não abrir nada.
   useEffect(() => {
     if (!openMeetingId || meetings.length === 0) return;
     if (meetings.some((m) => m.id === openMeetingId)) {
       setSelectedId(openMeetingId);
       onOpenMeetingHandled?.();
+      return;
     }
+    let cancelled = false;
+    (async () => {
+      const { data: meetingRow } = await supabase.from('meetings').select('*').eq('id', openMeetingId).maybeSingle();
+      if (cancelled) return;
+      if (!meetingRow) {
+        onOpenMeetingHandled?.();
+        return;
+      }
+      const { data: itemsData } = await supabase.from('meeting_action_items').select('*').eq('meeting_id', openMeetingId);
+      if (cancelled) return;
+      const meeting = mapMeetingRow(meetingRow, itemsData || []);
+      setMeetings((prev) => (prev.some((m) => m.id === meeting.id) ? prev : [meeting, ...prev]));
+      setSelectedId(meeting.id);
+      onOpenMeetingHandled?.();
+    })();
+    return () => { cancelled = true; };
   }, [openMeetingId, meetings, onOpenMeetingHandled]);
 
   const selected = meetings.find((m) => m.id === selectedId) || null;
@@ -435,9 +455,9 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   }
 
   return (
-    <div className="max-w-5xl mx-auto flex gap-6 items-start">
+    <div className="max-w-5xl mx-auto flex flex-col md:flex-row gap-6 items-start">
       <RoomStatusPanel rooms={rooms} />
-      <div className="flex-1 max-w-2xl">
+      <div className="w-full md:flex-1 md:max-w-2xl">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-bold text-gray-800">Reuniões</h1>
         <button
@@ -678,15 +698,21 @@ function computeRoomStatuses(
  */
 function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
   const [statuses, setStatuses] = useState<Record<string, RoomStatus>>({});
+  // Enquanto a primeira consulta não termina (ou se ela falhar), o status de
+  // cada sala fica "desconhecido" em vez de cair pro verde "Livre" — mostrar
+  // uma sala como livre sem confirmação pode levar alguém a ocupar uma sala
+  // já reservada.
+  const [hasLoaded, setHasLoaded] = useState(false);
   const activeRooms = useMemo(() => rooms.filter((r) => r.isActive), [rooms]);
   const activeRoomIds = useMemo(() => activeRooms.map((r) => r.id), [activeRooms]);
 
   const load = useCallback(async () => {
     if (activeRoomIds.length === 0) {
       setStatuses({});
+      setHasLoaded(true);
       return;
     }
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from('meetings')
       .select('room_id, title, meeting_date, end_date')
       .in('room_id', activeRoomIds)
@@ -694,7 +720,9 @@ function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
       .gte('end_date', new Date().toISOString())
       .order('meeting_date', { ascending: true })
       .limit(200);
+    if (error) return; // mantém o último status conhecido (ou "desconhecido") em vez de mascarar a falha
     setStatuses(computeRoomStatuses(data || [], activeRoomIds));
+    setHasLoaded(true);
   }, [activeRoomIds]);
 
   useEffect(() => {
@@ -706,16 +734,17 @@ function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
   if (activeRooms.length === 0) return null;
 
   return (
-    <div className="w-56 shrink-0 space-y-2">
+    <div className="w-full md:w-56 md:shrink-0 space-y-2">
       <p className="text-[10px] text-gray-400 font-bold uppercase px-1">Status das salas</p>
       {activeRooms.map((room) => {
         const status = statuses[room.id];
-        const style =
-          status?.state === 'busy'
-            ? { dot: 'bg-red-500', bg: 'bg-red-50 border-red-200', label: 'Em uso agora' }
-            : status?.state === 'soon'
-            ? { dot: 'bg-amber-500', bg: 'bg-amber-50 border-amber-200', label: 'Começa em breve' }
-            : { dot: 'bg-green-500', bg: 'bg-green-50 border-green-200', label: 'Livre' };
+        const style = !hasLoaded
+          ? { dot: 'bg-gray-300 animate-pulse', bg: 'bg-gray-50 border-gray-200', label: 'Carregando...' }
+          : status?.state === 'busy'
+          ? { dot: 'bg-red-500', bg: 'bg-red-50 border-red-200', label: 'Em uso agora' }
+          : status?.state === 'soon'
+          ? { dot: 'bg-amber-500', bg: 'bg-amber-50 border-amber-200', label: 'Começa em breve' }
+          : { dot: 'bg-green-500', bg: 'bg-green-50 border-green-200', label: 'Livre' };
         return (
           <div key={room.id} className={`rounded-lg border p-2.5 ${style.bg}`}>
             <div className="flex items-center gap-1.5">
@@ -723,9 +752,10 @@ function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
               <p className="text-xs font-semibold text-gray-700 truncate">{room.name}</p>
             </div>
             <p className="text-[11px] text-gray-500 mt-1">
-              {status?.state === 'busy' && status.current && `${style.label} · até ${formatTimeRange(status.current.endDate)}`}
-              {status?.state === 'soon' && status.next && `${style.label} · às ${formatTimeRange(status.next.meetingDate)}`}
-              {(!status || status.state === 'free') &&
+              {!hasLoaded && style.label}
+              {hasLoaded && status?.state === 'busy' && status.current && `${style.label} · até ${formatTimeRange(status.current.endDate)}`}
+              {hasLoaded && status?.state === 'soon' && status.next && `${style.label} · às ${formatTimeRange(status.next.meetingDate)}`}
+              {hasLoaded && (!status || status.state === 'free') &&
                 (status?.next ? `Livre · próxima às ${formatTimeRange(status.next.meetingDate)}` : 'Livre')}
             </p>
           </div>
