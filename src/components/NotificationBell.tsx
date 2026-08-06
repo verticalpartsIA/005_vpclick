@@ -6,6 +6,7 @@ interface NotificationBellProps {
   currentUser: User;
   users: User[];
   onOpenTask: (taskId: string) => void;
+  onOpenMeeting: (meetingId: string) => void;
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -17,6 +18,7 @@ const TYPE_ICONS: Record<string, string> = {
   reply: '↩️',
   comment_assigned: '📝',
   comment_resolved: '✅',
+  meeting: '🗓️',
 };
 
 function relativeTime(date: string) {
@@ -33,7 +35,7 @@ function relativeTime(date: string) {
 }
 
 /** Sino de notificações in-app (menções, atribuições, automações) com atualização em tempo real. */
-export function NotificationBell({ currentUser, users, onOpenTask }: NotificationBellProps) {
+export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting }: NotificationBellProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -47,6 +49,7 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
     body: n.body || '',
     taskId: n.task_id,
     commentId: n.comment_id,
+    meetingId: n.meeting_id,
     read: n.read,
     createdAt: n.created_at,
   });
@@ -115,6 +118,9 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
     if (!n.read) markAsRead([n.id]);
     if (n.taskId) {
       onOpenTask(n.taskId);
+      setIsOpen(false);
+    } else if (n.meetingId) {
+      onOpenMeeting(n.meetingId);
       setIsOpen(false);
     }
   };

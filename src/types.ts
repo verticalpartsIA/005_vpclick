@@ -207,7 +207,7 @@ export interface Team {
 }
 
 // ── Notificações in-app (sino) ────────────────────────────
-export type NotificationType = 'mention' | 'team_mention' | 'assignment' | 'comment' | 'automation' | 'reply' | 'comment_assigned' | 'comment_resolved';
+export type NotificationType = 'mention' | 'team_mention' | 'assignment' | 'comment' | 'automation' | 'reply' | 'comment_assigned' | 'comment_resolved' | 'meeting';
 
 export interface AppNotification {
   id: string;
@@ -218,6 +218,7 @@ export interface AppNotification {
   body: string;
   taskId?: string;
   commentId?: string;
+  meetingId?: string;
   read: boolean;
   createdAt: string;
 }
