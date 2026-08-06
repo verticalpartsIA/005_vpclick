@@ -109,6 +109,17 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
       }, (payload: any) => {
         if (payload.new) setNotifications((prev) => prev.map((n) => (n.id === payload.new.id ? mapRow(payload.new) : n)));
       })
+      .on('postgres_changes', {
+        // Reflete exclusões (ex: notificação de convite quando a reunião é
+        // desmarcada) — sem isso o item ficava visível/clicável até recarregar,
+        // levando a uma reunião que não existe mais.
+        event: 'DELETE',
+        schema: 'public',
+        table: 'notifications',
+        filter: `user_id=eq.${currentUser.id}`,
+      }, (payload: any) => {
+        if (payload.old) setNotifications((prev) => prev.filter((n) => n.id !== payload.old.id));
+      })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [currentUser.id, loadNotifications]);
