@@ -165,12 +165,16 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   // em cache deixaria de conter reservas que ainda precisam ser checadas.
   const [roomConflicts, setRoomConflicts] = useState<{ id: string; title: string; meetingDate: string; endDate: string }[]>([]);
   useEffect(() => {
-    if (!newRoomId || !newDate) {
+    if (!newRoomId) {
       setRoomConflicts([]);
       return;
     }
     let cancelled = false;
-    const start = new Date(newDate);
+    // Mesmo padrão do createMeeting(): data em branco vira "agora" — sem
+    // isso, escolher uma sala e criar a reunião imediatamente (sem preencher
+    // o horário) não checava conflito nenhum, mesmo a reunião indo ocupar a
+    // sala a partir de agora de verdade.
+    const start = newDate ? new Date(newDate) : new Date();
     const end = new Date(start.getTime() + newDurationMinutes * 60_000);
     supabase
       .from('meetings')
@@ -188,36 +192,35 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
   useEffect(() => { loadMeetings(); }, [loadMeetings]);
 
-  // Abre direto a reunião apontada por uma notificação (sino/Caixa de
-  // entrada), depois de carregar a lista — só uma vez, pra não sequestrar de
-  // volta a tela caso o usuário navegue pra outra reunião em seguida. Se a
-  // reunião notificada ficou de fora do cache truncado (200 mais recentes por
-  // data — ex: mais de 200 reuniões futuras cadastradas), busca ela direto
-  // por id em vez de deixar o clique na notificação não abrir nada.
-  useEffect(() => {
-    if (!openMeetingId || meetings.length === 0) return;
-    if (meetings.some((m) => m.id === openMeetingId)) {
-      setSelectedId(openMeetingId);
-      onOpenMeetingHandled?.();
+  // Abre uma reunião por id mesmo que ela tenha ficado de fora do cache
+  // truncado (200 mais recentes por data — ex: mais de 200 reuniões futuras
+  // cadastradas): busca ela direto em vez de deixar o clique não abrir nada.
+  // Usada tanto pela notificação de reunião quanto pelo painel de status das
+  // salas (clicar numa reserva da lista expandida).
+  const selectMeetingById = useCallback(async (id: string) => {
+    if (meetings.some((m) => m.id === id)) {
+      setSelectedId(id);
       return;
     }
+    const { data: meetingRow } = await supabase.from('meetings').select('*').eq('id', id).maybeSingle();
+    if (!meetingRow) return;
+    const { data: itemsData } = await supabase.from('meeting_action_items').select('*').eq('meeting_id', id);
+    const meeting = mapMeetingRow(meetingRow, itemsData || []);
+    setMeetings((prev) => (prev.some((m) => m.id === meeting.id) ? prev : [meeting, ...prev]));
+    setSelectedId(meeting.id);
+  }, [meetings]);
+
+  // Abre direto a reunião apontada por uma notificação (sino/Caixa de
+  // entrada), depois de carregar a lista — só uma vez, pra não sequestrar de
+  // volta a tela caso o usuário navegue pra outra reunião em seguida.
+  useEffect(() => {
+    if (!openMeetingId || meetings.length === 0) return;
     let cancelled = false;
-    (async () => {
-      const { data: meetingRow } = await supabase.from('meetings').select('*').eq('id', openMeetingId).maybeSingle();
-      if (cancelled) return;
-      if (!meetingRow) {
-        onOpenMeetingHandled?.();
-        return;
-      }
-      const { data: itemsData } = await supabase.from('meeting_action_items').select('*').eq('meeting_id', openMeetingId);
-      if (cancelled) return;
-      const meeting = mapMeetingRow(meetingRow, itemsData || []);
-      setMeetings((prev) => (prev.some((m) => m.id === meeting.id) ? prev : [meeting, ...prev]));
-      setSelectedId(meeting.id);
-      onOpenMeetingHandled?.();
-    })();
+    selectMeetingById(openMeetingId).finally(() => {
+      if (!cancelled) onOpenMeetingHandled?.();
+    });
     return () => { cancelled = true; };
-  }, [openMeetingId, meetings, onOpenMeetingHandled]);
+  }, [openMeetingId, meetings, onOpenMeetingHandled, selectMeetingById]);
 
   const selected = meetings.find((m) => m.id === selectedId) || null;
   useEffect(() => { setNotesDraft(selected?.notes || ''); }, [selected?.id]);
@@ -456,7 +459,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
   return (
     <div className="max-w-5xl mx-auto flex flex-col md:flex-row gap-6 items-start">
-      <RoomStatusPanel rooms={rooms} />
+      <RoomStatusPanel rooms={rooms} users={users} onSelectMeeting={selectMeetingById} />
       <div className="w-full md:flex-1 md:max-w-2xl">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-bold text-gray-800">Reuniões</h1>
@@ -653,56 +656,69 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   );
 }
 
+type RoomMeetingRow = {
+  id: string;
+  room_id: string;
+  title: string;
+  meeting_date: string;
+  end_date: string;
+  created_by: string | null;
+  participant_ids: string[];
+};
+
 type RoomStatus = {
   state: 'busy' | 'soon' | 'free';
-  current?: { title: string; endDate: string };
-  next?: { title: string; meetingDate: string };
+  current?: RoomMeetingRow;
+  next?: RoomMeetingRow;
+  // Todas as reservas futuras/em andamento da sala, ordenadas por horário —
+  // alimenta tanto o contador quanto a lista que aparece ao clicar no card.
+  upcoming: RoomMeetingRow[];
 };
 
 const ROOM_STATUS_POLL_MS = 60_000;
 const SOON_WINDOW_MS = 30 * 60_000;
 
-function computeRoomStatuses(
-  rows: { room_id: string; title: string; meeting_date: string; end_date: string }[],
-  roomIds: string[]
-): Record<string, RoomStatus> {
+function computeRoomStatuses(rows: RoomMeetingRow[], roomIds: string[]): Record<string, RoomStatus> {
   const now = Date.now();
-  const byRoom = new Map<string, typeof rows>();
+  const byRoom = new Map<string, RoomMeetingRow[]>();
   rows.forEach((r) => {
     if (!byRoom.has(r.room_id)) byRoom.set(r.room_id, []);
     byRoom.get(r.room_id)!.push(r);
   });
   const result: Record<string, RoomStatus> = {};
   roomIds.forEach((id) => {
-    const roomMeetings = (byRoom.get(id) || []).sort((a, b) => new Date(a.meeting_date).getTime() - new Date(b.meeting_date).getTime());
-    const current = roomMeetings.find((m) => new Date(m.meeting_date).getTime() <= now && new Date(m.end_date).getTime() > now);
+    const upcoming = (byRoom.get(id) || []).sort((a, b) => new Date(a.meeting_date).getTime() - new Date(b.meeting_date).getTime());
+    const current = upcoming.find((m) => new Date(m.meeting_date).getTime() <= now && new Date(m.end_date).getTime() > now);
     if (current) {
-      result[id] = { state: 'busy', current: { title: current.title, endDate: current.end_date } };
+      result[id] = { state: 'busy', current, upcoming };
       return;
     }
-    const next = roomMeetings.find((m) => new Date(m.meeting_date).getTime() > now);
+    const next = upcoming.find((m) => new Date(m.meeting_date).getTime() > now);
     if (next && new Date(next.meeting_date).getTime() - now <= SOON_WINDOW_MS) {
-      result[id] = { state: 'soon', next: { title: next.title, meetingDate: next.meeting_date } };
+      result[id] = { state: 'soon', next, upcoming };
       return;
     }
-    result[id] = { state: 'free', next: next ? { title: next.title, meetingDate: next.meeting_date } : undefined };
+    result[id] = { state: 'free', next, upcoming };
   });
   return result;
 }
 
 /**
  * Painel de status das salas ("semáforo"): livre / ocupada agora / começa em
- * breve. Consulta o Supabase direto (mesmo motivo do checador de conflito
- * acima) e atualiza sozinho a cada 60s, já que é um status "agora" que fica
- * velho rápido.
+ * breve, com quem reservou e quantas reservas futuras existem. Clicar num
+ * card expande a lista completa (título, responsável e participantes) —
+ * cada uma abre a reunião de verdade. Consulta o Supabase direto (mesmo
+ * motivo do checador de conflito acima) e atualiza sozinho a cada 60s, já
+ * que é um status "agora" que fica velho rápido.
  */
-function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
+function RoomStatusPanel({ rooms, users, onSelectMeeting }: { rooms: MeetingRoom[]; users: User[]; onSelectMeeting: (id: string) => void }) {
   const [statuses, setStatuses] = useState<Record<string, RoomStatus>>({});
   // Enquanto a primeira consulta não termina (ou se ela falhar), o status de
   // cada sala fica "desconhecido" em vez de cair pro verde "Livre" — mostrar
   // uma sala como livre sem confirmação pode levar alguém a ocupar uma sala
   // já reservada.
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [expandedRoomId, setExpandedRoomId] = useState<string | null>(null);
   const activeRooms = useMemo(() => rooms.filter((r) => r.isActive), [rooms]);
   const activeRoomIds = useMemo(() => activeRooms.map((r) => r.id), [activeRooms]);
 
@@ -712,16 +728,25 @@ function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
       setHasLoaded(true);
       return;
     }
-    const { data, error } = await supabase
-      .from('meetings')
-      .select('room_id, title, meeting_date, end_date')
-      .in('room_id', activeRoomIds)
-      .not('end_date', 'is', null)
-      .gte('end_date', new Date().toISOString())
-      .order('meeting_date', { ascending: true })
-      .limit(200);
-    if (error) return; // mantém o último status conhecido (ou "desconhecido") em vez de mascarar a falha
-    setStatuses(computeRoomStatuses(data || [], activeRoomIds));
+    // Uma consulta por sala (em vez de um único `.in(...).limit(200)`
+    // compartilhado entre todas): com um teto só pro conjunto, salas com
+    // muitas reservas futuras podiam empurrar as reservas de outra sala pra
+    // fora do corte, fazendo ela aparecer com contador/"Livre" errados.
+    const results = await Promise.all(
+      activeRoomIds.map((roomId) =>
+        supabase
+          .from('meetings')
+          .select('id, room_id, title, meeting_date, end_date, created_by, participant_ids')
+          .eq('room_id', roomId)
+          .not('end_date', 'is', null)
+          .gte('end_date', new Date().toISOString())
+          .order('meeting_date', { ascending: true })
+          .limit(200)
+      )
+    );
+    if (results.some((r) => r.error)) return; // mantém o último status conhecido (ou "desconhecido") em vez de mascarar a falha
+    const rows = results.flatMap((r) => (r.data || []) as RoomMeetingRow[]);
+    setStatuses(computeRoomStatuses(rows, activeRoomIds));
     setHasLoaded(true);
   }, [activeRoomIds]);
 
@@ -730,6 +755,8 @@ function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
     const interval = setInterval(load, ROOM_STATUS_POLL_MS);
     return () => clearInterval(interval);
   }, [load]);
+
+  const nameOf = (userId: string | null | undefined) => users.find((u) => u.id === userId)?.name || 'Alguém';
 
   if (activeRooms.length === 0) return null;
 
@@ -745,19 +772,68 @@ function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
           : status?.state === 'soon'
           ? { dot: 'bg-amber-500', bg: 'bg-amber-50 border-amber-200', label: 'Começa em breve' }
           : { dot: 'bg-green-500', bg: 'bg-green-50 border-green-200', label: 'Livre' };
+        const upcoming = status?.upcoming || [];
+        const extraCount = Math.max(upcoming.length - 1, 0);
+        const isExpanded = expandedRoomId === room.id;
         return (
-          <div key={room.id} className={`rounded-lg border p-2.5 ${style.bg}`}>
-            <div className="flex items-center gap-1.5">
-              <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} />
-              <p className="text-xs font-semibold text-gray-700 truncate">{room.name}</p>
-            </div>
-            <p className="text-[11px] text-gray-500 mt-1">
-              {!hasLoaded && style.label}
-              {hasLoaded && status?.state === 'busy' && status.current && `${style.label} · até ${formatTimeRange(status.current.endDate)}`}
-              {hasLoaded && status?.state === 'soon' && status.next && `${style.label} · às ${formatTimeRange(status.next.meetingDate)}`}
-              {hasLoaded && (!status || status.state === 'free') &&
-                (status?.next ? `Livre · próxima às ${formatTimeRange(status.next.meetingDate)}` : 'Livre')}
-            </p>
+          <div key={room.id} className={`rounded-lg border ${style.bg}`}>
+            <button
+              type="button"
+              onClick={() => setExpandedRoomId(isExpanded ? null : room.id)}
+              className="w-full text-left p-2.5"
+            >
+              <div className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} />
+                <p className="text-xs font-semibold text-gray-700 truncate flex-1">{room.name}</p>
+                {hasLoaded && upcoming.length > 0 && (
+                  <span className="text-[10px] text-gray-400 shrink-0">
+                    {upcoming.length} reserva{upcoming.length === 1 ? '' : 's'} {isExpanded ? '▾' : '▸'}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-gray-500 mt-1">
+                {!hasLoaded && style.label}
+                {hasLoaded && status?.state === 'busy' && status.current &&
+                  `${style.label} · até ${formatTimeRange(status.current.end_date)} · ${nameOf(status.current.created_by)}`}
+                {hasLoaded && status?.state === 'soon' && status.next &&
+                  `${style.label} · às ${formatTimeRange(status.next.meeting_date)} · ${nameOf(status.next.created_by)}`}
+                {hasLoaded && (!status || status.state === 'free') &&
+                  (status?.next
+                    ? `Livre · próxima às ${formatTimeRange(status.next.meeting_date)} · ${nameOf(status.next.created_by)}`
+                    : 'Livre')}
+              </p>
+              {hasLoaded && extraCount > 0 && (
+                <p className="text-[10px] text-gray-400 mt-0.5">+{extraCount} depois</p>
+              )}
+            </button>
+            {isExpanded && (
+              <div className="border-t border-black/5 max-h-56 overflow-y-auto custom-scrollbar">
+                {upcoming.length === 0 && (
+                  <p className="p-2.5 text-[11px] text-gray-400">Nenhuma reserva futura.</p>
+                )}
+                {upcoming.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => onSelectMeeting(m.id)}
+                    className="w-full text-left p-2.5 border-t border-black/5 first:border-t-0 hover:bg-white/60"
+                  >
+                    <p className="text-xs font-semibold text-gray-700 truncate">{m.title}</p>
+                    <p className="text-[11px] text-gray-500 mt-0.5">{formatMeetingDate(m.meeting_date)}</p>
+                    <p className="text-[11px] text-gray-500 mt-0.5">Responsável: {nameOf(m.created_by)}</p>
+                    {m.participant_ids.length > 0 && (
+                      <div className="flex items-center -space-x-1.5 mt-1">
+                        {m.participant_ids.slice(0, 6).map((id) => {
+                          const u = users.find((usr) => usr.id === id);
+                          if (!u) return null;
+                          return <img key={id} src={u.avatar} title={u.name} className="w-5 h-5 rounded-full border-2 border-white" alt="" />;
+                        })}
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         );
       })}
