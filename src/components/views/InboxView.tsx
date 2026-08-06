@@ -7,6 +7,7 @@ interface InboxViewProps {
   currentUser: User;
   users: User[];
   onOpenTask: (taskId: string) => void;
+  onOpenMeeting: (meetingId: string) => void;
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -18,6 +19,7 @@ const TYPE_ICONS: Record<string, string> = {
   reply: '↩️',
   comment_assigned: '📝',
   comment_resolved: '✅',
+  meeting: '🗓️',
 };
 
 function relativeTime(date: string) {
@@ -47,7 +49,7 @@ function dateGroupLabel(date: string) {
  * fonte de dados do sino de notificações, mas em página cheia — sem limite de
  * 30 itens, com filtro lido/não lido e agrupamento por data.
  */
-export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
+export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: InboxViewProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [filter, setFilter] = useState<'all' | 'unread'>('all');
   const [isLoading, setIsLoading] = useState(true);
@@ -61,6 +63,7 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
     body: n.body || '',
     taskId: n.task_id,
     commentId: n.comment_id,
+    meetingId: n.meeting_id,
     read: n.read,
     createdAt: n.created_at,
   });
@@ -121,6 +124,7 @@ export function InboxView({ currentUser, users, onOpenTask }: InboxViewProps) {
   const handleClickNotification = (n: AppNotification) => {
     if (!n.read) markAsRead([n.id]);
     if (n.taskId) onOpenTask(n.taskId);
+    else if (n.meetingId) onOpenMeeting(n.meetingId);
   };
 
   const visible = filter === 'unread' ? notifications.filter((n) => !n.read) : notifications;

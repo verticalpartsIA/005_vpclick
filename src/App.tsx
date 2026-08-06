@@ -1253,6 +1253,11 @@ export default function App() {
   const [activeScope, setActiveScope] = useState<NavigationScope>({ type: 'global', id: null, name: 'Dashboard' });
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [openMeetingId, setOpenMeetingId] = useState<string | null>(null);
+  const handleOpenMeeting = (meetingId: string) => {
+    setOpenMeetingId(meetingId);
+    setActiveView('Meetings');
+  };
   const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
   const [taskToDuplicate, setTaskToDuplicate] = useState<Task | null>(null);
   const [isDuplicatingTask, setIsDuplicatingTask] = useState(false);
@@ -3753,6 +3758,7 @@ export default function App() {
                 currentUser={currentUser}
                 users={adminUsers}
                 onOpenTask={(taskId) => setSelectedTaskId(taskId)}
+                onOpenMeeting={handleOpenMeeting}
               />
 
               <div className="hidden sm:flex flex-col items-end">
@@ -4019,6 +4025,7 @@ export default function App() {
                 currentUser={currentUser}
                 users={adminUsers}
                 onOpenTask={setSelectedTaskId}
+                onOpenMeeting={handleOpenMeeting}
               />
             )}
             {activeView === 'Replies' && (
@@ -4042,6 +4049,8 @@ export default function App() {
                 lists={lists}
                 onOpenTask={setSelectedTaskId}
                 onCreateTaskFromActionItem={createTaskFromMeetingActionItem}
+                openMeetingId={openMeetingId}
+                onOpenMeetingHandled={() => setOpenMeetingId(null)}
               />
             )}
             {activeView === 'MyTasks' && (

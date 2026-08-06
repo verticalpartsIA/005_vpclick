@@ -15,6 +15,8 @@ interface MeetingsViewProps {
   lists: List[];
   onOpenTask: (taskId: string) => void;
   onCreateTaskFromActionItem: (item: { id: string; text: string }, listId: string) => Promise<string | null>;
+  openMeetingId?: string | null;
+  onOpenMeetingHandled?: () => void;
 }
 
 const DURATION_OPTIONS = [
@@ -84,7 +86,7 @@ function formatMeetingDate(d: string) {
  * Claude do ask-ai) gera o resumo e extrai os itens de ação, que podem virar
  * tarefas de verdade com um clique.
  */
-export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTaskFromActionItem }: MeetingsViewProps) {
+export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTaskFromActionItem, openMeetingId, onOpenMeetingHandled }: MeetingsViewProps) {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -186,6 +188,37 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
   useEffect(() => { loadMeetings(); }, [loadMeetings]);
 
+  // Abre direto a reunião apontada por uma notificação (sino/Caixa de
+  // entrada), depois de carregar a lista — só uma vez, pra não sequestrar de
+  // volta a tela caso o usuário navegue pra outra reunião em seguida. Se a
+  // reunião notificada ficou de fora do cache truncado (200 mais recentes por
+  // data — ex: mais de 200 reuniões futuras cadastradas), busca ela direto
+  // por id em vez de deixar o clique na notificação não abrir nada.
+  useEffect(() => {
+    if (!openMeetingId || meetings.length === 0) return;
+    if (meetings.some((m) => m.id === openMeetingId)) {
+      setSelectedId(openMeetingId);
+      onOpenMeetingHandled?.();
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data: meetingRow } = await supabase.from('meetings').select('*').eq('id', openMeetingId).maybeSingle();
+      if (cancelled) return;
+      if (!meetingRow) {
+        onOpenMeetingHandled?.();
+        return;
+      }
+      const { data: itemsData } = await supabase.from('meeting_action_items').select('*').eq('meeting_id', openMeetingId);
+      if (cancelled) return;
+      const meeting = mapMeetingRow(meetingRow, itemsData || []);
+      setMeetings((prev) => (prev.some((m) => m.id === meeting.id) ? prev : [meeting, ...prev]));
+      setSelectedId(meeting.id);
+      onOpenMeetingHandled?.();
+    })();
+    return () => { cancelled = true; };
+  }, [openMeetingId, meetings, onOpenMeetingHandled]);
+
   const selected = meetings.find((m) => m.id === selectedId) || null;
   useEffect(() => { setNotesDraft(selected?.notes || ''); }, [selected?.id]);
 
@@ -234,6 +267,22 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     if (error || !data) return;
     setMeetings((prev) => [mapMeetingRow(data, []), ...prev]);
     setSelectedId(data.id);
+
+    const room = newRoomId ? rooms.find((r) => r.id === newRoomId) : undefined;
+    const recipients = newParticipantIds.filter((id) => id !== currentUser.id);
+    if (recipients.length > 0) {
+      await supabase.from('notifications').insert(
+        recipients.map((userId) => ({
+          user_id: userId,
+          actor_id: currentUser.id,
+          type: 'meeting',
+          title: `${currentUser.name} te adicionou na reunião "${newTitle.trim()}"`,
+          body: `${formatMeetingDate(start.toISOString())}${room ? ` · ${room.name}` : ''}`,
+          meeting_id: data.id,
+        }))
+      );
+    }
+
     resetCreateForm();
   };
 
@@ -406,7 +455,9 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   }
 
   return (
-    <div className="max-w-2xl mx-auto">
+    <div className="max-w-5xl mx-auto flex flex-col md:flex-row gap-6 items-start">
+      <RoomStatusPanel rooms={rooms} />
+      <div className="w-full md:flex-1 md:max-w-2xl">
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-bold text-gray-800">Reuniões</h1>
         <button
@@ -597,6 +648,119 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
           );
         })}
       </div>
+      </div>
+    </div>
+  );
+}
+
+type RoomStatus = {
+  state: 'busy' | 'soon' | 'free';
+  current?: { title: string; endDate: string };
+  next?: { title: string; meetingDate: string };
+};
+
+const ROOM_STATUS_POLL_MS = 60_000;
+const SOON_WINDOW_MS = 30 * 60_000;
+
+function computeRoomStatuses(
+  rows: { room_id: string; title: string; meeting_date: string; end_date: string }[],
+  roomIds: string[]
+): Record<string, RoomStatus> {
+  const now = Date.now();
+  const byRoom = new Map<string, typeof rows>();
+  rows.forEach((r) => {
+    if (!byRoom.has(r.room_id)) byRoom.set(r.room_id, []);
+    byRoom.get(r.room_id)!.push(r);
+  });
+  const result: Record<string, RoomStatus> = {};
+  roomIds.forEach((id) => {
+    const roomMeetings = (byRoom.get(id) || []).sort((a, b) => new Date(a.meeting_date).getTime() - new Date(b.meeting_date).getTime());
+    const current = roomMeetings.find((m) => new Date(m.meeting_date).getTime() <= now && new Date(m.end_date).getTime() > now);
+    if (current) {
+      result[id] = { state: 'busy', current: { title: current.title, endDate: current.end_date } };
+      return;
+    }
+    const next = roomMeetings.find((m) => new Date(m.meeting_date).getTime() > now);
+    if (next && new Date(next.meeting_date).getTime() - now <= SOON_WINDOW_MS) {
+      result[id] = { state: 'soon', next: { title: next.title, meetingDate: next.meeting_date } };
+      return;
+    }
+    result[id] = { state: 'free', next: next ? { title: next.title, meetingDate: next.meeting_date } : undefined };
+  });
+  return result;
+}
+
+/**
+ * Painel de status das salas ("semáforo"): livre / ocupada agora / começa em
+ * breve. Consulta o Supabase direto (mesmo motivo do checador de conflito
+ * acima) e atualiza sozinho a cada 60s, já que é um status "agora" que fica
+ * velho rápido.
+ */
+function RoomStatusPanel({ rooms }: { rooms: MeetingRoom[] }) {
+  const [statuses, setStatuses] = useState<Record<string, RoomStatus>>({});
+  // Enquanto a primeira consulta não termina (ou se ela falhar), o status de
+  // cada sala fica "desconhecido" em vez de cair pro verde "Livre" — mostrar
+  // uma sala como livre sem confirmação pode levar alguém a ocupar uma sala
+  // já reservada.
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const activeRooms = useMemo(() => rooms.filter((r) => r.isActive), [rooms]);
+  const activeRoomIds = useMemo(() => activeRooms.map((r) => r.id), [activeRooms]);
+
+  const load = useCallback(async () => {
+    if (activeRoomIds.length === 0) {
+      setStatuses({});
+      setHasLoaded(true);
+      return;
+    }
+    const { data, error } = await supabase
+      .from('meetings')
+      .select('room_id, title, meeting_date, end_date')
+      .in('room_id', activeRoomIds)
+      .not('end_date', 'is', null)
+      .gte('end_date', new Date().toISOString())
+      .order('meeting_date', { ascending: true })
+      .limit(200);
+    if (error) return; // mantém o último status conhecido (ou "desconhecido") em vez de mascarar a falha
+    setStatuses(computeRoomStatuses(data || [], activeRoomIds));
+    setHasLoaded(true);
+  }, [activeRoomIds]);
+
+  useEffect(() => {
+    load();
+    const interval = setInterval(load, ROOM_STATUS_POLL_MS);
+    return () => clearInterval(interval);
+  }, [load]);
+
+  if (activeRooms.length === 0) return null;
+
+  return (
+    <div className="w-full md:w-56 md:shrink-0 space-y-2">
+      <p className="text-[10px] text-gray-400 font-bold uppercase px-1">Status das salas</p>
+      {activeRooms.map((room) => {
+        const status = statuses[room.id];
+        const style = !hasLoaded
+          ? { dot: 'bg-gray-300 animate-pulse', bg: 'bg-gray-50 border-gray-200', label: 'Carregando...' }
+          : status?.state === 'busy'
+          ? { dot: 'bg-red-500', bg: 'bg-red-50 border-red-200', label: 'Em uso agora' }
+          : status?.state === 'soon'
+          ? { dot: 'bg-amber-500', bg: 'bg-amber-50 border-amber-200', label: 'Começa em breve' }
+          : { dot: 'bg-green-500', bg: 'bg-green-50 border-green-200', label: 'Livre' };
+        return (
+          <div key={room.id} className={`rounded-lg border p-2.5 ${style.bg}`}>
+            <div className="flex items-center gap-1.5">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} />
+              <p className="text-xs font-semibold text-gray-700 truncate">{room.name}</p>
+            </div>
+            <p className="text-[11px] text-gray-500 mt-1">
+              {!hasLoaded && style.label}
+              {hasLoaded && status?.state === 'busy' && status.current && `${style.label} · até ${formatTimeRange(status.current.endDate)}`}
+              {hasLoaded && status?.state === 'soon' && status.next && `${style.label} · às ${formatTimeRange(status.next.meetingDate)}`}
+              {hasLoaded && (!status || status.state === 'free') &&
+                (status?.next ? `Livre · próxima às ${formatTimeRange(status.next.meetingDate)}` : 'Livre')}
+            </p>
+          </div>
+        );
+      })}
     </div>
   );
 }
