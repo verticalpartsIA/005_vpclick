@@ -165,12 +165,16 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   // em cache deixaria de conter reservas que ainda precisam ser checadas.
   const [roomConflicts, setRoomConflicts] = useState<{ id: string; title: string; meetingDate: string; endDate: string }[]>([]);
   useEffect(() => {
-    if (!newRoomId || !newDate) {
+    if (!newRoomId) {
       setRoomConflicts([]);
       return;
     }
     let cancelled = false;
-    const start = new Date(newDate);
+    // Mesmo padrão do createMeeting(): data em branco vira "agora" — sem
+    // isso, escolher uma sala e criar a reunião imediatamente (sem preencher
+    // o horário) não checava conflito nenhum, mesmo a reunião indo ocupar a
+    // sala a partir de agora de verdade.
+    const start = newDate ? new Date(newDate) : new Date();
     const end = new Date(start.getTime() + newDurationMinutes * 60_000);
     supabase
       .from('meetings')
@@ -724,16 +728,25 @@ function RoomStatusPanel({ rooms, users, onSelectMeeting }: { rooms: MeetingRoom
       setHasLoaded(true);
       return;
     }
-    const { data, error } = await supabase
-      .from('meetings')
-      .select('id, room_id, title, meeting_date, end_date, created_by, participant_ids')
-      .in('room_id', activeRoomIds)
-      .not('end_date', 'is', null)
-      .gte('end_date', new Date().toISOString())
-      .order('meeting_date', { ascending: true })
-      .limit(200);
-    if (error) return; // mantém o último status conhecido (ou "desconhecido") em vez de mascarar a falha
-    setStatuses(computeRoomStatuses((data || []) as RoomMeetingRow[], activeRoomIds));
+    // Uma consulta por sala (em vez de um único `.in(...).limit(200)`
+    // compartilhado entre todas): com um teto só pro conjunto, salas com
+    // muitas reservas futuras podiam empurrar as reservas de outra sala pra
+    // fora do corte, fazendo ela aparecer com contador/"Livre" errados.
+    const results = await Promise.all(
+      activeRoomIds.map((roomId) =>
+        supabase
+          .from('meetings')
+          .select('id, room_id, title, meeting_date, end_date, created_by, participant_ids')
+          .eq('room_id', roomId)
+          .not('end_date', 'is', null)
+          .gte('end_date', new Date().toISOString())
+          .order('meeting_date', { ascending: true })
+          .limit(200)
+      )
+    );
+    if (results.some((r) => r.error)) return; // mantém o último status conhecido (ou "desconhecido") em vez de mascarar a falha
+    const rows = results.flatMap((r) => (r.data || []) as RoomMeetingRow[]);
+    setStatuses(computeRoomStatuses(rows, activeRoomIds));
     setHasLoaded(true);
   }, [activeRoomIds]);
 
