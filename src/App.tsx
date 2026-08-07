@@ -420,10 +420,19 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
     if (replies.length > 0) setRepliesOpen(true);
     if (autoFocus === 'reply') setShowReplyBox(true);
     onFocusHandled?.();
-    const timer = setTimeout(() => setIsHighlighted(false), 2500);
-    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoFocus]);
+
+  // Timer do destaque separado do efeito acima de propósito: `onFocusHandled`
+  // limpa o foco no componente pai assim que consumido, o que já muda
+  // `autoFocus` pra undefined no próximo render — se o timeout morasse no
+  // mesmo efeito, o cleanup cancelaria ele antes de disparar, e o destaque
+  // ficava preso ligado pro resto da vida do comentário montado.
+  React.useEffect(() => {
+    if (!isHighlighted) return;
+    const timer = setTimeout(() => setIsHighlighted(false), 2500);
+    return () => clearTimeout(timer);
+  }, [isHighlighted]);
 
   const handleSave = async () => {
     if (!editText.trim() || editText === item.text) { setEditing(false); return; }
@@ -534,6 +543,7 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
             users={users || []}
             teams={teams}
             className="w-full bg-transparent border-none focus:ring-0 text-sm p-0 resize-none min-h-[40px]"
+            autoFocus
           />
           <div className="flex justify-end gap-2 mt-2">
             <button onClick={() => { setShowReplyBox(false); setReplyText(''); }} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
@@ -809,7 +819,10 @@ export default function App() {
     toast.success('Anexo excluído.');
   }, []);
 
-  const saveTaskComment = useCallback(async (taskId: string, text: string, parentCommentId?: string) => {
+  // Retorna o id do comentário criado (não só true/false) — quem chama
+  // precisa dele pra passar comentário/menção pra notifyMentions, senão a
+  // notificação fica sem comment_id e o clique nunca sabe pra onde rolar.
+  const saveTaskComment = useCallback(async (taskId: string, text: string, parentCommentId?: string): Promise<string | false> => {
     if (!currentUser) return false;
     try {
       const { data, error } = await supabase
@@ -839,7 +852,7 @@ export default function App() {
           }
           return t;
         }));
-        return true;
+        return data.id;
       }
       console.error('Erro ao salvar comentário:', error);
       toast.error('Erro ao salvar comentário: ' + (error?.message || 'tente novamente.'));
@@ -8828,8 +8841,8 @@ function TaskDetailModal(props: any) {
       const text = newComment;
       setIsSendingComment(true);
       try {
-        const success = await saveComment(task.id, text);
-        if (success) {
+        const newCommentId = await saveComment(task.id, text);
+        if (newCommentId) {
           setNewComment('');
           // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
           notifyMentions({
@@ -8839,6 +8852,7 @@ function TaskDetailModal(props: any) {
             actor: currentUser,
             users: users || [],
             teams,
+            commentId: newCommentId,
           });
         }
       } finally {
@@ -8849,9 +8863,11 @@ function TaskDetailModal(props: any) {
 
   const handleAddReply = async (taskIdArg: string, parentCommentId: string, text: string) => {
     if (!saveComment) return false;
-    const success = await saveComment(taskIdArg, text, parentCommentId);
-    if (success) {
-      // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
+    const newCommentId = await saveComment(taskIdArg, text, parentCommentId);
+    if (newCommentId) {
+      // Notifica usuários e Equipes mencionados com @ (fire-and-forget) — o
+      // comentário raiz (parentCommentId), não a resposta em si: é ele que
+      // tem o âncora de rolagem no painel de Atividade.
       notifyMentions({
         text,
         taskId: taskIdArg,
@@ -8859,6 +8875,7 @@ function TaskDetailModal(props: any) {
         actor: currentUser,
         users: users || [],
         teams,
+        commentId: parentCommentId,
       });
       // Notifica quem já participou da thread (autor do comentário raiz + demais respostas).
       // Busca no banco em vez de usar o `task.comments` local: se duas pessoas
@@ -8879,7 +8896,7 @@ function TaskDetailModal(props: any) {
         actor: currentUser,
       });
     }
-    return success;
+    return !!newCommentId;
   };
 
   const handleAssignComment = async (taskIdArg: string, commentId: string, userId: string | null) => {

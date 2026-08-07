@@ -9,6 +9,7 @@ interface MentionTextareaProps {
   teams: Team[];
   placeholder?: string;
   className?: string;
+  autoFocus?: boolean;
 }
 
 interface Suggestion {
@@ -27,7 +28,7 @@ const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
  * Textarea de comentário com autocomplete de menções estilo ClickUp:
  * digite "@" seguido do nome para mencionar um usuário ou uma Equipe.
  */
-export function MentionTextarea({ value, onChange, onSubmit, users, teams, placeholder, className }: MentionTextareaProps) {
+export function MentionTextarea({ value, onChange, onSubmit, users, teams, placeholder, className, autoFocus }: MentionTextareaProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionStart, setMentionStart] = useState(0);
@@ -133,6 +134,7 @@ export function MentionTextarea({ value, onChange, onSubmit, users, teams, place
       )}
       <textarea
         ref={textareaRef}
+        autoFocus={autoFocus}
         placeholder={placeholder}
         value={value}
         onChange={(e) => {
