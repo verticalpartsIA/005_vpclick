@@ -8119,7 +8119,17 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [startDate, setStartDate] = useState('');
   const [duration, setDuration] = useState('');
   const [dueDate, setDueDate] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const todayLabel = new Date().toLocaleDateString('pt-BR');
+
+  // Duração é opcional, mas se preenchida precisa ser um número de dias (ex: 5)
+  // ou horas no formato `3h`. Qualquer outra coisa (ex: `abc`) é sinalizada.
+  const trimmedDuration = duration.trim();
+  const durationError = trimmedDuration !== '' &&
+    !/^\d+(\.\d+)?\s*h$/i.test(trimmedDuration) &&
+    !/^\d+(\.\d+)?$/.test(trimmedDuration)
+      ? 'Duração inválida. Use um número de dias (ex: 5) ou horas (ex: 3h).'
+      : '';
 
   const handleStartOrDurationChange = (newStart: string, newDuration: string) => {
     if (!newStart || !newDuration.trim()) return;
@@ -8240,9 +8250,18 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
     }
   }, [currentStatusOptions, status]);
 
-  const handleSubmit = () => {
-    if (!title) {
+  const handleSubmit = async () => {
+    // Guarda contra duplo-envio: enquanto o insert está em andamento, novos
+    // cliques são ignorados (evita criar a mesma tarefa várias vezes).
+    if (isSubmitting) return;
+
+    if (!title.trim()) {
       toast.error('Informe o nome da tarefa.');
+      return;
+    }
+
+    if (durationError) {
+      toast.error(durationError);
       return;
     }
 
@@ -8257,18 +8276,25 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
       return;
     }
 
-    onCreate({
-      title,
-      description,
-      status,
-      priority,
-      mainAssigneeId,
-      secondaryAssigneeIds,
-      startDate: startDate || undefined,
-      dueDate: dueDate || undefined,
-      listId: selectedListId,
-      parentId: prefilledData?.parentId
-    });
+    setIsSubmitting(true);
+    try {
+      await onCreate({
+        title,
+        description,
+        status,
+        priority,
+        mainAssigneeId,
+        secondaryAssigneeIds,
+        startDate: startDate || undefined,
+        dueDate: dueDate || undefined,
+        listId: selectedListId,
+        parentId: prefilledData?.parentId
+      });
+    } finally {
+      // No sucesso o modal é desmontado pelo componente pai; no erro,
+      // reabilitamos o botão para o usuário poder tentar de novo.
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -8302,6 +8328,8 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className={`text-xs font-bold uppercase ${!selectedSpaceId ? 'text-amber-600' : 'text-gray-400'}`}>Espaço *</label>
               <select
+                required
+                aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${!selectedSpaceId ? 'border-amber-300' : ''}`}
                 value={selectedSpaceId}
                 onChange={(e) => { setSelectedSpaceId(e.target.value); setSelectedFolderId(''); setSelectedListId(''); }}
@@ -8313,6 +8341,8 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className={`text-xs font-bold uppercase ${selectedSpaceId && !selectedFolderId ? 'text-amber-600' : 'text-gray-400'}`}>Pasta *</label>
               <select
+                required
+                aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedSpaceId && !selectedFolderId ? 'border-amber-300' : ''}`}
                 value={selectedFolderId}
                 onChange={(e) => { setSelectedFolderId(e.target.value); setSelectedListId(''); }}
@@ -8325,6 +8355,8 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div className="sm:col-span-2">
               <label className={`text-xs font-bold uppercase ${selectedFolderId && !selectedListId ? 'text-amber-600' : 'text-gray-400'}`}>Lista *</label>
               <select
+                required
+                aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedFolderId && !selectedListId ? 'border-amber-300' : ''}`}
                 value={selectedListId}
                 onChange={(e) => setSelectedListId(e.target.value)}
@@ -8338,9 +8370,11 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
 
           <div className="space-y-4">
             <div>
-              <label className="text-xs font-bold text-gray-400 uppercase">Nome da Tarefa</label>
+              <label className="text-xs font-bold text-gray-400 uppercase">Nome da Tarefa *</label>
               <input
                 type="text"
+                required
+                aria-required="true"
                 className="w-full p-3 border rounded-lg mt-1 text-lg font-medium focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
@@ -8434,13 +8468,17 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                   <input
                     type="text"
                     placeholder="Ex: 5 ou 3h"
-                    className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+                    aria-invalid={!!durationError}
+                    className={`w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${durationError ? 'border-red-400 focus:ring-red-300' : ''}`}
                     value={duration}
                     onChange={(e) => {
                       setDuration(e.target.value);
                       handleStartOrDurationChange(startDate, e.target.value);
                     }}
                   />
+                  {durationError && (
+                    <p className="text-[10px] text-red-500 mt-1">{durationError}</p>
+                  )}
                 </div>
               </div>
               <div>
@@ -8473,13 +8511,19 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
         </div>
 
         <div className="p-6 border-t bg-gray-50 flex justify-end gap-3 shrink-0">
-          <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700">Cancelar</button>
+          <button onClick={onClose} disabled={isSubmitting} className="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed">Cancelar</button>
           <button
             onClick={handleSubmit}
-            disabled={!title}
-            className="px-6 py-2 bg-[var(--primary-color)] text-[#2c3e50] font-bold rounded shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!title.trim() || !selectedListId || !!durationError || isSubmitting}
+            className="px-6 py-2 bg-[var(--primary-color)] text-[#2c3e50] font-bold rounded shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
           >
-            Criar Tarefa
+            {isSubmitting && (
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
+            {isSubmitting ? 'Criando...' : 'Criar Tarefa'}
           </button>
         </div>
       </div>
