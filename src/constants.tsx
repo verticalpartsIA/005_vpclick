@@ -171,6 +171,9 @@ export const Icons = {
   Bell: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg>
   ),
+  Reply: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
+    <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 17 4 12 9 7" /><path d="M20 18v-2a4 4 0 0 0-4-4H4" /></svg>
+  ),
   Columns: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" /><path d="M15 3v18" /></svg>
   ),
@@ -179,5 +182,11 @@ export const Icons = {
   ),
   Shield: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" /></svg>
+  ),
+  UserCheck: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
+    <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><polyline points="16 11 18 13 22 9" /></svg>
+  ),
+  Video: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
+    <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.934a.5.5 0 0 0-.777-.416L16 11" /><rect x="2" y="6" width="14" height="12" rx="2" /></svg>
   ),
 };

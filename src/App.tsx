@@ -3,7 +3,7 @@ import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIco
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
-  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team
+  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -18,8 +18,15 @@ import bootLogoVideo from './assets/logo-limpo-video.mp4';
 import { TableView } from './components/views/TableView';
 import { CalendarView } from './components/views/CalendarView';
 import { GanttView } from './components/views/GanttView';
+import { InboxView } from './components/views/InboxView';
+import { RepliesView } from './components/views/RepliesView';
+import { AssignedCommentsView } from './components/views/AssignedCommentsView';
+import { MeetingsView } from './components/views/MeetingsView';
+import { MyTasksView, recordRecentTaskId } from './components/views/MyTasksView';
+import { RecentTasksView } from './components/views/RecentTasksView';
+import { RemindersView } from './components/views/RemindersView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
-import { supabase, isTaskBlocked } from './lib/supabase';
+import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -29,7 +36,9 @@ import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
 import { MentionTextarea } from './components/MentionTextarea';
 import { AIPanel } from './components/AIPanel';
-import { MentionText, notifyMentions, notifyAssignment } from './lib/mentions';
+import { MentionText, notifyMentions, notifyAssignment, notifyReply, notifyCommentAssigned, notifyCommentResolved } from './lib/mentions';
+import { linkifyText } from './lib/linkify';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { TaskTagsInput } from './components/TaskTagsInput';
 import { TagBadge } from './components/TagBadge';
 import { AutomationModal } from './components/AutomationModal';
@@ -211,40 +220,123 @@ const THEME_PRESETS: Record<ThemePresetId, { label: string; vars: Record<string,
   },
 };
 
-// ── CommentItem: comentário com edição/exclusão inline ────────────────────
-function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, formatDate }: {
+// ── CommentAssignmentBar: linha de "Atribuir"/"Resolver" de um comentário ou
+// resposta ("Comentários atribuídos", item 3 da sidebar "Início", estilo
+// ClickUp). Compartilhada entre CommentItem e ReplyItem — o widget é
+// idêntico nos dois, só muda o que fica "por cima" dele. ──
+function CommentAssignmentBar({ item, users, currentUserId, formatDate, onAssign, onResolve }: {
+  item: any;
+  users: any[];
+  currentUserId: string;
+  formatDate: (d: string) => string;
+  onAssign: (userId: string | null) => void;
+  onResolve: () => void;
+}) {
+  const assignee = item.assignedTo ? users.find((u: any) => u.id === item.assignedTo) : null;
+  const isResolved = !!item.resolvedAt;
+  const canResolve = !isResolved && (item.assignedTo === currentUserId || item.assignedBy === currentUserId);
+  const assignableUsers = [...users]
+    .filter((u: any) => u.email !== AI_AGENT_EMAIL)
+    .sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR'));
+
+  return (
+    <div className="flex items-center gap-2 mt-2 flex-wrap">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            className={`text-[11px] font-semibold flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors ${
+              assignee
+                ? isResolved ? 'text-green-600 bg-green-50' : 'text-purple-600 bg-purple-50'
+                : 'text-gray-400 hover:text-purple-500 hover:bg-purple-50'
+            }`}
+          >
+            <Icons.UserCheck className="w-3 h-3" />
+            {assignee ? assignee.name : 'Atribuir'}
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-56 max-h-72 overflow-y-auto">
+          {assignee && (
+            <>
+              <DropdownMenuItem onClick={() => onAssign(null)} className="text-red-500 text-sm">Remover atribuição</DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {assignableUsers.map((u: any) => (
+            <DropdownMenuItem
+              key={u.id}
+              // Clicar em quem já está atribuído seria um no-op visual, mas
+              // assignTaskComment sempre limpa resolved_at/resolved_by — sem
+              // essa guarda, reabriria como pendente um item já resolvido.
+              onClick={() => { if (u.id !== item.assignedTo) onAssign(u.id); }}
+              className="flex items-center gap-2 text-sm"
+            >
+              <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-5 h-5 rounded-full" alt="" />
+              {u.name}
+              {item.assignedTo === u.id && <Icons.Check className="w-3.5 h-3.5 ml-auto text-purple-500" />}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {assignee && (
+        isResolved ? (
+          <span className="text-[11px] font-semibold text-green-600 flex items-center gap-1" title={formatDate(item.resolvedAt)}>
+            <Icons.CheckCircle2 className="w-3 h-3" /> Resolvido
+          </span>
+        ) : canResolve ? (
+          <button onClick={onResolve} className="text-[11px] font-semibold text-gray-400 hover:text-green-600 flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-green-50 transition-colors">
+            <Icons.CheckCircle2 className="w-3 h-3" /> Resolver
+          </button>
+        ) : (
+          <span className="text-[11px] text-gray-300 font-medium">pendente</span>
+        )
+      )}
+    </div>
+  );
+}
+
+// ── ReplyItem: resposta de comentário (edição/exclusão inline, sem sub-respostas) ──
+function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete, onAssign, onResolve, formatDate }: {
   item: any;
   users: any[];
   teams: any[];
-  isOwn: boolean;
+  currentUserId: string;
   taskId: string;
   onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
   onDelete: (taskId: string, commentId: string) => Promise<void>;
+  onAssign: (taskId: string, commentId: string, userId: string | null) => void;
+  onResolve: (taskId: string, commentId: string) => void;
   formatDate: (d: string) => string;
 }) {
   const [editing, setEditing] = React.useState(false);
   const [editText, setEditText] = React.useState(item.text);
   const [saving, setSaving] = React.useState(false);
   const author = users.find((u: any) => u.id === item.userId);
+  const isOwn = item.userId === currentUserId;
 
   const handleSave = async () => {
     if (!editText.trim() || editText === item.text) { setEditing(false); return; }
     setSaving(true);
-    await onEdit(taskId, item.id, editText.trim());
-    setSaving(false);
-    setEditing(false);
+    try {
+      await onEdit(taskId, item.id, editText.trim());
+      setEditing(false);
+    } catch (err) {
+      console.error('Erro ao salvar resposta:', err);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <div className="relative group/comment">
-      <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
+      <div className="absolute -left-[22px] top-0 w-5 h-5 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
         <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
       </div>
-      <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
-        <div className="flex items-center justify-between mb-2">
+      <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-sm">
+        <div className="flex items-center justify-between mb-1.5">
           <span className="text-xs font-bold text-gray-900">{author?.name}</span>
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-gray-300">{formatDate(item.date)}{item.updatedAt ? ' · editado' : ''}</span>
+            <span className="text-[10px] text-gray-300">{formatDate(item.timestamp)}{item.updatedAt ? ' · editado' : ''}</span>
             {isOwn && !editing && (
               <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
                 <button onClick={() => { setEditText(item.text); setEditing(true); }} className="text-[10px] text-gray-400 hover:text-blue-500 font-semibold px-1.5 py-0.5 rounded hover:bg-blue-50 transition-all">Editar</button>
@@ -259,7 +351,7 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
               value={editText}
               onChange={e => setEditText(e.target.value)}
               className="w-full text-sm p-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white"
-              rows={3}
+              rows={2}
               autoFocus
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === 'Escape') setEditing(false); }}
             />
@@ -269,11 +361,216 @@ function CommentItem({ item, users, teams, isOwn, taskId, onEdit, onDelete, form
             </div>
           </div>
         ) : (
-          <p className="text-sm text-gray-600 leading-relaxed">
-            <MentionText text={item.text} users={users || []} teams={teams} />
-          </p>
+          <>
+            <p className="text-sm text-gray-600 leading-relaxed">
+              <MentionText text={item.text} users={users || []} teams={teams} />
+            </p>
+            <CommentAssignmentBar
+              item={item}
+              users={users}
+              currentUserId={currentUserId}
+              formatDate={formatDate}
+              onAssign={(userId) => onAssign(taskId, item.id, userId)}
+              onResolve={() => onResolve(taskId, item.id)}
+            />
+          </>
         )}
       </div>
+    </div>
+  );
+}
+
+// ── CommentItem: comentário com edição/exclusão inline + thread de respostas ──
+function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdit, onDelete, onReply, onAssign, onResolve, formatDate, autoFocus, onFocusHandled }: {
+  item: any;
+  replies: any[];
+  users: any[];
+  teams: any[];
+  currentUserId: string;
+  taskId: string;
+  onEdit: (taskId: string, commentId: string, text: string) => Promise<void>;
+  onDelete: (taskId: string, commentId: string) => Promise<void>;
+  onReply: (taskId: string, parentCommentId: string, text: string) => Promise<boolean>;
+  onAssign: (taskId: string, commentId: string, userId: string | null) => void;
+  onResolve: (taskId: string, commentId: string) => void;
+  formatDate: (d: string) => string;
+  // Quando a tarefa é aberta a partir de uma notificação de comentário: rola
+  // até aqui e destaca — 'reply' também abre o campo de resposta já
+  // focado, 'resolve' só destaca mesmo (o botão "Resolver" já fica visível
+  // no CommentAssignmentBar abaixo).
+  autoFocus?: 'reply' | 'resolve' | 'view';
+  onFocusHandled?: () => void;
+}) {
+  const [editing, setEditing] = React.useState(false);
+  const [editText, setEditText] = React.useState(item.text);
+  const [saving, setSaving] = React.useState(false);
+  const [showReplyBox, setShowReplyBox] = React.useState(false);
+  const [replyText, setReplyText] = React.useState('');
+  const [sendingReply, setSendingReply] = React.useState(false);
+  const [repliesOpen, setRepliesOpen] = React.useState(false);
+  const [isHighlighted, setIsHighlighted] = React.useState(false);
+  const cardRef = React.useRef<HTMLDivElement>(null);
+  const author = users.find((u: any) => u.id === item.userId);
+  const isOwn = item.userId === currentUserId;
+
+  React.useEffect(() => {
+    if (!autoFocus) return;
+    cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setIsHighlighted(true);
+    if (replies.length > 0) setRepliesOpen(true);
+    if (autoFocus === 'reply') setShowReplyBox(true);
+    onFocusHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFocus]);
+
+  // Timer do destaque separado do efeito acima de propósito: `onFocusHandled`
+  // limpa o foco no componente pai assim que consumido, o que já muda
+  // `autoFocus` pra undefined no próximo render — se o timeout morasse no
+  // mesmo efeito, o cleanup cancelaria ele antes de disparar, e o destaque
+  // ficava preso ligado pro resto da vida do comentário montado.
+  React.useEffect(() => {
+    if (!isHighlighted) return;
+    const timer = setTimeout(() => setIsHighlighted(false), 2500);
+    return () => clearTimeout(timer);
+  }, [isHighlighted]);
+
+  const handleSave = async () => {
+    if (!editText.trim() || editText === item.text) { setEditing(false); return; }
+    setSaving(true);
+    try {
+      await onEdit(taskId, item.id, editText.trim());
+      setEditing(false);
+    } catch (err) {
+      console.error('Erro ao salvar comentário:', err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSendReply = async () => {
+    if (!replyText.trim()) return;
+    setSendingReply(true);
+    try {
+      const ok = await onReply(taskId, item.id, replyText.trim());
+      if (ok) {
+        setReplyText('');
+        setShowReplyBox(false);
+        setRepliesOpen(true);
+      }
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="relative group/comment">
+        <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
+          <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
+        </div>
+        <div
+          ref={cardRef}
+          className={`p-4 rounded-2xl border ml-2 shadow-sm transition-colors duration-500 ${isHighlighted ? 'bg-orange-50 border-orange-300 ring-2 ring-orange-200' : 'bg-gray-50/50 border-gray-100'}`}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-bold text-gray-900">{author?.name}</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-300">{formatDate(item.date)}{item.updatedAt ? ' · editado' : ''}</span>
+              {isOwn && !editing && (
+                <div className="flex items-center gap-1 opacity-0 group-hover/comment:opacity-100 transition-opacity">
+                  <button onClick={() => { setEditText(item.text); setEditing(true); }} className="text-[10px] text-gray-400 hover:text-blue-500 font-semibold px-1.5 py-0.5 rounded hover:bg-blue-50 transition-all">Editar</button>
+                  <button onClick={() => onDelete(taskId, item.id)} className="text-[10px] text-gray-400 hover:text-red-500 font-semibold px-1.5 py-0.5 rounded hover:bg-red-50 transition-all">Excluir</button>
+                </div>
+              )}
+            </div>
+          </div>
+          {editing ? (
+            <div className="space-y-2">
+              <textarea
+                value={editText}
+                onChange={e => setEditText(e.target.value)}
+                className="w-full text-sm p-2 border rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white"
+                rows={3}
+                autoFocus
+                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSave(); } if (e.key === 'Escape') setEditing(false); }}
+              />
+              <div className="flex gap-2 justify-end">
+                <button onClick={() => setEditing(false)} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
+                <button onClick={handleSave} disabled={saving || !editText.trim()} className="text-xs bg-orange-500 text-white font-bold px-3 py-1 rounded-lg hover:brightness-110 disabled:opacity-50">{saving ? '...' : 'Salvar'}</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                <MentionText text={item.text} users={users || []} teams={teams} />
+              </p>
+              <div className="flex items-center gap-3 mt-2">
+                <button
+                  onClick={() => setShowReplyBox(v => !v)}
+                  className="text-[11px] font-semibold text-gray-400 hover:text-orange-500 flex items-center gap-1 transition-colors"
+                >
+                  <Icons.Reply className="w-3 h-3" /> Responder
+                </button>
+                {replies.length > 0 && (
+                  <button
+                    onClick={() => setRepliesOpen(v => !v)}
+                    className="text-[11px] font-semibold text-blue-500 hover:underline"
+                  >
+                    {repliesOpen ? 'Ocultar' : 'Ver'} {replies.length} resposta{replies.length === 1 ? '' : 's'}
+                  </button>
+                )}
+              </div>
+              <CommentAssignmentBar
+                item={item}
+                users={users}
+                currentUserId={currentUserId}
+                formatDate={formatDate}
+                onAssign={(userId) => onAssign(taskId, item.id, userId)}
+                onResolve={() => onResolve(taskId, item.id)}
+              />
+            </>
+          )}
+        </div>
+      </div>
+
+      {showReplyBox && (
+        <div className="ml-8 mt-2 bg-gray-50 rounded-xl p-3 border border-gray-100">
+          <MentionTextarea
+            placeholder="Escreva uma resposta... use @ para mencionar"
+            value={replyText}
+            onChange={setReplyText}
+            onSubmit={handleSendReply}
+            users={users || []}
+            teams={teams}
+            className="w-full bg-transparent border-none focus:ring-0 text-sm p-0 resize-none min-h-[40px]"
+            autoFocus
+          />
+          <div className="flex justify-end gap-2 mt-2">
+            <button onClick={() => { setShowReplyBox(false); setReplyText(''); }} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
+            <button onClick={handleSendReply} disabled={sendingReply || !replyText.trim()} className="text-xs bg-orange-500 text-white font-bold px-3 py-1 rounded-lg hover:brightness-110 disabled:opacity-50">{sendingReply ? '...' : 'Responder'}</button>
+          </div>
+        </div>
+      )}
+
+      {repliesOpen && replies.length > 0 && (
+        <div className="ml-8 mt-2 space-y-2 border-l-2 border-gray-100 pl-4">
+          {replies.map((r: any) => (
+            <ReplyItem
+              key={r.id}
+              item={r}
+              users={users}
+              teams={teams}
+              currentUserId={currentUserId}
+              taskId={taskId}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onAssign={onAssign}
+              onResolve={onResolve}
+              formatDate={formatDate}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -286,6 +583,14 @@ const FALLBACK_USER: User = {
   avatar: 'https://cdn-icons-png.flaticon.com/512/149/149071.png',
   role: UserRole.COLABORADOR,
 };
+
+// Conta de serviço usada para o rastro de atividade cross-sistema (ver
+// src/lib/trackActivity.ts) — tem perfil em `profiles` (por isso aparece em
+// adminUsers), mas não é uma pessoa de verdade: não deve ser oferecida como
+// opção nova de responsável de tarefa, menção ou membro de equipe. Continua
+// resolvível normalmente (avatar, nome) onde já estiver referenciada, e
+// continua visível/gerenciável no Painel Admin.
+const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User>(FALLBACK_USER);
@@ -514,36 +819,49 @@ export default function App() {
     toast.success('Anexo excluído.');
   }, []);
 
-  const saveTaskComment = useCallback(async (taskId: string, text: string) => {
+  // Retorna o id do comentário criado (não só true/false) — quem chama
+  // precisa dele pra passar comentário/menção pra notifyMentions, senão a
+  // notificação fica sem comment_id e o clique nunca sabe pra onde rolar.
+  const saveTaskComment = useCallback(async (taskId: string, text: string, parentCommentId?: string): Promise<string | false> => {
     if (!currentUser) return false;
-    const { data, error } = await supabase
-      .from('task_comments')
-      .insert({
-        task_id: taskId,
-        user_id: currentUser.id,
-        text: text
-      })
-      .select()
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from('task_comments')
+        .insert({
+          task_id: taskId,
+          user_id: currentUser.id,
+          text: text,
+          parent_comment_id: parentCommentId || null,
+        })
+        .select()
+        .single();
 
-    if (data && !error) {
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            comments: [...(t.comments || []), {
-              id: data.id,
-              userId: data.user_id,
-              text: data.text,
-              timestamp: data.created_at
-            }]
-          };
-        }
-        return t;
-      }));
-      return true;
+      if (data && !error) {
+        setTasks(prev => prev.map(t => {
+          if (t.id === taskId) {
+            return {
+              ...t,
+              comments: [...(t.comments || []), {
+                id: data.id,
+                userId: data.user_id,
+                text: data.text,
+                timestamp: data.created_at,
+                parentCommentId: data.parent_comment_id || undefined,
+              }]
+            };
+          }
+          return t;
+        }));
+        return data.id;
+      }
+      console.error('Erro ao salvar comentário:', error);
+      toast.error('Erro ao salvar comentário: ' + (error?.message || 'tente novamente.'));
+      return false;
+    } catch (err) {
+      console.error('Erro inesperado ao salvar comentário:', err);
+      toast.error('Erro inesperado ao salvar comentário. Tente novamente.');
+      return false;
     }
-    return false;
   }, [currentUser]);
 
   const editTaskComment = useCallback(async (taskId: string, commentId: string, newText: string) => {
@@ -560,17 +878,64 @@ export default function App() {
   }, []);
 
   const deleteTaskComment = useCallback(async (taskId: string, commentId: string) => {
+    // Exclui o comentário e, junto, as respostas da thread (soft delete não
+    // aciona o ON DELETE CASCADE do banco — sem isso as respostas ficariam
+    // órfãs: continuariam na tabela mas sem comentário raiz pra aparecer).
     const { error } = await supabase
       .from('task_comments')
       .update({ deleted_at: new Date().toISOString() })
-      .eq('id', commentId);
+      .or(`id.eq.${commentId},parent_comment_id.eq.${commentId}`);
     if (error) { toast.error('Erro ao excluir comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
-      comments: (t.comments || []).filter(c => c.id !== commentId),
+      comments: (t.comments || []).filter(c => c.id !== commentId && c.parentCommentId !== commentId),
     }));
     toast.success('Comentário excluído.');
   }, []);
+
+  // Atribui (ou remove a atribuição de) um comentário/resposta a alguém —
+  // "Comentários atribuídos" (item 3 da sidebar "Início", estilo ClickUp).
+  // Reatribuir ou remover a atribuição também limpa uma resolução anterior:
+  // o item volta a valer como pendente para o novo estado.
+  const assignTaskComment = useCallback(async (taskId: string, commentId: string, userId: string | null) => {
+    if (!currentUser) return;
+    const { error } = await supabase
+      .from('task_comments')
+      .update({
+        assigned_to: userId,
+        assigned_by: userId ? currentUser.id : null,
+        resolved_at: null,
+        resolved_by: null,
+      })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao atribuir comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).map(c => c.id === commentId ? {
+        ...c,
+        assignedTo: userId || undefined,
+        assignedBy: userId ? currentUser.id : undefined,
+        resolvedAt: undefined,
+        resolvedBy: undefined,
+      } : c),
+    }));
+  }, [currentUser]);
+
+  // Marca um comentário/resposta atribuído como resolvido — a tarefa deixa de
+  // ficar bloqueada por ele (ver hasUnresolvedAssignedComments).
+  const resolveTaskComment = useCallback(async (taskId: string, commentId: string) => {
+    if (!currentUser) return;
+    const now = new Date().toISOString();
+    const { error } = await supabase
+      .from('task_comments')
+      .update({ resolved_at: now, resolved_by: currentUser.id })
+      .eq('id', commentId);
+    if (error) { toast.error('Erro ao resolver comentário.'); return; }
+    setTasks(prev => prev.map(t => t.id !== taskId ? t : {
+      ...t,
+      comments: (t.comments || []).map(c => c.id === commentId ? { ...c, resolvedAt: now, resolvedBy: currentUser.id } : c),
+    }));
+  }, [currentUser]);
 
   // isWatching vem do call site para evitar referência circular com tasks
   const toggleWatcher = useCallback(async (taskId: string, isWatching: boolean) => {
@@ -869,6 +1234,9 @@ export default function App() {
   const [workspaceTags, setWorkspaceTags] = useState<WorkspaceTag[]>([]);
   const [filterTags, setFilterTags] = useState<string[]>([]);
   const [sortConfig, setSortConfig] = useState<{ field: 'created' | 'title' | 'priority' | 'dueDate' | 'status'; direction: 'asc' | 'desc' }>({ field: 'created', direction: 'asc' });
+  // "Atribuídas a mim" (item 6 da sidebar "Início"): igual ao ClickUp, tarefas
+  // concluídas ficam escondidas por padrão nessa visualização específica.
+  const [showClosedInMyTasks, setShowClosedInMyTasks] = useState(false);
   const [teams, setTeams] = useState<Team[]>([]);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
 
@@ -898,7 +1266,7 @@ export default function App() {
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc'>('Dashboard');
+  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks'>('Dashboard');
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -921,6 +1289,11 @@ export default function App() {
   const [activeScope, setActiveScope] = useState<NavigationScope>({ type: 'global', id: null, name: 'Dashboard' });
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [openMeetingId, setOpenMeetingId] = useState<string | null>(null);
+  const handleOpenMeeting = (meetingId: string) => {
+    setOpenMeetingId(meetingId);
+    setActiveView('Meetings');
+  };
   const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
   const [taskToDuplicate, setTaskToDuplicate] = useState<Task | null>(null);
   const [isDuplicatingTask, setIsDuplicatingTask] = useState(false);
@@ -959,6 +1332,7 @@ export default function App() {
           color: s.color,
           icon: s.icon,
           isSystem: s.is_system ?? false,
+          createdAt: s.created_at,
         })));
       }
 
@@ -975,12 +1349,20 @@ export default function App() {
       // Carregar Lists
       const { data: listsData } = await supabase.from('lists').select('*');
       if (listsData) {
-        setLists(listsData.map((l: any) => ({
-          id: l.id,
-          name: l.name,
-          folderId: l.folder_id,
-          statusGroupId: l.status_group_id
-        })));
+        // Lista pessoal (ver migration 18): privacidade só no client — a RLS
+        // é permissiva, então o próprio carregamento do estado local precisa
+        // excluir listas pessoais de outros usuários, senão qualquer lugar
+        // que itere `lists` (paleta de comando, etc.) vaza pra qualquer um.
+        const myId = session?.user?.id;
+        setLists(listsData
+          .filter((l: any) => !l.owner_id || l.owner_id === myId)
+          .map((l: any) => ({
+            id: l.id,
+            name: l.name,
+            folderId: l.folder_id,
+            statusGroupId: l.status_group_id,
+            ownerId: l.owner_id || undefined
+          })));
       }
 
       // Carregar Custom Fields
@@ -1110,7 +1492,7 @@ export default function App() {
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
     }
-  }, []);
+  }, [session]);
 
   const loadAllUsers = useCallback(async () => {
     const { data } = await supabase
@@ -1175,7 +1557,7 @@ export default function App() {
           const { data: spacesData } = await supabase.from('spaces').select('*');
           if (spacesData) {
             setSpaces(spacesData.map((s: any) => ({
-              id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon, isSystem: s.is_system ?? false
+              id: s.id, name: s.name, workspaceId: s.workspace_id, color: s.color, icon: s.icon, isSystem: s.is_system ?? false, createdAt: s.created_at
             })));
           }
           const { data: foldersData } = await supabase.from('folders').select('*');
@@ -1186,15 +1568,31 @@ export default function App() {
           }
           const { data: listsData } = await supabase.from('lists').select('*');
           if (listsData) {
-            setLists(listsData.map((l: any) => ({
-              id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id
-            })));
+            setLists(listsData
+              .filter((l: any) => !l.owner_id || l.owner_id === session?.user?.id)
+              .map((l: any) => ({
+                id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id, ownerId: l.owner_id || undefined
+              })));
           }
         }
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [session?.user?.id]);
+
+  // Realtime: mantém adminUsers (usado no autocomplete de menção "@") atualizado
+  // quando um perfil é criado/ativado após a sessão já estar aberta — sem isso,
+  // usuários provisionados depois do login só apareciam nas menções após reload.
+  useEffect(() => {
+    if (!session) return;
+    const channel = supabase
+      .channel('profiles-mentions')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
+        loadAllUsers();
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [session, loadAllUsers]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -1216,6 +1614,48 @@ export default function App() {
   }, []);
 
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
+
+  // Qual comentário deixar rolado/destacado (e qual ação já deixar pronta —
+  // responder ou resolver) quando a tarefa é aberta a partir de uma
+  // notificação de comentário/menção, em vez de abrir só a tarefa em geral.
+  const [taskCommentFocus, setTaskCommentFocus] = useState<{ commentId: string; action?: 'reply' | 'resolve' } | null>(null);
+  const openTaskComment = useCallback((taskId: string, commentId: string, action?: 'reply' | 'resolve') => {
+    setSelectedTaskId(taskId);
+    setTaskCommentFocus({ commentId, action });
+  }, []);
+
+  // Notificação/link apontando pra uma tarefa que já foi apagada (ou que o
+  // usuário não tem mais acesso): antes o clique simplesmente não abria nada
+  // e não dava nenhuma pista do porquê. `tasks.length > 0` evita um falso
+  // positivo enquanto a lista ainda está carregando pela primeira vez.
+  useEffect(() => {
+    if (selectedTaskId && tasks.length > 0 && !tasks.some(t => t.id === selectedTaskId)) {
+      toast.error('Essa tarefa não existe mais ou você não tem acesso a ela.');
+      setSelectedTaskId(null);
+      setTaskCommentFocus(null);
+    }
+  }, [selectedTaskId, tasks]);
+
+  // Card "Recentes" de Minhas Tarefas: registra toda tarefa aberta, pra
+  // qualquer entrada (clique na lista, notificação, link direto etc.).
+  useEffect(() => {
+    if (selectedTaskId && currentUser?.id && currentUser.id !== 'loading') {
+      recordRecentTaskId(currentUser.id, selectedTaskId);
+    }
+  }, [selectedTaskId, currentUser?.id]);
+
+  // Guarda contra corrida: se o escopo mudar (ou o realtime disparar outro
+  // reload) enquanto uma chamada de loadTasks() ainda está em andamento, uma
+  // resposta antiga que chegue depois de uma mais nova sobrescreveria `tasks`
+  // com os dados do escopo errado — a lista parece ter tarefas e "fecha"
+  // sozinha (some) pouco depois, até um F5 disparar uma única chamada limpa.
+  // Cada chamada carimba um id crescente; só grava quem tiver um id mais novo
+  // que o da última chamada que efetivamente gravou (loadTasksCommittedIdRef)
+  // — não simplesmente "quem for a mais recente em voo", pra uma chamada mais
+  // nova que falhe (erro de rede) não invalidar/descartar o resultado bom de
+  // uma mais antiga que ainda está terminando.
+  const loadTasksRequestIdRef = useRef(0);
+  const loadTasksCommittedIdRef = useRef(0);
 
   // Lazy-load das sub-entidades ao abrir uma tarefa. As listagens carregam as
   // tarefas SEM comentários/checklists/anexos/atividades/logs/watchers (para
@@ -1243,6 +1683,11 @@ export default function App() {
         })),
         comments: (commRes.data || []).map((c: any) => ({
           id: c.id, userId: c.user_id, text: c.text, timestamp: c.created_at, updatedAt: c.updated_at || undefined,
+          parentCommentId: c.parent_comment_id || undefined,
+          assignedTo: c.assigned_to || undefined,
+          assignedBy: c.assigned_by || undefined,
+          resolvedAt: c.resolved_at || undefined,
+          resolvedBy: c.resolved_by || undefined,
         })),
         extensionHistory: (logRes.data || []).map((l: any) => ({
           id: l.id, oldDate: l.old_date, newDate: l.new_date, reason: l.reason, updatedBy: l.updated_by, timestamp: l.created_at
@@ -1259,6 +1704,7 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [selectedTaskId]);
+
 
   // Hidrata linhas cruas da tabela `tasks` em objetos Task completos, buscando
   // as sub-entidades (anexos, comentários, logs, checklists, atividades,
@@ -1305,6 +1751,11 @@ export default function App() {
       }));
       const tComments = (commData || []).filter((c: any) => c.task_id === d.id).map((c: any) => ({
         id: c.id, userId: c.user_id, text: c.text, timestamp: c.created_at, updatedAt: c.updated_at || undefined,
+        parentCommentId: c.parent_comment_id || undefined,
+        assignedTo: c.assigned_to || undefined,
+        assignedBy: c.assigned_by || undefined,
+        resolvedAt: c.resolved_at || undefined,
+        resolvedBy: c.resolved_by || undefined,
       }));
       const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
         id: l.id, oldDate: l.old_date, newDate: l.new_date, reason: l.reason, updatedBy: l.updated_by, timestamp: l.created_at
@@ -1335,6 +1786,7 @@ export default function App() {
         projectId: d.project_id,
         parentId: d.parent_id,
         createdAt: d.created_at,
+        createdBy: d.created_by || undefined,
         tags: d.tags || [],
         watcherIds: (watchData || []).filter((w: any) => w.task_id === d.id).map((w: any) => w.user_id),
       } as Task;
@@ -1343,6 +1795,8 @@ export default function App() {
 
   const loadTasks = useCallback(async () => {
     if (!session) return;
+
+    const requestId = ++loadTasksRequestIdRef.current;
 
     // Aplica o filtro de escopo (lista/pasta/espaço) a uma query nova. Como a
     // paginação refaz a query a cada página, o filtro precisa ser reaplicável.
@@ -1381,6 +1835,8 @@ export default function App() {
       from += pageSize;
     }
 
+    if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
+    loadTasksCommittedIdRef.current = requestId;
     setTasks(allData.map((d: any) => ({
       id: d.id,
       title: d.title,
@@ -1401,6 +1857,7 @@ export default function App() {
       projectId: d.project_id,
       parentId: d.parent_id,
       createdAt: d.created_at,
+      createdBy: d.created_by || undefined,
       tags: d.tags || [],
       watcherIds: [],
     } as Task)));
@@ -1512,7 +1969,12 @@ export default function App() {
       while (true) {
         const { data: page, error: pageErr } = await supabase
           .from('tasks')
-          .select('*')
+          // Só as colunas que o Dashboard realmente usa (contadores, radar de
+          // saúde, performance por usuário). `select('*')` baixava `description`
+          // (texto rico, o maior peso por linha) e outros campos não exibidos
+          // aqui pras 7000+ tarefas do workspace inteiro — payload gigante e
+          // caminho crítico de ~16s no Lighthouse, sem nenhum ganho visível.
+          .select('id, title, status, priority, main_assignee_id, start_date, due_date, extension_count, list_id, created_at')
           .range(from, from + pageSize - 1);
         if (pageErr || !page || page.length === 0) break;
         allData = [...allData, ...page];
@@ -1614,20 +2076,35 @@ export default function App() {
     }
   }, []);
 
+  const isDoneLikeStatus = (status: string) => {
+    const s = status.toLowerCase();
+    return ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado'].some(kw => s.includes(kw));
+  };
+
+  // Motivo de bloqueio de fechamento (dependência pendente ou comentário
+  // atribuído não resolvido), ou null se a tarefa pode ser fechada. Chamado a
+  // partir de TODO caminho que grava status diretamente (edição avulsa, drag
+  // no Kanban, edição em massa) — não só handleUpdateTask, senão os outros
+  // dois driblam o mesmo invariante.
+  const getTaskCloseBlockReason = async (taskId: string): Promise<string | null> => {
+    const [bloqueada, temComentarioPendente] = await Promise.all([
+      isTaskBlocked(taskId),
+      hasUnresolvedAssignedComments(taskId),
+    ]);
+    if (bloqueada) return 'Esta tarefa está bloqueada por outra que ainda não foi concluída.';
+    if (temComentarioPendente) return 'Esta tarefa tem comentários atribuídos ainda não resolvidos.';
+    return null;
+  };
+
   const handleUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
-    if (updates.status) {
-      const newStatus = updates.status.toLowerCase();
-      const isDone = ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado']
-        .some(kw => newStatus.includes(kw));
-      if (isDone) {
-        const bloqueada = await isTaskBlocked(taskId);
-        if (bloqueada) {
-          toast.warning('Esta tarefa está bloqueada por outra que ainda não foi concluída.');
-          return;
-        }
+    if (updates.status && isDoneLikeStatus(updates.status)) {
+      const blockReason = await getTaskCloseBlockReason(taskId);
+      if (blockReason) {
+        toast.warning(blockReason);
+        return;
       }
     }
 
@@ -1636,10 +2113,21 @@ export default function App() {
 
   // --- Bulk Actions (T701) ---
   const handleBulkStatusChange = async (ids: string[], status: string) => {
-    const { error } = await supabase.from('tasks').update({ status }).in('id', ids);
+    let targetIds = ids;
+    if (isDoneLikeStatus(status)) {
+      const blockReasons = await Promise.all(ids.map(id => getTaskCloseBlockReason(id)));
+      targetIds = ids.filter((_, i) => !blockReasons[i]);
+      const blockedCount = ids.length - targetIds.length;
+      if (blockedCount > 0) {
+        toast.warning(`${blockedCount} tarefa(s) não foram alteradas: bloqueadas por dependência ou comentário atribuído pendente.`);
+      }
+      if (targetIds.length === 0) return;
+    }
+
+    const { error } = await supabase.from('tasks').update({ status }).in('id', targetIds);
     if (!error) {
-      setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, status } : t));
-      toast.success(`${ids.length} tarefa(s) atualizadas para "${status}"`);
+      setTasks(prev => prev.map(t => targetIds.includes(t.id) ? { ...t, status } : t));
+      toast.success(`${targetIds.length} tarefa(s) atualizadas para "${status}"`);
     } else {
       toast.error('Erro ao alterar status: ' + error.message);
     }
@@ -2186,6 +2674,14 @@ export default function App() {
   };
 
   const handleStatusChange = useCallback(async (taskId: string, newStatus: string) => {
+    if (isDoneLikeStatus(newStatus)) {
+      const blockReason = await getTaskCloseBlockReason(taskId);
+      if (blockReason) {
+        toast.warning(blockReason);
+        return;
+      }
+    }
+
     const { error } = await supabase
       .from('tasks')
       .update({ status: newStatus })
@@ -2418,7 +2914,8 @@ export default function App() {
         name: data.name,
         workspaceId: data.workspace_id,
         color: data.color,
-        icon: data.icon
+        icon: data.icon,
+        createdAt: data.created_at
       };
       setSpaces([...spaces, newSpace]);
 
@@ -2576,7 +3073,8 @@ export default function App() {
           due_date: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
           list_id: newTaskPartial.listId,
           project_id: newTaskPartial.projectId || null,
-          parent_id: newTaskPartial.parentId || null
+          parent_id: newTaskPartial.parentId || null,
+          created_by: currentUser.id
         })
         .select()
         .single();
@@ -2601,7 +3099,8 @@ export default function App() {
           listId: data.list_id,
           projectId: data.project_id,
           parentId: data.parent_id,
-          createdAt: data.created_at
+          createdAt: data.created_at,
+          createdBy: data.created_by || undefined
         };
         setTasks(prev => [newTask, ...prev]);
         setIsTaskModalOpen(false);
@@ -2616,6 +3115,124 @@ export default function App() {
       toast.error('Erro inesperado ao criar tarefa. Tente novamente.');
     }
   };
+
+  // Converte um item de ação de reunião (ver MeetingsView) numa tarefa de
+  // verdade — precisa de uma lista escolhida na hora, já que o resto do app
+  // (handleCreateTask) trata list_id como obrigatório mesmo a coluna sendo
+  // nullable no banco.
+  // Base compartilhada por "criar tarefa a partir de X" (item de ação de
+  // reunião, lembrete) — só muda qual tabela recebe o vínculo task_id depois.
+  const createTaskFromTitle = useCallback(async (title: string, listId: string): Promise<Task | null> => {
+    const list = lists.find(l => l.id === listId);
+    const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
+    const defaultStatus = group && group.options.length > 0 ? group.options[0].label : 'A fazer';
+
+    const { data, error } = await supabase
+      .from('tasks')
+      .insert({
+        title,
+        status: defaultStatus,
+        priority: TaskPriority.MEDIA,
+        main_assignee_id: currentUser.id,
+        secondary_assignee_ids: [],
+        start_date: formatLocalDate(new Date()),
+        due_date: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+        list_id: listId,
+        created_by: currentUser.id,
+      })
+      .select()
+      .single();
+
+    if (error || !data) {
+      toast.error('Erro ao criar tarefa: ' + error?.message);
+      return null;
+    }
+
+    const newTask: Task = {
+      id: data.id,
+      title: data.title,
+      description: data.description || '',
+      status: data.status,
+      priority: data.priority as TaskPriority,
+      mainAssigneeId: data.main_assignee_id,
+      secondaryAssigneeIds: data.secondary_assignee_ids || [],
+      startDate: data.start_date,
+      dueDate: data.due_date,
+      extensionCount: data.extension_count || 0,
+      extensionHistory: [],
+      checklists: [],
+      comments: [],
+      attachments: [],
+      activities: [],
+      listId: data.list_id,
+      projectId: data.project_id,
+      parentId: data.parent_id,
+      createdAt: data.created_at,
+      createdBy: data.created_by || undefined,
+    };
+    setTasks(prev => [newTask, ...prev]);
+    return newTask;
+  }, [lists, statusGroups, currentUser]);
+
+  const createTaskFromMeetingActionItem = useCallback(async (item: { id: string; text: string }, listId: string): Promise<string | null> => {
+    const newTask = await createTaskFromTitle(item.text, listId);
+    if (!newTask) return null;
+    const { error: linkError } = await supabase.from('meeting_action_items').update({ task_id: newTask.id }).eq('id', item.id);
+    if (linkError) console.error('Erro ao vincular tarefa ao item de ação:', linkError);
+    toast.success('Tarefa criada a partir do item de ação.');
+    return newTask.id;
+  }, [createTaskFromTitle]);
+
+  const createTaskFromReminder = useCallback(async (reminder: { id: string; title: string }, listId: string): Promise<string | null> => {
+    const newTask = await createTaskFromTitle(reminder.title, listId);
+    if (!newTask) return null;
+    const { error: linkError } = await supabase.from('reminders').update({ task_id: newTask.id }).eq('id', reminder.id);
+    if (linkError) console.error('Erro ao vincular tarefa ao lembrete:', linkError);
+    toast.success('Tarefa criada a partir do lembrete.');
+    return newTask.id;
+  }, [createTaskFromTitle]);
+
+  // Caixa de Entrada: transforma o texto de um comentário/menção notificado
+  // numa tarefa nova. Sem coluna de vínculo (diferente de lembrete/item de
+  // ação de reunião) — a notificação já aponta pra tarefa original via
+  // taskId; esta é sempre uma tarefa NOVA e separada, então não há "a"
+  // notificação pra atualizar de volta.
+  const createTaskFromComment = useCallback(async (comment: { text: string }, listId: string): Promise<string | null> => {
+    const newTask = await createTaskFromTitle(comment.text, listId);
+    if (!newTask) return null;
+    toast.success('Tarefa criada a partir do comentário.');
+    return newTask.id;
+  }, [createTaskFromTitle]);
+
+  // Garante que exista uma lista pessoal (fora de qualquer pasta, ver
+  // migration 18) pro usuário atual, criando na primeira vez que ele abre
+  // "Lista pessoal". Privacidade só no client — a lista não aparece em
+  // nenhuma árvore de Espaço/Pasta, só é alcançada por este caminho.
+  const ensurePersonalList = useCallback(async (): Promise<string | null> => {
+    const existing = lists.find(l => l.ownerId === currentUser.id);
+    if (existing) return existing.id;
+
+    const defaultGroupId = statusGroups.find(g => g.name === 'Padrão')?.id || statusGroups[0]?.id;
+    if (!defaultGroupId) {
+      toast.error('Nenhum grupo de status configurado no workspace.');
+      return null;
+    }
+
+    const { data, error } = await supabase
+      .from('lists')
+      .insert({ name: 'Lista pessoal', folder_id: null, status_group_id: defaultGroupId, owner_id: currentUser.id })
+      .select()
+      .single();
+
+    if (error || !data) {
+      toast.error('Erro ao criar lista pessoal: ' + (error?.message || 'tente novamente'));
+      return null;
+    }
+
+    const newList: List = { id: data.id, name: data.name, folderId: data.folder_id, statusGroupId: data.status_group_id, ownerId: data.owner_id || undefined };
+    setLists(prev => [...prev, newList]);
+    return newList.id;
+  }, [lists, statusGroups, currentUser]);
 
   const handleDuplicateTask = async (sourceTask: Task, options: DuplicateTaskOptions) => {
     if (!sourceTask || isDuplicatingTask) return;
@@ -3010,6 +3627,16 @@ export default function App() {
     // Filter "Minhas Tarefas" view for ALL users
     if (activeScope.name === 'Minhas Tarefas') {
       result = result.filter(t => t.mainAssigneeId === currentUser.id || t.secondaryAssigneeIds?.includes(currentUser.id));
+      // "Atribuídas a mim": esconde concluídas por padrão (igual ao ClickUp),
+      // com toggle pra mostrar — mesmo critério de "fechada" já usado nos
+      // badges de contagem por lista logo acima.
+      if (!showClosedInMyTasks) {
+        result = result.filter(t => {
+          const s = (t.status || '').toLowerCase();
+          const isClosed = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
+          return !isClosed;
+        });
+      }
     }
 
     // No escopo global (Início / sem espaço selecionado), COLABORADOR vê só suas tarefas.
@@ -3047,7 +3674,7 @@ export default function App() {
     });
 
     return result;
-  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig]);
+  }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig, showClosedInMyTasks]);
 
   // O modal "Gerenciar Campos Personalizados" precisa saber qual lista está
   // ativa pra ler/gravar quais campos estão ocultos — usa a mesma resolução
@@ -3168,6 +3795,8 @@ export default function App() {
           activeScope={activeScope}
           activeListId={activeListId}
           onSetActiveListId={setActiveListId}
+          onEnsurePersonalList={ensurePersonalList}
+          onOpenAdminPanel={openAdminPanel}
           onNavigate={handleNavigate}
           onViewChange={setActiveView}
           isCollapsed={isSidebarCollapsed}
@@ -3272,6 +3901,20 @@ export default function App() {
                 </Popover>
               )}
 
+              {/* "Atribuídas a mim": concluídas ficam escondidas por padrão, igual ao ClickUp.
+                  Só faz sentido nas views que consomem filteredTasks (List/Table/Kanban) —
+                  o dashboard "Minhas Tarefas" (MyTasksView) usa a lista de tarefas própria,
+                  então o botão apareceria ali sem fazer nada. */}
+              {activeScope.name === 'Minhas Tarefas' && activeView !== 'MyTasks' && (
+                <button
+                  onClick={() => setShowClosedInMyTasks(v => !v)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${showClosedInMyTasks ? 'bg-orange-50 border-orange-300 text-orange-600' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'}`}
+                >
+                  <Icons.CheckCircle2 className="w-3.5 h-3.5" />
+                  {showClosedInMyTasks ? 'Ocultar concluídas' : 'Mostrar concluídas'}
+                </button>
+              )}
+
               {/* Sort button */}
               <Popover>
                 <PopoverTrigger asChild>
@@ -3350,6 +3993,8 @@ export default function App() {
                 currentUser={currentUser}
                 users={adminUsers}
                 onOpenTask={(taskId) => setSelectedTaskId(taskId)}
+                onOpenMeeting={handleOpenMeeting}
+                onOpenTaskComment={openTaskComment}
               />
 
               <div className="hidden sm:flex flex-col items-end">
@@ -3465,6 +4110,8 @@ export default function App() {
                 <div className="flex-1" />
                 <button
                   onClick={() => setIsTaskModalOpen(true)}
+                  aria-label="Criar tarefa"
+                  aria-haspopup="dialog"
                   className="bg-[var(--primary-color)] hover:brightness-90 text-[#2c3e50] font-semibold text-sm px-4 py-1.5 rounded-md flex items-center gap-2 transition-all whitespace-nowrap"
                 >
                   <Icons.Plus /> <span className="hidden sm:inline">Criar Tarefa</span>
@@ -3595,9 +4242,9 @@ export default function App() {
               )
             )}
             {activeView === 'Calendar' && (
-              <CalendarView 
-                tasks={filteredTasks} 
-                users={adminUsers} 
+              <CalendarView
+                tasks={filteredTasks}
+                users={adminUsers}
                 onTaskClick={setSelectedTaskId} 
                 onAddTaskAtDate={(date) => {
                   setPrefilledTaskData({ dueDate: formatLocalDate(date) });
@@ -3606,9 +4253,70 @@ export default function App() {
               />
             )}
             {activeView === 'Gantt' && (
-              <GanttView 
-                tasks={filteredTasks} 
-                onTaskClick={setSelectedTaskId} 
+              <GanttView
+                tasks={filteredTasks}
+                onTaskClick={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'Inbox' && (
+              <InboxView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                onOpenTask={setSelectedTaskId}
+                onOpenMeeting={handleOpenMeeting}
+                onOpenTaskComment={openTaskComment}
+                onCreateTaskFromComment={createTaskFromComment}
+              />
+            )}
+            {activeView === 'Replies' && (
+              <RepliesView
+                currentUser={currentUser}
+                users={adminUsers}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'AssignedComments' && (
+              <AssignedCommentsView
+                currentUser={currentUser}
+                users={adminUsers}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'Meetings' && (
+              <MeetingsView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                onOpenTask={setSelectedTaskId}
+                onCreateTaskFromActionItem={createTaskFromMeetingActionItem}
+                openMeetingId={openMeetingId}
+                onOpenMeetingHandled={() => setOpenMeetingId(null)}
+              />
+            )}
+            {activeView === 'MyTasks' && (
+              <MyTasksView
+                currentUser={currentUser}
+                users={adminUsers}
+                tasks={tasks}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'Reminders' && (
+              <RemindersView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                onOpenTask={setSelectedTaskId}
+                onCreateTaskFromReminder={createTaskFromReminder}
+              />
+            )}
+            {activeView === 'RecentTasks' && (
+              <RecentTasksView
+                currentUser={currentUser}
+                users={adminUsers}
+                tasks={tasks}
+                onOpenTask={setSelectedTaskId}
               />
             )}
             {activeView === 'Table' && (
@@ -3651,46 +4359,63 @@ export default function App() {
         />
 
         {selectedTask && (
-          <TaskDetailModal
-            task={selectedTask}
-            users={adminUsers}
-            tasks={tasks}
+          <ErrorBoundary
+            key={selectedTask.id}
             onClose={() => {
               setSelectedTaskId(null);
+              setTaskCommentFocus(null);
               const url = new URL(window.location.href);
               url.searchParams.delete('taskId');
               window.history.replaceState({}, '', url.toString());
             }}
-            onUpdate={updateTask}
-            currentUser={currentUser}
-            customFields={customFields}
-            fieldValues={fieldValues}
-            onUpdateFieldValue={handleUpdateFieldValue}
-            onDelete={() => handleDeleteTask(selectedTask.id)}
-            onDuplicate={() => setTaskToDuplicate(selectedTask)}
-            onSelectTask={setSelectedTaskId}
-            onQuickCreate={(prefill?: any) => {
-              setPrefilledTaskData(prefill || null);
-              setIsTaskModalOpen(true);
-            }}
-            saveAttachment={saveTaskAttachment}
-            removeAttachment={removeTaskAttachment}
-            saveComment={saveTaskComment}
-            editComment={editTaskComment}
-            deleteComment={deleteTaskComment}
-            toggleWatcher={toggleWatcher}
-            saveExtensionLog={saveExtensionLog}
-            saveTaskActivity={saveTaskActivity}
-            uploadFile={uploadFile}
-            statusGroups={statusGroups}
-            lists={lists}
-            folders={folders}
-            workspaceId={workspace.id}
-            teams={teams}
-            onTagsChange={(taskId: string, tags: string[]) =>
-              setTasks(prev => prev.map(t => t.id === taskId ? { ...t, tags } : t))
-            }
-          />
+          >
+            <TaskDetailModal
+              task={selectedTask}
+              users={adminUsers}
+              tasks={tasks}
+              onClose={() => {
+                setSelectedTaskId(null);
+                setTaskCommentFocus(null);
+                const url = new URL(window.location.href);
+                url.searchParams.delete('taskId');
+                window.history.replaceState({}, '', url.toString());
+              }}
+              focusCommentId={taskCommentFocus?.commentId ?? null}
+              focusAction={taskCommentFocus?.action ?? null}
+              onFocusHandled={() => setTaskCommentFocus(null)}
+              onUpdate={updateTask}
+              currentUser={currentUser}
+              customFields={customFields}
+              fieldValues={fieldValues}
+              onUpdateFieldValue={handleUpdateFieldValue}
+              onDelete={() => handleDeleteTask(selectedTask.id)}
+              onDuplicate={() => setTaskToDuplicate(selectedTask)}
+              onSelectTask={setSelectedTaskId}
+              onQuickCreate={(prefill?: any) => {
+                setPrefilledTaskData(prefill || null);
+                setIsTaskModalOpen(true);
+              }}
+              saveAttachment={saveTaskAttachment}
+              removeAttachment={removeTaskAttachment}
+              saveComment={saveTaskComment}
+              editComment={editTaskComment}
+              deleteComment={deleteTaskComment}
+              assignComment={assignTaskComment}
+              resolveComment={resolveTaskComment}
+              toggleWatcher={toggleWatcher}
+              saveExtensionLog={saveExtensionLog}
+              saveTaskActivity={saveTaskActivity}
+              uploadFile={uploadFile}
+              statusGroups={statusGroups}
+              lists={lists}
+              folders={folders}
+              workspaceId={workspace.id}
+              teams={teams}
+              onTagsChange={(taskId: string, tags: string[]) =>
+                setTasks(prev => prev.map(t => t.id === taskId ? { ...t, tags } : t))
+              }
+            />
+          </ErrorBoundary>
         )}
 
         <TeamsModal
@@ -3878,7 +4603,7 @@ export default function App() {
                 <span>Criar Nova Tarefa</span>
                 <span className="ml-auto text-xs text-muted-foreground">Ctrl+N</span>
               </CommandItem>
-              <CommandItem value="minhas tarefas" onSelect={() => { handleNavigate('global', null, 'Minhas Tarefas'); setActiveView('List'); setIsCommandOpen(false); }}>
+              <CommandItem value="minhas tarefas" onSelect={() => { handleNavigate('global', null, 'Minhas Tarefas'); setActiveView('MyTasks'); setIsCommandOpen(false); }}>
                 <Icons.Check className="mr-2 h-4 w-4" />
                 <span>Minhas Tarefas</span>
               </CommandItem>
@@ -4648,7 +5373,7 @@ function SidebarDocItem({ doc, allDocs, depth, activeDocId, folder, onSetActiveD
 
 function Sidebar({
   themePreset,
-  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onNavigate, onViewChange, isCollapsed, onToggle,
+  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onEnsurePersonalList, onOpenAdminPanel, onNavigate, onViewChange, isCollapsed, onToggle,
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder, onBulkDeleteFolders,
   onDeleteList, onRenameList, onDuplicateList,
@@ -4665,10 +5390,86 @@ function Sidebar({
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
   const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
+
+  // "Mais" (item 9 do Início, estilo ClickUp): escolher um item no dropdown
+  // "fixa" ele na sidebar, substituindo o que estava fixado antes — só o
+  // mecanismo de fixar, decidido com o usuário (os destinos reais do
+  // ClickUp ali são Chat/Posts/Canais, que o VP Click não tem).
+  const [pinnedMoreKey, setPinnedMoreKey] = useState<string | null>(() => localStorage.getItem('vp_pinned_more_item'));
+  const [showAllSpacesModal, setShowAllSpacesModal] = useState(false);
+  const moreCandidates = [
+    {
+      key: 'all-spaces',
+      label: 'Todos os Espaços',
+      icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => setShowAllSpacesModal(true),
+      isActive: false,
+    },
+    {
+      // "Todas as tarefas" no ClickUp real não é "toda tarefa do workspace
+      // sem filtro" — é a lista de tarefas vistas recentemente (o que a
+      // busca/Ctrl+K também mostra). Reaproveita o registro de "recentes" já
+      // usado no card Recentes de Minhas Tarefas, numa view dedicada.
+      key: 'all-tasks',
+      label: 'Todas as tarefas',
+      icon: <Icons.List className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Todas as tarefas'); onViewChange('RecentTasks'); },
+      isActive: activeView === 'RecentTasks',
+    },
+    (userRole === 'ADMIN' || userRole === 'GESTOR') && {
+      key: 'admin',
+      label: 'Painel do Administrador',
+      icon: <Icons.Shield className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => onOpenAdminPanel(),
+      isActive: activeView === 'Admin',
+    },
+  ].filter(Boolean) as { key: string; label: string; icon: React.ReactNode; onSelect: () => void; isActive: boolean }[];
+  const pinnedMoreItem = moreCandidates.find((c) => c.key === pinnedMoreKey);
+
+  const selectMoreItem = (key: string) => {
+    setPinnedMoreKey(key);
+    localStorage.setItem('vp_pinned_more_item', key);
+    moreCandidates.find((c) => c.key === key)?.onSelect();
+  };
+
+  // "Todos os Espaços" (item "Mais" do Início, estilo ClickUp): espaços
+  // ocultos somem da árvore principal, mas continuam existindo — preferência
+  // só de cliente, mesmo nível/local de armazenamento já usado em
+  // vp_sidebar_width/vp_pinned_more_item/vp_favorites.
+  const [hiddenSpaceIds, setHiddenSpaceIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('vp_hidden_spaces');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
+  const toggleHiddenSpace = (spaceId: string) => {
+    setHiddenSpaceIds((prev) => {
+      const next = prev.includes(spaceId) ? prev.filter((id) => id !== spaceId) : [...prev, spaceId];
+      localStorage.setItem('vp_hidden_spaces', JSON.stringify(next));
+      return next;
+    });
+  };
+
   const [secInicioOpen, setSecInicioOpen] = useState(true);
   const [secMinhasTarefasOpen, setSecMinhasTarefasOpen] = useState(false);
   const [secFavoritosOpen, setSecFavoritosOpen] = useState(true);
   const [secEspacosOpen, setSecEspacosOpen] = useState(true);
+
+  // Busca na sidebar (filtra espaços, pastas e listas pelo nome)
+  const [showSidebarSearch, setShowSidebarSearch] = useState(false);
+  const [sidebarSearchQuery, setSidebarSearchQuery] = useState('');
+  const sidebarQuery = sidebarSearchQuery.trim().toLowerCase();
+  const isSidebarSearching = sidebarQuery.length > 0;
+  const listMatchesSearch = (list: List) => list.name.toLowerCase().includes(sidebarQuery);
+  const folderMatchesSearch = (folder: Folder) =>
+    folder.name.toLowerCase().includes(sidebarQuery) || (lists as List[]).some((l) => l.folderId === folder.id && listMatchesSearch(l));
+  const spaceMatchesSearch = (space: Space) =>
+    space.name.toLowerCase().includes(sidebarQuery) || (folders as Folder[]).some((f) => f.spaceId === space.id && folderMatchesSearch(f));
+  const visibleSpaces = spaces.filter((s: Space) => !hiddenSpaceIds.includes(s.id));
+  const filteredSpaces = isSidebarSearching ? visibleSpaces.filter(spaceMatchesSearch) : visibleSpaces;
+  const filteredFavorites = (favorites || []).filter((fav: any) => !isSidebarSearching || fav.name.toLowerCase().includes(sidebarQuery));
 
   // Largura redimensionável da sidebar (arrastar borda direita; duplo clique restaura)
   const SIDEBAR_DEFAULT_W = 240;
@@ -4722,7 +5523,7 @@ function Sidebar({
   /* ── Icon Nav Bar items ── */
   const navItems = [
     { id: 'home', label: 'Início', icon: <Icons.Home />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }, active: activeView === 'Dashboard' && activeScope.type === 'global' },
-    { id: 'tasks', label: 'Minhas Tarefas', icon: <Icons.Check />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }, active: activeView === 'List' && activeScope.type === 'global' },
+    { id: 'tasks', label: 'Minhas Tarefas', icon: <Icons.Check />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Minhas Tarefas'); onViewChange('MyTasks'); }, active: activeView === 'MyTasks' && activeScope.type === 'global' },
     { id: 'calendar', label: 'Calendário', icon: <Icons.Calendar />, action: () => { if (isCollapsed) onToggle(); onViewChange('Calendar'); }, active: activeView === 'Calendar' },
     { id: 'gantt', label: 'Gantt', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="3" width="8" height="2" rx="1"/><rect x="1" y="7" width="6" height="2" rx="1"/><rect x="4" y="11" width="10" height="2" rx="1"/></svg>, action: () => { if (isCollapsed) onToggle(); onViewChange('Gantt'); }, active: activeView === 'Gantt' },
     { id: 'dashboard', label: 'Dashboards', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="8" width="4" height="6" rx="0.5"/><rect x="6" y="4" width="4" height="10" rx="0.5"/><rect x="11" y="2" width="4" height="12" rx="0.5"/></svg>, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }, active: false },
@@ -4744,6 +5545,8 @@ function Sidebar({
             key={item.id}
             onClick={item.action}
             title={item.label}
+            aria-label={`Ir para ${item.label}`}
+            aria-current={item.active ? 'page' : undefined}
             className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
               item.active
                 ? 'bg-sidebar-accent text-primary'
@@ -4758,7 +5561,7 @@ function Sidebar({
         <div className="flex-1" />
 
         {/* Space quick-access avatars */}
-        {spaces.slice(0, 6).map((space: Space) => (
+        {visibleSpaces.slice(0, 6).map((space: Space) => (
           <button
             key={space.id}
             title={space.name}
@@ -4813,8 +5616,27 @@ function Sidebar({
 
           {/* Header */}
           <div className="flex items-center gap-1 px-2 py-2 border-b border-sidebar-border">
-            <span className="text-sm font-semibold text-sidebar-foreground flex-1 truncate px-1">Início</span>
-            <button title="Pesquisar" className="p-1.5 rounded hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors">
+            {showSidebarSearch ? (
+              <div className="relative flex-1">
+                <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-sidebar-foreground/40" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M11 11l3 3"/></svg>
+                <input
+                  type="text"
+                  autoFocus
+                  value={sidebarSearchQuery}
+                  onChange={(e) => setSidebarSearchQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Escape') { setShowSidebarSearch(false); setSidebarSearchQuery(''); } }}
+                  placeholder="Buscar espaços, pastas ou listas..."
+                  className="w-full pl-6 pr-2 py-1 text-xs bg-sidebar-accent/40 border border-sidebar-border rounded focus:outline-none focus:ring-1 focus:ring-primary text-sidebar-foreground placeholder:text-sidebar-foreground/40"
+                />
+              </div>
+            ) : (
+              <span className="text-sm font-semibold text-sidebar-foreground flex-1 truncate px-1">Início</span>
+            )}
+            <button
+              title={showSidebarSearch ? 'Fechar busca' : 'Pesquisar'}
+              onClick={() => setShowSidebarSearch(v => { if (v) setSidebarSearchQuery(''); return !v; })}
+              className={`p-1.5 rounded hover:bg-sidebar-accent transition-colors ${showSidebarSearch ? 'text-primary' : 'text-sidebar-foreground/50 hover:text-sidebar-foreground'}`}
+            >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M11 11l3 3"/></svg>
             </button>
             <button title="Criar tarefa" onClick={() => { }} className="p-1.5 rounded hover:bg-sidebar-accent text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors">
@@ -4839,11 +5661,51 @@ function Sidebar({
               </button>
               {secInicioOpen && (
                 <div className="pb-1">
+                  {/* Caixa de entrada */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'Inbox' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Caixa de entrada'); onViewChange('Inbox'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.Bell />
+                    <span className="flex-1 truncate">Caixa de entrada</span>
+                  </div>
+
+                  {/* Respostas */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'Replies' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Respostas'); onViewChange('Replies'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.Reply />
+                    <span className="flex-1 truncate">Respostas</span>
+                  </div>
+
+                  {/* Comentários atribuídos */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'AssignedComments' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Comentários atribuídos'); onViewChange('AssignedComments'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.UserCheck />
+                    <span className="flex-1 truncate">Comentários atribuídos</span>
+                  </div>
+
+                  {/* Reuniões */}
+                  <div
+                    className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'Meetings' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                    onClick={() => { onNavigate('global', null, 'Reuniões'); onViewChange('Meetings'); }}
+                  >
+                    <div className="w-3 h-3 shrink-0" />
+                    <Icons.Video />
+                    <span className="flex-1 truncate">Reuniões</span>
+                  </div>
+
                   {/* Minhas Tarefas (expandível) */}
                   <div>
                     <div
-                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'List' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
-                      onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
+                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${activeView === 'MyTasks' && activeScope.type === 'global' ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                      onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('MyTasks'); }}
                     >
                       <button
                         onClick={(e) => { e.stopPropagation(); setSecMinhasTarefasOpen(v => !v); }}
@@ -4858,21 +5720,91 @@ function Sidebar({
                       <div className="ml-7 border-l border-sidebar-border pl-2 mt-0.5 space-y-0.5">
                         <button
                           onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
-                          className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors"
+                          className={`w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] transition-colors ${activeView === 'List' && activeScope.name === 'Minhas Tarefas' && !lists.find((l: List) => l.id === activeListId)?.ownerId ? 'bg-sidebar-accent text-sidebar-foreground font-semibold' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}
                         >
                           <svg className="w-3.5 h-3.5 shrink-0 text-sidebar-foreground/40" fill="currentColor" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5"/></svg>
                           Atribuídas a mim
                         </button>
                         <button
-                          onClick={() => { onNavigate('global', null, 'Minhas Tarefas'); onViewChange('List'); }}
-                          className="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors"
+                          onClick={() => { onNavigate('global', null, 'Hoje e atrasadas'); onViewChange('Reminders'); }}
+                          className={`w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] transition-colors ${activeView === 'Reminders' ? 'bg-sidebar-accent text-sidebar-foreground font-semibold' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}
                         >
                           <Icons.Calendar />
                           Hoje e atrasadas
                         </button>
+                        <button
+                          onClick={async () => {
+                            // onNavigate reseta activeListId pra null e troca o nome do escopo —
+                            // por isso vem ANTES de aplicar o id da lista pessoal de verdade.
+                            // Sem isso, o escopo ficava "grudado" em 'Minhas Tarefas' (deixado por
+                            // um clique anterior em "Atribuídas a mim"), vazando o filtro de
+                            // "Mostrar concluídas" pra dentro da lista pessoal.
+                            onNavigate('global', null, 'Lista pessoal');
+                            const listId = await onEnsurePersonalList();
+                            if (listId) { onSetActiveListId(listId); onViewChange('List'); }
+                          }}
+                          className={`w-full text-left flex items-center gap-2 px-2 py-1.5 rounded text-[12px] transition-colors ${activeView === 'List' && lists.find((l: List) => l.id === activeListId)?.ownerId ? 'bg-sidebar-accent text-sidebar-foreground font-semibold' : 'text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}
+                        >
+                          <Icons.List className="w-3.5 h-3.5 shrink-0" />
+                          Lista pessoal
+                        </button>
                       </div>
                     )}
                   </div>
+
+                  {/* Item fixado via "Mais" */}
+                  {pinnedMoreItem && (
+                    <div
+                      className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 group transition-colors text-sm ${pinnedMoreItem.isActive ? 'bg-sidebar-accent text-primary font-semibold' : 'text-sidebar-foreground/80 hover:bg-sidebar-accent/50'}`}
+                      onClick={pinnedMoreItem.onSelect}
+                    >
+                      <div className="w-3 h-3 shrink-0" />
+                      {pinnedMoreItem.icon}
+                      <span className="flex-1 truncate">{pinnedMoreItem.label}</span>
+                    </div>
+                  )}
+
+                  {/* "Mais": escolher um item aqui fixa ele acima, substituindo o anterior */}
+                  {moreCandidates.length > 0 && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <div className="flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 text-sidebar-foreground/60 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors text-sm">
+                          <div className="w-3 h-3 shrink-0" />
+                          <span className="text-sm leading-none tracking-wider">•••</span>
+                          <span className="flex-1 truncate">Mais</span>
+                        </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-56">
+                        {moreCandidates.map((c) => (
+                          <DropdownMenuItem key={c.key} onClick={() => selectMoreItem(c.key)} className="flex items-center gap-2 text-sm">
+                            {c.icon}
+                            {c.label}
+                            {pinnedMoreKey === c.key && <Icons.Check className="w-3.5 h-3.5 ml-auto text-orange-500" />}
+                          </DropdownMenuItem>
+                        ))}
+                        {(userRole === 'ADMIN' || userRole === 'GESTOR') && (
+                          <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onClick={onOpenFields} className="flex items-center gap-2 text-sm">
+                              <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.22 3.22l1.42 1.42M11.36 11.36l1.42 1.42M3.22 12.78l1.42-1.42M11.36 4.64l1.42-1.42"/><circle cx="8" cy="8" r="3"/></svg>
+                              Personalizar
+                            </DropdownMenuItem>
+                          </>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+
+                  {showAllSpacesModal && (
+                    <AllSpacesModal
+                      spaces={spaces}
+                      hiddenSpaceIds={hiddenSpaceIds}
+                      onToggleHidden={toggleHiddenSpace}
+                      onCreateSpace={onOpenCreateSpace}
+                      onNavigateToSpace={(id: string, name: string) => { onNavigate('space', id, name); onViewChange('Dashboard'); }}
+                      onClose={() => setShowAllSpacesModal(false)}
+                    />
+                  )}
 
                   {/* Ir para Dashboard */}
                   <div
@@ -4893,18 +5825,21 @@ function Sidebar({
                 className="w-full flex items-center gap-1 px-3 py-2 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors group"
                 onClick={() => setSecFavoritosOpen(v => !v)}
               >
-                <svg className={`w-3 h-3 transition-transform shrink-0 ${secFavoritosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                <svg className={`w-3 h-3 transition-transform shrink-0 ${secFavoritosOpen || isSidebarSearching ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
                 Favoritos
               </button>
-              {secFavoritosOpen && (
+              {(secFavoritosOpen || isSidebarSearching) && (
                 <div className="pb-1">
-                  {favorites && favorites.length === 0 && (
+                  {favorites && favorites.length === 0 && !isSidebarSearching && (
                     <p className="text-[11px] text-sidebar-foreground/40 flex items-center gap-1.5 px-4 py-2">
                       <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
                       Passe o mouse sobre uma lista ou pasta e clique ★
                     </p>
                   )}
-                  {(favorites || []).map((fav: any) => {
+                  {isSidebarSearching && filteredFavorites.length === 0 && favorites && favorites.length > 0 && (
+                    <p className="text-[11px] text-sidebar-foreground/40 px-4 py-2">Nenhum favorito encontrado</p>
+                  )}
+                  {filteredFavorites.map((fav: any) => {
                     const isActiveList = fav.type === 'list' && activeListId === fav.id;
                     const isActiveFolder = fav.type === 'folder' && activeScope.type === 'folder' && activeScope.id === fav.id;
                     const isActiveSpace = fav.type === 'space' && activeScope.type === 'space' && activeScope.id === fav.id;
@@ -4942,7 +5877,7 @@ function Sidebar({
                   className="flex items-center gap-1 text-[11px] font-semibold text-sidebar-foreground/60 uppercase tracking-widest hover:text-sidebar-foreground transition-colors flex-1 text-left"
                   onClick={() => setSecEspacosOpen(v => !v)}
                 >
-                  <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
+                  <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen || isSidebarSearching ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
                   Espaços
                 </button>
                 <button
@@ -4954,10 +5889,13 @@ function Sidebar({
                 </button>
               </div>
 
-              {secEspacosOpen && (
+              {(secEspacosOpen || isSidebarSearching) && (
                 <div className="pb-2">
-                  {spaces.map((space: Space) => {
-                    const isExpanded = expandedSpaces.includes(space.id);
+                  {isSidebarSearching && filteredSpaces.length === 0 && (
+                    <p className="text-[11px] text-sidebar-foreground/40 px-4 py-2">Nenhum espaço, pasta ou lista encontrado para "{sidebarSearchQuery}"</p>
+                  )}
+                  {filteredSpaces.map((space: Space) => {
+                    const isExpanded = isSidebarSearching ? true : expandedSpaces.includes(space.id);
                     const isSpaceDropTarget = dropTarget?.type === 'space' && dropTarget.id === space.id && dragItem?.type === 'folder';
                     return (
                       <div key={space.id} className="mb-0.5">
@@ -5041,8 +5979,8 @@ function Sidebar({
                                 </div>
                               </div>
                             )}
-                            {folders.filter((f: Folder) => f.spaceId === space.id).map((folder: Folder) => {
-                              const isFolderExpanded = expandedFolders.includes(folder.id);
+                            {folders.filter((f: Folder) => f.spaceId === space.id && (!isSidebarSearching || folderMatchesSearch(f))).map((folder: Folder) => {
+                              const isFolderExpanded = isSidebarSearching ? true : expandedFolders.includes(folder.id);
                               return (
                                 <div key={folder.id}>
                                   <div
@@ -5146,7 +6084,7 @@ function Sidebar({
 
                                   {isFolderExpanded && (
                                     <div className="ml-5 mt-0.5 space-y-0.5 border-l border-sidebar-border pl-2">
-                                      {(lists as List[]).filter((l) => l.folderId === folder.id).map((list: List) => {
+                                      {(lists as List[]).filter((l) => l.folderId === folder.id && (!isSidebarSearching || listMatchesSearch(l))).map((list: List) => {
                                         const isActive = activeListId === list.id;
                                         return (
                                           <div
@@ -5307,12 +6245,128 @@ function ViewTab({ active, onClick, label }: any) {
   return (
     <button
       onClick={onClick}
+      aria-label={`Visualização ${label}`}
+      aria-current={active ? 'page' : undefined}
       className={`px-3 py-3 text-sm font-medium transition-all relative whitespace-nowrap ${active ? 'text-[var(--primary-color)]' : 'text-gray-500 hover:text-gray-900'
         }`}
     >
       {label}
       {active && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--primary-color)] animate-in fade-in duration-200" />}
     </button>
+  );
+}
+
+/**
+ * "Todos os Espaços" (item "Mais" do Início, estilo ClickUp): painel pra
+ * ver/ocultar/ordenar/buscar todos os Espaços do workspace e criar um novo,
+ * sem precisar navegar pela árvore. Ocultar aqui só esconde da árvore lateral
+ * (preferência de cliente, vp_hidden_spaces) — não afeta ninguém mais.
+ */
+function AllSpacesModal({ spaces, hiddenSpaceIds, onToggleHidden, onCreateSpace, onNavigateToSpace, onClose }: {
+  spaces: Space[];
+  hiddenSpaceIds: string[];
+  onToggleHidden: (id: string) => void;
+  onCreateSpace: () => void;
+  onNavigateToSpace: (id: string, name: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [sortBy, setSortBy] = useState<'recommended' | 'created' | 'alpha'>('recommended');
+
+  const q = query.trim().toLowerCase();
+  const matches = (s: Space) => !q || s.name.toLowerCase().includes(q);
+
+  const sorted = useMemo(() => {
+    const arr = spaces.filter(matches);
+    if (sortBy === 'alpha') return [...arr].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' }));
+    if (sortBy === 'created') return [...arr].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    return arr;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spaces, query, sortBy]);
+
+  const visible = sorted.filter((s) => !hiddenSpaceIds.includes(s.id));
+  const hidden = sorted.filter((s) => hiddenSpaceIds.includes(s.id));
+
+  const renderRow = (space: Space, isHidden: boolean) => (
+    <div key={space.id} className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-50 group">
+      <button
+        onClick={() => onNavigateToSpace(space.id, space.name)}
+        className="flex items-center gap-2 flex-1 min-w-0 text-left"
+      >
+        {space.icon ? (
+          (() => { const IconComponent = (Icons as any)[space.icon] || Icons.Layout; return <IconComponent className="w-4 h-4 shrink-0" color={space.color} />; })()
+        ) : (
+          <div className="w-5 h-5 rounded flex items-center justify-center shrink-0 font-bold text-[9px] text-white" style={{ backgroundColor: space.color }}>
+            {space.name.charAt(0).toUpperCase()}
+          </div>
+        )}
+        <span className="text-sm text-gray-700 truncate">{space.name}</span>
+      </button>
+      <button
+        onClick={() => onToggleHidden(space.id)}
+        className="text-[11px] font-semibold text-gray-400 hover:text-[var(--primary-color)] px-2 py-1 rounded-md hover:bg-gray-100 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+      >
+        {isHidden ? 'Mostrar na barra lateral' : 'Ocultar'}
+      </button>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 pt-5 pb-3">
+          <h2 className="font-bold text-gray-800 text-base">Todos os Espaços</h2>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+          </button>
+        </div>
+        <div className="px-5 flex items-center gap-2 pb-3">
+          <div className="relative flex-1">
+            <input
+              autoFocus
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar espaços..."
+              className="w-full pl-8 pr-3 py-1.5 text-sm bg-gray-50 border rounded-md focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
+            />
+            <Icons.Search className="w-4 h-4 text-gray-400 absolute left-2 top-2" />
+          </div>
+          <select
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as any)}
+            className="text-xs border rounded-md px-2 py-1.5 bg-gray-50 text-gray-600 focus:outline-none"
+          >
+            <option value="recommended">Recomendado</option>
+            <option value="created">Data de criação</option>
+            <option value="alpha">Alfabética</option>
+          </select>
+        </div>
+
+        <div className="flex-1 overflow-y-auto custom-scrollbar px-2 pb-2">
+          <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide px-3 pt-1 pb-1">Visíveis</p>
+          {visible.length === 0 ? (
+            <p className="text-xs text-gray-400 px-3 py-2">Nenhum espaço visível.</p>
+          ) : visible.map((s) => renderRow(s, false))}
+
+          {hidden.length > 0 && (
+            <>
+              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide px-3 pt-3 pb-1">Ocultos</p>
+              {hidden.map((s) => renderRow(s, true))}
+            </>
+          )}
+        </div>
+
+        <div className="border-t p-3">
+          <button
+            onClick={() => { onCreateSpace(); onClose(); }}
+            className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-600 hover:text-[var(--primary-color)] py-2 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            <Icons.Plus className="w-4 h-4" /> Novo Espaço
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -5549,46 +6603,11 @@ function formatLocalDate(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-// Detecta URLs dentro de um texto solto (descrição de tarefa, nome de anexo
-// do tipo link etc.) e devolve nós React com essas URLs como <a> clicáveis,
-// preservando o resto do texto como está. Pontuação comum no fim de frase
-// (. , ; : ! ? ) ] ' ") fica de fora do link.
-const LINKIFY_URL_PATTERN = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
-
-export function linkifyText(text: string): React.ReactNode[] {
-  if (!text) return [];
-  const nodes: React.ReactNode[] = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-  const regex = new RegExp(LINKIFY_URL_PATTERN);
-  while ((match = regex.exec(text)) !== null) {
-    let url = match[0];
-    let trailing = '';
-    while (url.length && /[.,;:!?)\]'"]$/.test(url)) {
-      trailing = url.slice(-1) + trailing;
-      url = url.slice(0, -1);
-    }
-    if (!url) { lastIndex = match.index + match[0].length; continue; }
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
-    const href = url.startsWith('http') ? url : `https://${url}`;
-    nodes.push(
-      <a
-        key={match.index}
-        href={href}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-blue-600 underline hover:text-blue-800"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {url}
-      </a>
-    );
-    if (trailing) nodes.push(trailing);
-    lastIndex = match.index + match[0].length;
-  }
-  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
-  return nodes;
-}
+// Reexportado para não quebrar `import { linkifyText } from './App'` já em uso
+// (ex.: src/test/linkifyText.test.tsx). A implementação vive em ./lib/linkify
+// porque MentionText (lib/mentions.tsx) também precisa dela, e mentions.tsx é
+// importado por este arquivo — importar de volta daqui criaria um ciclo.
+export { linkifyText };
 
 // Resolve qual lista deve ser considerada "ativa" quando `activeListId` está
 // vazio (ex: navegando por pasta/espaço em vez de uma lista específica): se
@@ -5781,7 +6800,7 @@ function ListView({
   const taskCustomFields = useMemo(() => {
     return (customFields as CustomField[])
       .filter((f) => f.target === 'TASK')
-      .filter((f) => (f.visibleTo as UserRole[]).includes(currentUser.role))
+      .filter((f) => ((f.visibleTo as UserRole[] | undefined) ?? []).includes(currentUser.role))
       .filter((f) => !hiddenTaskFieldIdsForActiveList.includes(f.id));
   }, [customFields, currentUser.role, hiddenTaskFieldIdsForActiveList]);
 
@@ -7272,7 +8291,17 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [startDate, setStartDate] = useState('');
   const [duration, setDuration] = useState('');
   const [dueDate, setDueDate] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const todayLabel = new Date().toLocaleDateString('pt-BR');
+
+  // Duração é opcional, mas se preenchida precisa ser um número de dias (ex: 5)
+  // ou horas no formato `3h`. Qualquer outra coisa (ex: `abc`) é sinalizada.
+  const trimmedDuration = duration.trim();
+  const durationError = trimmedDuration !== '' &&
+    !/^\d+(\.\d+)?\s*h$/i.test(trimmedDuration) &&
+    !/^\d+(\.\d+)?$/.test(trimmedDuration)
+      ? 'Duração inválida. Use um número de dias (ex: 5) ou horas (ex: 3h).'
+      : '';
 
   const handleStartOrDurationChange = (newStart: string, newDuration: string) => {
     if (!newStart || !newDuration.trim()) return;
@@ -7325,14 +8354,20 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
         }
       }
     } else if (activeListId) {
-      // Se há uma lista ativa selecionada na sidebar, usá-la diretamente
+      // Se há uma lista ativa selecionada na sidebar, usá-la diretamente.
+      // Lista pessoal (ver migration 18) não tem pasta — sem o list.folderId
+      // resolver pra um folder de verdade, o cascading Espaço→Pasta→Lista
+      // nunca achava a lista e selectedListId ficava vazio, bloqueando a
+      // criação de tarefa com "Selecione um Espaço, Pasta e Lista". Seta
+      // selectedListId sempre que a lista existir; espaço/pasta só quando
+      // aplicável (a lista pessoal fica sem esses dois, o que é esperado).
       const list = lists.find((l: List) => l.id === activeListId);
       if (list) {
+        setSelectedListId(activeListId);
         const folder = folders.find((f: Folder) => f.id === list.folderId);
         if (folder) {
           setSelectedSpaceId(folder.spaceId);
           setSelectedFolderId(folder.id);
-          setSelectedListId(activeListId);
         }
       }
     } else if (initialScope.type === 'space') {
@@ -7387,9 +8422,18 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
     }
   }, [currentStatusOptions, status]);
 
-  const handleSubmit = () => {
-    if (!title) {
+  const handleSubmit = async () => {
+    // Guarda contra duplo-envio: enquanto o insert está em andamento, novos
+    // cliques são ignorados (evita criar a mesma tarefa várias vezes).
+    if (isSubmitting) return;
+
+    if (!title.trim()) {
       toast.error('Informe o nome da tarefa.');
+      return;
+    }
+
+    if (durationError) {
+      toast.error(durationError);
       return;
     }
 
@@ -7404,26 +8448,33 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
       return;
     }
 
-    onCreate({
-      title,
-      description,
-      status,
-      priority,
-      mainAssigneeId,
-      secondaryAssigneeIds,
-      startDate: startDate || undefined,
-      dueDate: dueDate || undefined,
-      listId: selectedListId,
-      parentId: prefilledData?.parentId
-    });
+    setIsSubmitting(true);
+    try {
+      await onCreate({
+        title,
+        description,
+        status,
+        priority,
+        mainAssigneeId,
+        secondaryAssigneeIds,
+        startDate: startDate || undefined,
+        dueDate: dueDate || undefined,
+        listId: selectedListId,
+        parentId: prefilledData?.parentId
+      });
+    } finally {
+      // No sucesso o modal é desmontado pelo componente pai; no erro,
+      // reabilitamos o botão para o usuário poder tentar de novo.
+      setIsSubmitting(false);
+    }
   };
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-md p-4" onClick={(e) => e.stopPropagation()}>
-      <div className="bg-white w-full max-w-2xl flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200 max-h-[90vh]">
+      <div role="dialog" aria-modal="true" aria-labelledby="create-task-title" className="bg-white w-full max-w-2xl flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200 max-h-[90vh]">
         <div className="p-6 border-b flex items-center justify-between bg-gray-50">
           <div>
-            <h3 className="text-lg font-bold text-gray-800">
+            <h3 id="create-task-title" className="text-lg font-bold text-gray-800">
               {prefilledData?.parentId ? 'Adicionar Subtarefa' : 'Criar Nova Tarefa'}
             </h3>
             {prefilledData?.parentId && (
@@ -7449,6 +8500,8 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className={`text-xs font-bold uppercase ${!selectedSpaceId ? 'text-amber-600' : 'text-gray-400'}`}>Espaço *</label>
               <select
+                required
+                aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${!selectedSpaceId ? 'border-amber-300' : ''}`}
                 value={selectedSpaceId}
                 onChange={(e) => { setSelectedSpaceId(e.target.value); setSelectedFolderId(''); setSelectedListId(''); }}
@@ -7460,6 +8513,8 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className={`text-xs font-bold uppercase ${selectedSpaceId && !selectedFolderId ? 'text-amber-600' : 'text-gray-400'}`}>Pasta *</label>
               <select
+                required
+                aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedSpaceId && !selectedFolderId ? 'border-amber-300' : ''}`}
                 value={selectedFolderId}
                 onChange={(e) => { setSelectedFolderId(e.target.value); setSelectedListId(''); }}
@@ -7472,6 +8527,8 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div className="sm:col-span-2">
               <label className={`text-xs font-bold uppercase ${selectedFolderId && !selectedListId ? 'text-amber-600' : 'text-gray-400'}`}>Lista *</label>
               <select
+                required
+                aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedFolderId && !selectedListId ? 'border-amber-300' : ''}`}
                 value={selectedListId}
                 onChange={(e) => setSelectedListId(e.target.value)}
@@ -7485,9 +8542,11 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
 
           <div className="space-y-4">
             <div>
-              <label className="text-xs font-bold text-gray-400 uppercase">Nome da Tarefa</label>
+              <label className="text-xs font-bold text-gray-400 uppercase">Nome da Tarefa *</label>
               <input
                 type="text"
+                required
+                aria-required="true"
                 className="w-full p-3 border rounded-lg mt-1 text-lg font-medium focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
@@ -7527,7 +8586,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                       value={mainAssigneeId}
                       onChange={(e) => setMainAssigneeId(e.target.value)}
                     >
-                      {[...users].sort((a: User, b: User) => a.name.localeCompare(b.name, 'pt-BR')).map((u: User) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                      {[...users].filter((u: User) => u.email !== AI_AGENT_EMAIL || u.id === mainAssigneeId).sort((a: User, b: User) => a.name.localeCompare(b.name, 'pt-BR')).map((u: User) => <option key={u.id} value={u.id}>{u.name}</option>)}
                     </select>
                   </div>
                   <div>
@@ -7542,6 +8601,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                     <div className="max-h-32 overflow-y-auto border rounded p-2 bg-gray-50 space-y-1 custom-scrollbar">
                       {users
                         .filter((u: User) => u.id !== mainAssigneeId)
+                        .filter((u: User) => u.email !== AI_AGENT_EMAIL || secondaryAssigneeIds.includes(u.id))
                         .filter((u: User) => u.name.toLowerCase().includes(assigneeSearch.toLowerCase()))
                         .sort((a: User, b: User) => a.name.localeCompare(b.name, 'pt-BR'))
                         .map((u: User) => (
@@ -7580,13 +8640,17 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                   <input
                     type="text"
                     placeholder="Ex: 5 ou 3h"
-                    className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+                    aria-invalid={!!durationError}
+                    className={`w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${durationError ? 'border-red-400 focus:ring-red-300' : ''}`}
                     value={duration}
                     onChange={(e) => {
                       setDuration(e.target.value);
                       handleStartOrDurationChange(startDate, e.target.value);
                     }}
                   />
+                  {durationError && (
+                    <p className="text-[10px] text-red-500 mt-1">{durationError}</p>
+                  )}
                 </div>
               </div>
               <div>
@@ -7619,13 +8683,19 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
         </div>
 
         <div className="p-6 border-t bg-gray-50 flex justify-end gap-3 shrink-0">
-          <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700">Cancelar</button>
+          <button onClick={onClose} disabled={isSubmitting} className="px-4 py-2 text-sm font-medium text-gray-500 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed">Cancelar</button>
           <button
             onClick={handleSubmit}
-            disabled={!title}
-            className="px-6 py-2 bg-[var(--primary-color)] text-[#2c3e50] font-bold rounded shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled={!title.trim() || !selectedListId || !!durationError || isSubmitting}
+            className="px-6 py-2 bg-[var(--primary-color)] text-[#2c3e50] font-bold rounded shadow-sm hover:shadow-md transition-all disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
           >
-            Criar Tarefa
+            {isSubmitting && (
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+            )}
+            {isSubmitting ? 'Criando...' : 'Criar Tarefa'}
           </button>
         </div>
       </div>
@@ -7654,6 +8724,8 @@ function TaskDetailModal(props: any) {
     saveComment,
     editComment,
     deleteComment,
+    assignComment,
+    resolveComment,
     toggleWatcher,
     saveExtensionLog,
     saveTaskActivity,
@@ -7664,6 +8736,9 @@ function TaskDetailModal(props: any) {
     workspaceId,
     onTagsChange,
     teams = [],
+    focusCommentId = null,
+    focusAction = null,
+    onFocusHandled,
   } = props;
 
   const currentList = lists?.find((l: any) => l.id === task.listId);
@@ -7699,6 +8774,7 @@ function TaskDetailModal(props: any) {
   const [isSavingExtension, setIsSavingExtension] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [newComment, setNewComment] = useState('');
+  const [isSendingComment, setIsSendingComment] = useState(false);
   const [showAIPanel, setShowAIPanel] = useState(false);
   const [newChecklistText, setNewChecklistText] = useState('');
   const [description, setDescription] = useState(task.description || '');
@@ -7712,7 +8788,9 @@ function TaskDetailModal(props: any) {
 
   const unifiedTimeline = useMemo(() => {
     const all = [
-      ...(task.comments || []).map((c: any) => ({ ...c, unifiedType: 'COMMENT', date: c.timestamp })),
+      // Respostas (task.comments com parentCommentId) não entram na timeline
+      // principal: aparecem aninhadas sob o comentário raiz (ver CommentItem).
+      ...(task.comments || []).filter((c: any) => !c.parentCommentId).map((c: any) => ({ ...c, unifiedType: 'COMMENT', date: c.timestamp })),
       ...(task.activities || []).map((a: any) => ({ ...a, unifiedType: 'ACTIVITY', date: a.createdAt || a.date })),
       ...(task.extensionHistory || []).map((e: any) => ({ ...e, unifiedType: 'EXTENSION', date: e.timestamp }))
     ];
@@ -7785,7 +8863,7 @@ function TaskDetailModal(props: any) {
 
   const taskCustomFields = useMemo(() => {
     return (customFields || []).filter((f: CustomField) =>
-      f.target === 'TASK' && f.visibleTo.includes(currentUser.role)
+      f.target === 'TASK' && (f.visibleTo ?? []).includes(currentUser.role)
     );
   }, [customFields, currentUser.role]);
 
@@ -7968,23 +9046,104 @@ function TaskDetailModal(props: any) {
   };
 
   const handleAddComment = async () => {
-    if (!newComment.trim()) return;
+    // Sem essa guarda o botão nunca fica "ocupado" visualmente: se a rede
+    // demorar (ex.: mesmo cenário de lock/timeout do fetch do Supabase), o
+    // usuário via só um clique sem efeito nenhum e não dava pra distinguir
+    // "processando" de "travado" — dava clique de novo, disparando o mesmo
+    // comentário duplicado quando a primeira chamada finalmente respondia.
+    if (!newComment.trim() || isSendingComment) return;
 
     if (saveComment) {
       const text = newComment;
-      const success = await saveComment(task.id, text);
-      if (success) {
-        setNewComment('');
-        // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
-        notifyMentions({
-          text,
-          taskId: task.id,
-          taskTitle: task.title,
-          actor: currentUser,
-          users: users || [],
-          teams,
-        });
+      setIsSendingComment(true);
+      try {
+        const newCommentId = await saveComment(task.id, text);
+        if (newCommentId) {
+          setNewComment('');
+          // Notifica usuários e Equipes mencionados com @ (fire-and-forget)
+          notifyMentions({
+            text,
+            taskId: task.id,
+            taskTitle: task.title,
+            actor: currentUser,
+            users: users || [],
+            teams,
+            commentId: newCommentId,
+          });
+        }
+      } finally {
+        setIsSendingComment(false);
       }
+    }
+  };
+
+  const handleAddReply = async (taskIdArg: string, parentCommentId: string, text: string) => {
+    if (!saveComment) return false;
+    const newCommentId = await saveComment(taskIdArg, text, parentCommentId);
+    if (newCommentId) {
+      // Notifica usuários e Equipes mencionados com @ (fire-and-forget) — o
+      // comentário raiz (parentCommentId), não a resposta em si: é ele que
+      // tem o âncora de rolagem no painel de Atividade.
+      notifyMentions({
+        text,
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        actor: currentUser,
+        users: users || [],
+        teams,
+        commentId: parentCommentId,
+      });
+      // Notifica quem já participou da thread (autor do comentário raiz + demais respostas).
+      // Busca no banco em vez de usar o `task.comments` local: se duas pessoas
+      // responderem quase ao mesmo tempo, o estado local pode não ter a resposta
+      // alheia ainda, e essa pessoa ficaria de fora da notificação.
+      const { data: threadRows } = await supabase
+        .from('task_comments')
+        .select('user_id')
+        .or(`id.eq.${parentCommentId},parent_comment_id.eq.${parentCommentId}`)
+        .is('deleted_at', null);
+      const threadParticipantIds = (threadRows || []).map((r: any) => r.user_id);
+      notifyReply({
+        text,
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        parentCommentId,
+        threadParticipantIds,
+        actor: currentUser,
+      });
+    }
+    return !!newCommentId;
+  };
+
+  const handleAssignComment = async (taskIdArg: string, commentId: string, userId: string | null) => {
+    if (!assignComment) return;
+    await assignComment(taskIdArg, commentId, userId);
+    if (userId) {
+      const comment = (task.comments || []).find((c: any) => c.id === commentId);
+      notifyCommentAssigned({
+        text: comment?.text || '',
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        commentId,
+        assignedToId: userId,
+        actor: currentUser,
+      });
+    }
+  };
+
+  const handleResolveComment = async (taskIdArg: string, commentId: string) => {
+    if (!resolveComment) return;
+    await resolveComment(taskIdArg, commentId);
+    const comment = (task.comments || []).find((c: any) => c.id === commentId);
+    if (comment?.assignedBy) {
+      notifyCommentResolved({
+        text: comment.text || '',
+        taskId: taskIdArg,
+        taskTitle: task.title,
+        commentId,
+        assignedById: comment.assignedBy,
+        actor: currentUser,
+      });
     }
   };
 
@@ -8198,7 +9357,7 @@ function TaskDetailModal(props: any) {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="w-64 max-h-80 overflow-y-auto">
                         <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Principal</div>
-                        {[...users].sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
+                        {[...users].filter((u: any) => u.email !== AI_AGENT_EMAIL || u.id === task.mainAssigneeId).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleSetMainAssignee(u.id)} className="flex items-center gap-3 py-2">
                             <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
                             <span className={`text-sm ${task.mainAssigneeId === u.id ? 'font-bold text-gray-900' : 'text-gray-600'}`}>{u.name}</span>
@@ -8207,7 +9366,7 @@ function TaskDetailModal(props: any) {
                         ))}
                         <DropdownMenuSeparator />
                         <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Adicionais</div>
-                        {users.filter((u: any) => u.id !== task.mainAssigneeId).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
+                        {users.filter((u: any) => u.id !== task.mainAssigneeId && (u.email !== AI_AGENT_EMAIL || (task.secondaryAssigneeIds || []).includes(u.id))).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleToggleSecondaryAssignee(u.id)} className="flex items-center gap-3 py-2">
                             <div className="relative">
                               <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
@@ -8690,19 +9849,29 @@ function TaskDetailModal(props: any) {
                   }
 
                   if (item.unifiedType === 'COMMENT') {
-                    const isOwn = item.userId === currentUser.id;
+                    const replies = (task.comments || [])
+                      .filter((c: any) => c.parentCommentId === item.id)
+                      .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+                    const isFocusTarget = focusCommentId === item.id;
                     return (
-                      <CommentItem
-                        key={item.id}
-                        item={item}
-                        users={users}
-                        teams={teams}
-                        isOwn={isOwn}
-                        taskId={task.id}
-                        onEdit={editComment}
-                        onDelete={deleteComment}
-                        formatDate={formatDate}
-                      />
+                      <div key={item.id} id={`comment-${item.id}`}>
+                        <CommentItem
+                          item={item}
+                          replies={replies}
+                          users={users}
+                          teams={teams}
+                          currentUserId={currentUser.id}
+                          taskId={task.id}
+                          onEdit={editComment}
+                          onDelete={deleteComment}
+                          onReply={handleAddReply}
+                          onAssign={handleAssignComment}
+                          onResolve={handleResolveComment}
+                          formatDate={formatDate}
+                          autoFocus={isFocusTarget ? (focusAction || 'view') : undefined}
+                          onFocusHandled={isFocusTarget ? onFocusHandled : undefined}
+                        />
+                      </div>
                     );
                   }
 
@@ -8794,10 +9963,18 @@ function TaskDetailModal(props: any) {
                   </div>
                   <button
                     onClick={handleAddComment}
-                    disabled={!newComment.trim()}
+                    disabled={!newComment.trim() || isSendingComment}
+                    title={isSendingComment ? 'Enviando...' : undefined}
                     className="bg-orange-500 p-2 rounded-xl text-white hover:brightness-110 shadow-lg shadow-orange-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>
+                    {isSendingComment ? (
+                      <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" /></svg>
+                    )}
                   </button>
                 </div>
               </div>
@@ -9437,7 +10614,11 @@ function CreateWikiModal({ spaces, onClose, onCreate }: any) {
   const handleConfirm = async () => {
     if (!spaceId || isCreating) return;
     setIsCreating(true);
-    await onCreate(spaceId);
+    try {
+      await onCreate(spaceId);
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   return (

@@ -1,5 +1,6 @@
 import React from 'react';
 import { supabase } from './supabase';
+import { linkifyText } from './linkify';
 import { Team, User, NotificationType } from '../types';
 
 const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -70,6 +71,88 @@ export async function notifyMentions(params: {
   if (error) console.error('Erro ao criar notificações de menção:', error);
 }
 
+/**
+ * Cria as notificações de resposta ("Respostas" da sidebar): avisa quem já
+ * participou da thread (autor do comentário raiz + quem já respondeu),
+ * exceto quem acabou de responder.
+ */
+export async function notifyReply(params: {
+  text: string;
+  taskId: string;
+  taskTitle: string;
+  parentCommentId: string;
+  threadParticipantIds: string[];
+  actor: User;
+}) {
+  const { text, taskId, taskTitle, parentCommentId, threadParticipantIds, actor } = params;
+  const targets = [...new Set(threadParticipantIds)].filter((id) => id && id !== actor.id);
+  if (targets.length === 0) return;
+
+  const body = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  const { error } = await supabase.from('notifications').insert(
+    targets.map((id) => ({
+      user_id: id,
+      actor_id: actor.id,
+      type: 'reply',
+      title: `${actor.name} respondeu em "${taskTitle}"`,
+      body,
+      task_id: taskId,
+      comment_id: parentCommentId,
+    }))
+  );
+  if (error) console.error('Erro ao criar notificação de resposta:', error);
+}
+
+/** Notifica o atribuído quando um comentário vira um item de ação ("Comentários atribuídos"). */
+export async function notifyCommentAssigned(params: {
+  text: string;
+  taskId: string;
+  taskTitle: string;
+  commentId: string;
+  assignedToId: string;
+  actor: User;
+}) {
+  const { text, taskId, taskTitle, commentId, assignedToId, actor } = params;
+  if (!assignedToId || assignedToId === actor.id) return;
+
+  const body = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  const { error } = await supabase.from('notifications').insert({
+    user_id: assignedToId,
+    actor_id: actor.id,
+    type: 'comment_assigned',
+    title: `${actor.name} atribuiu um comentário a você em "${taskTitle}"`,
+    body,
+    task_id: taskId,
+    comment_id: commentId,
+  });
+  if (error) console.error('Erro ao criar notificação de comentário atribuído:', error);
+}
+
+/** Notifica quem atribuiu o comentário quando o atribuído marca como resolvido. */
+export async function notifyCommentResolved(params: {
+  text: string;
+  taskId: string;
+  taskTitle: string;
+  commentId: string;
+  assignedById: string;
+  actor: User;
+}) {
+  const { text, taskId, taskTitle, commentId, assignedById, actor } = params;
+  if (!assignedById || assignedById === actor.id) return;
+
+  const body = text.length > 140 ? `${text.slice(0, 140)}…` : text;
+  const { error } = await supabase.from('notifications').insert({
+    user_id: assignedById,
+    actor_id: actor.id,
+    type: 'comment_resolved',
+    title: `${actor.name} resolveu o comentário atribuído em "${taskTitle}"`,
+    body,
+    task_id: taskId,
+    comment_id: commentId,
+  });
+  if (error) console.error('Erro ao criar notificação de comentário resolvido:', error);
+}
+
 /** Cria uma notificação de atribuição de tarefa (responsável principal/adicional/equipe). */
 export async function notifyAssignment(params: {
   userIds: string[];
@@ -107,7 +190,7 @@ export function MentionText({ text, users, teams }: { text: string; users: User[
     ...teams.map((t) => ({ name: t.name, kind: 'team' as const })),
   ].sort((a, b) => b.name.length - a.name.length);
 
-  if (names.length === 0 || !text.includes('@')) return <>{text}</>;
+  if (names.length === 0 || !text.includes('@')) return <>{linkifyText(text)}</>;
 
   const pattern = new RegExp(`@(${names.map((n) => escapeRegex(n.name)).join('|')})`, 'g');
   const parts = text.split(pattern);
@@ -129,7 +212,7 @@ export function MentionText({ text, users, teams }: { text: string; users: User[
             </span>
           );
         }
-        return <React.Fragment key={i}>{part}</React.Fragment>;
+        return <React.Fragment key={i}>{linkifyText(part)}</React.Fragment>;
       })}
     </>
   );
