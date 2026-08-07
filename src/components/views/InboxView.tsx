@@ -86,7 +86,7 @@ function formatSnoozedUntil(d: string) {
  */
 export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting, onCreateTaskFromComment }: InboxViewProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [filter, setFilter] = useState<'all' | 'unread' | 'snoozed'>('all');
+  const [filter, setFilter] = useState<'all' | 'unread' | 'mentions' | 'snoozed'>('all');
   const [isLoading, setIsLoading] = useState(true);
   // Só local/desta sessão: qual tarefa nova já foi criada a partir de qual
   // notificação. Sem coluna de vínculo no banco (a notificação em si é
@@ -185,6 +185,11 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
     [notifications, nowTick]
   );
   const unreadCount = activeNotifications.filter((n) => !n.read).length;
+  // "Diretas" = alguém te citou por nome (@Você); não inclui menção de
+  // Equipe (team_mention) nem os outros tipos de notificação de comentário
+  // (resposta, atribuído, resolvido) — só o caso mais específico de achar
+  // rápido "quem me chamou".
+  const mentionNotifications = useMemo(() => activeNotifications.filter((n) => n.type === 'mention'), [activeNotifications]);
 
   const markAsRead = async (ids: string[]) => {
     if (ids.length === 0) return;
@@ -209,7 +214,16 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
 
   const handleCreateTask = async (n: AppNotification, listId: string) => {
     setCreatingTaskFor(n.id);
-    const taskId = await onCreateTaskFromComment({ text: n.body }, listId);
+    // n.body é só o preview da notificação (mentions.tsx trunca em 140
+    // caracteres + "…") — busca o comentário de verdade pra não criar a
+    // tarefa com o texto cortado. Cai pro preview só se o comentário já
+    // tiver sido apagado.
+    let text = n.body;
+    if (n.commentId) {
+      const { data } = await supabase.from('task_comments').select('text').eq('id', n.commentId).maybeSingle();
+      if (data?.text) text = data.text;
+    }
+    const taskId = await onCreateTaskFromComment({ text }, listId);
     setCreatingTaskFor(null);
     if (taskId) setCreatedTaskByNotification((prev) => ({ ...prev, [n.id]: taskId }));
   };
@@ -220,7 +234,11 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
     else if (n.meetingId) onOpenMeeting(n.meetingId);
   };
 
-  const visible = filter === 'snoozed' ? snoozedNotifications : filter === 'unread' ? activeNotifications.filter((n) => !n.read) : activeNotifications;
+  const visible =
+    filter === 'snoozed' ? snoozedNotifications
+    : filter === 'unread' ? activeNotifications.filter((n) => !n.read)
+    : filter === 'mentions' ? mentionNotifications
+    : activeNotifications;
 
   const groups = useMemo(() => {
     if (filter === 'snoozed') return [{ label: '', items: visible }];
@@ -243,9 +261,9 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
             <span className="bg-orange-100 text-orange-600 text-xs font-bold px-2 py-0.5 rounded-full">{unreadCount} não lida{unreadCount === 1 ? '' : 's'}</span>
           )}
         </div>
-        {filter !== 'snoozed' && unreadCount > 0 && (
+        {filter !== 'snoozed' && visible.some((n) => !n.read) && (
           <button
-            onClick={() => markAsRead(activeNotifications.filter((n) => !n.read).map((n) => n.id))}
+            onClick={() => markAsRead(visible.filter((n) => !n.read).map((n) => n.id))}
             className="text-xs text-orange-500 font-semibold hover:underline"
           >
             Marcar todas como lidas
@@ -267,6 +285,12 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
           Não lidas
         </button>
         <button
+          onClick={() => setFilter('mentions')}
+          className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${filter === 'mentions' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+        >
+          Menções{mentionNotifications.length > 0 ? ` (${mentionNotifications.length})` : ''}
+        </button>
+        <button
           onClick={() => setFilter('snoozed')}
           className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${filter === 'snoozed' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
         >
@@ -281,6 +305,7 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
         {!isLoading && visible.length === 0 && (
           <p className="p-8 text-sm text-gray-400 text-center">
             {filter === 'unread' && 'Nenhuma notificação não lida. 🎉'}
+            {filter === 'mentions' && 'Nenhuma menção direta por aqui.'}
             {filter === 'snoozed' && 'Nenhuma notificação adiada.'}
             {filter === 'all' && 'Nenhuma notificação por aqui. 🎉'}
           </p>
