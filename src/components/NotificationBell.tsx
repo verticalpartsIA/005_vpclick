@@ -21,6 +21,10 @@ const TYPE_ICONS: Record<string, string> = {
   meeting: '🗓️',
 };
 
+function isSnoozedActive(n: AppNotification) {
+  return !!n.snoozedUntil && new Date(n.snoozedUntil) > new Date();
+}
+
 function relativeTime(date: string) {
   const diffMs = Date.now() - new Date(date).getTime();
   const min = Math.floor(diffMs / 60000);
@@ -51,15 +55,21 @@ export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting
     commentId: n.comment_id,
     meetingId: n.meeting_id,
     read: n.read,
+    snoozedUntil: n.snoozed_until || undefined,
     createdAt: n.created_at,
   });
 
   const loadNotifications = useCallback(async () => {
     try {
+      // Exclui quem está adiado (snooze) já na query — filtrar só depois de
+      // buscar as 30 mais recentes deixava o sino "vazio" se as mais novas
+      // fossem justamente as adiadas, escondendo notificações ativas mais
+      // antigas que ainda caberiam na janela de 30.
       const { data, error } = await supabase
         .from('notifications')
         .select('*')
         .eq('user_id', currentUser.id)
+        .or(`snoozed_until.is.null,snoozed_until.lte.${new Date().toISOString()}`)
         .order('created_at', { ascending: false })
         .limit(30);
       if (error) throw error;
@@ -117,7 +127,11 @@ export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting
     return () => document.removeEventListener('click', onClick);
   }, [isOpen]);
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  // Adiadas (snooze) ficam fora do sino até a data voltar — mesmo
+  // comportamento da Caixa de Entrada, senão o badge contaria algo que o
+  // usuário já escondeu de propósito.
+  const visibleNotifications = notifications.filter((n) => !isSnoozedActive(n));
+  const unreadCount = visibleNotifications.filter((n) => !n.read).length;
 
   const markAsRead = async (ids: string[]) => {
     if (ids.length === 0) return;
@@ -157,7 +171,7 @@ export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting
             <p className="font-bold text-gray-800 text-sm">Notificações</p>
             {unreadCount > 0 && (
               <button
-                onClick={() => markAsRead(notifications.filter((n) => !n.read).map((n) => n.id))}
+                onClick={() => markAsRead(visibleNotifications.filter((n) => !n.read).map((n) => n.id))}
                 className="text-xs text-orange-500 font-semibold hover:underline"
               >
                 Marcar todas como lidas
@@ -165,10 +179,10 @@ export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting
             )}
           </div>
           <div className="max-h-96 overflow-y-auto custom-scrollbar">
-            {notifications.length === 0 && (
+            {visibleNotifications.length === 0 && (
               <p className="p-6 text-sm text-gray-400 text-center">Nenhuma notificação por aqui. 🎉</p>
             )}
-            {notifications.map((n) => {
+            {visibleNotifications.map((n) => {
               const actor = users.find((u) => u.id === n.actorId);
               return (
                 <button

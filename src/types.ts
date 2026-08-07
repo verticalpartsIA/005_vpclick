@@ -220,6 +220,7 @@ export interface AppNotification {
   commentId?: string;
   meetingId?: string;
   read: boolean;
+  snoozedUntil?: string;
   createdAt: string;
 }
 
