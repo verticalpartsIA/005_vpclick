@@ -2994,6 +2994,18 @@ export default function App() {
     return newTask.id;
   }, [createTaskFromTitle]);
 
+  // Caixa de Entrada: transforma o texto de um comentário/menção notificado
+  // numa tarefa nova. Sem coluna de vínculo (diferente de lembrete/item de
+  // ação de reunião) — a notificação já aponta pra tarefa original via
+  // taskId; esta é sempre uma tarefa NOVA e separada, então não há "a"
+  // notificação pra atualizar de volta.
+  const createTaskFromComment = useCallback(async (comment: { text: string }, listId: string): Promise<string | null> => {
+    const newTask = await createTaskFromTitle(comment.text, listId);
+    if (!newTask) return null;
+    toast.success('Tarefa criada a partir do comentário.');
+    return newTask.id;
+  }, [createTaskFromTitle]);
+
   // Garante que exista uma lista pessoal (fora de qualquer pasta, ver
   // migration 18) pro usuário atual, criando na primeira vez que ele abre
   // "Lista pessoal". Privacidade só no client — a lista não aparece em
@@ -4024,8 +4036,10 @@ export default function App() {
               <InboxView
                 currentUser={currentUser}
                 users={adminUsers}
+                lists={lists}
                 onOpenTask={setSelectedTaskId}
                 onOpenMeeting={handleOpenMeeting}
+                onCreateTaskFromComment={createTaskFromComment}
               />
             )}
             {activeView === 'Replies' && (

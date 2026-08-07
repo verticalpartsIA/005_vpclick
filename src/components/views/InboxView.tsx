@@ -1,19 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { isToday, isYesterday } from 'date-fns';
 import { supabase } from '../../lib/supabase';
-import { AppNotification, User } from '../../types';
+import { AppNotification, List, User } from '../../types';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
 interface InboxViewProps {
   currentUser: User;
   users: User[];
+  lists: List[];
   onOpenTask: (taskId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
+  onCreateTaskFromComment: (comment: { text: string }, listId: string) => Promise<string | null>;
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -27,6 +33,38 @@ const TYPE_ICONS: Record<string, string> = {
   comment_resolved: '✅',
   meeting: '🗓️',
 };
+
+const TYPE_LABELS: Record<string, string> = {
+  mention: 'Menções',
+  team_mention: 'Menções de equipe',
+  reply: 'Respostas',
+  comment_assigned: 'Comentários atribuídos',
+  comment_resolved: 'Comentários resolvidos',
+  assignment: 'Atribuições',
+  meeting: 'Reuniões',
+  automation: 'Automações',
+  comment: 'Comentários',
+};
+const TYPE_ORDER = Object.keys(TYPE_LABELS);
+
+type GroupBy = 'date' | 'type' | 'none';
+type SortOrder = 'newest' | 'oldest';
+
+const prefsKey = (userId: string) => `vpclick_inbox_prefs_${userId}`;
+
+// Preferências de exibição/agrupamento/ordenação da Caixa de Entrada — só
+// no navegador (localStorage), sem coluna no banco: é uma preferência de
+// UI por usuário neste dispositivo, não um dado que precise sincronizar
+// entre aparelhos.
+function loadPrefs(userId: string): { groupBy: GroupBy; sortOrder: SortOrder; density: 'comfortable' | 'compact' } {
+  try {
+    const raw = localStorage.getItem(prefsKey(userId));
+    if (raw) return { groupBy: 'date', sortOrder: 'newest', density: 'comfortable', ...JSON.parse(raw) };
+  } catch {
+    // ignora localStorage indisponível/corrompido — cai pro padrão
+  }
+  return { groupBy: 'date', sortOrder: 'newest', density: 'comfortable' };
+}
 
 function relativeTime(date: string) {
   const diffMs = Date.now() - new Date(date).getTime();
@@ -82,10 +120,24 @@ function formatSnoozedUntil(d: string) {
  * ações de apagar e adiar (as duas que faltavam pra virar um inbox de
  * verdade — antes só dava pra marcar como lida).
  */
-export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: InboxViewProps) {
+export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting, onCreateTaskFromComment }: InboxViewProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
-  const [filter, setFilter] = useState<'all' | 'unread' | 'snoozed'>('all');
+  const [filter, setFilter] = useState<'all' | 'unread' | 'mentions' | 'snoozed'>('all');
   const [isLoading, setIsLoading] = useState(true);
+  // Só local/desta sessão: qual tarefa nova já foi criada a partir de qual
+  // notificação. Sem coluna de vínculo no banco (a notificação em si é
+  // efêmera), então recarregar a página perde essa marca — aceitável, só
+  // evita clicar duas vezes por engano sem sair da página.
+  const [createdTaskByNotification, setCreatedTaskByNotification] = useState<Record<string, string>>({});
+  const [creatingTaskFor, setCreatingTaskFor] = useState<string | null>(null);
+
+  const initialPrefs = useMemo(() => loadPrefs(currentUser.id), [currentUser.id]);
+  const [groupBy, setGroupBy] = useState<GroupBy>(initialPrefs.groupBy);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(initialPrefs.sortOrder);
+  const [density, setDensity] = useState<'comfortable' | 'compact'>(initialPrefs.density);
+  useEffect(() => {
+    localStorage.setItem(prefsKey(currentUser.id), JSON.stringify({ groupBy, sortOrder, density }));
+  }, [currentUser.id, groupBy, sortOrder, density]);
 
   const mapRow = (n: any): AppNotification => ({
     id: n.id,
@@ -177,6 +229,11 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
     [notifications, nowTick]
   );
   const unreadCount = activeNotifications.filter((n) => !n.read).length;
+  // "Diretas" = alguém te citou por nome (@Você); não inclui menção de
+  // Equipe (team_mention) nem os outros tipos de notificação de comentário
+  // (resposta, atribuído, resolvido) — só o caso mais específico de achar
+  // rápido "quem me chamou".
+  const mentionNotifications = useMemo(() => activeNotifications.filter((n) => n.type === 'mention'), [activeNotifications]);
 
   const markAsRead = async (ids: string[]) => {
     if (ids.length === 0) return;
@@ -199,25 +256,65 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
     await supabase.from('notifications').delete().eq('id', id);
   };
 
+  const handleCreateTask = async (n: AppNotification, listId: string) => {
+    setCreatingTaskFor(n.id);
+    // n.body é só o preview da notificação (mentions.tsx trunca em 140
+    // caracteres + "…") — busca o comentário de verdade pra não criar a
+    // tarefa com o texto cortado. Cai pro preview só se o comentário já
+    // tiver sido apagado.
+    let text = n.body;
+    if (n.commentId) {
+      const { data } = await supabase.from('task_comments').select('text').eq('id', n.commentId).maybeSingle();
+      if (data?.text) text = data.text;
+    }
+    const taskId = await onCreateTaskFromComment({ text }, listId);
+    setCreatingTaskFor(null);
+    if (taskId) setCreatedTaskByNotification((prev) => ({ ...prev, [n.id]: taskId }));
+  };
+
   const handleClickNotification = (n: AppNotification) => {
     if (!n.read) markAsRead([n.id]);
     if (n.taskId) onOpenTask(n.taskId);
     else if (n.meetingId) onOpenMeeting(n.meetingId);
   };
 
-  const visible = filter === 'snoozed' ? snoozedNotifications : filter === 'unread' ? activeNotifications.filter((n) => !n.read) : activeNotifications;
+  const visible =
+    filter === 'snoozed' ? snoozedNotifications
+    : filter === 'unread' ? activeNotifications.filter((n) => !n.read)
+    : filter === 'mentions' ? mentionNotifications
+    : activeNotifications;
 
   const groups = useMemo(() => {
+    // Adiadas tem ordenação própria (retorno mais próximo primeiro) — não
+    // faz sentido reordenar por data de criação nem agrupar por tipo ali.
     if (filter === 'snoozed') return [{ label: '', items: visible }];
-    const order = ['Hoje', 'Ontem', 'Esta semana', 'Mais antigas'];
+
+    const ordered = sortOrder === 'oldest' ? [...visible].reverse() : visible;
+
+    if (groupBy === 'none') return [{ label: '', items: ordered }];
+
+    if (groupBy === 'type') {
+      const byLabel = new Map<string, AppNotification[]>();
+      ordered.forEach((n) => {
+        const label = TYPE_LABELS[n.type] || n.type;
+        if (!byLabel.has(label)) byLabel.set(label, []);
+        byLabel.get(label)!.push(n);
+      });
+      const knownLabels = TYPE_ORDER.map((t) => TYPE_LABELS[t]).filter((label) => byLabel.has(label));
+      const extraLabels = [...byLabel.keys()].filter((label) => !knownLabels.includes(label));
+      return [...knownLabels, ...extraLabels].map((label) => ({ label, items: byLabel.get(label)! }));
+    }
+
+    // groupBy === 'date' (padrão)
+    const dateOrder = sortOrder === 'oldest' ? ['Mais antigas', 'Esta semana', 'Ontem', 'Hoje'] : ['Hoje', 'Ontem', 'Esta semana', 'Mais antigas'];
     const byLabel = new Map<string, AppNotification[]>();
-    visible.forEach((n) => {
+    ordered.forEach((n) => {
       const label = dateGroupLabel(n.createdAt);
       if (!byLabel.has(label)) byLabel.set(label, []);
       byLabel.get(label)!.push(n);
     });
-    return order.filter((label) => byLabel.has(label)).map((label) => ({ label, items: byLabel.get(label)! }));
-  }, [visible, filter]);
+    return dateOrder.filter((label) => byLabel.has(label)).map((label) => ({ label, items: byLabel.get(label)! }));
+  }, [visible, filter, groupBy, sortOrder]);
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -228,14 +325,43 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
             <span className="bg-orange-100 text-orange-600 text-xs font-bold px-2 py-0.5 rounded-full">{unreadCount} não lida{unreadCount === 1 ? '' : 's'}</span>
           )}
         </div>
-        {filter !== 'snoozed' && unreadCount > 0 && (
-          <button
-            onClick={() => markAsRead(activeNotifications.filter((n) => !n.read).map((n) => n.id))}
-            className="text-xs text-orange-500 font-semibold hover:underline"
-          >
-            Marcar todas como lidas
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {filter !== 'snoozed' && visible.some((n) => !n.read) && (
+            <button
+              onClick={() => markAsRead(visible.filter((n) => !n.read).map((n) => n.id))}
+              className="text-xs text-orange-500 font-semibold hover:underline"
+            >
+              Marcar todas como lidas
+            </button>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button title="Personalizar exibição" className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 text-sm">
+                ⚙️
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel className="text-[10px] font-bold uppercase text-gray-400">Agrupar por</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={groupBy} onValueChange={(v) => setGroupBy(v as GroupBy)}>
+                <DropdownMenuRadioItem value="date" className="text-sm">Data</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="type" className="text-sm">Tipo</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="none" className="text-sm">Nenhum</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-[10px] font-bold uppercase text-gray-400">Ordenar por</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={sortOrder} onValueChange={(v) => setSortOrder(v as SortOrder)}>
+                <DropdownMenuRadioItem value="newest" className="text-sm">Mais recentes primeiro</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="oldest" className="text-sm">Mais antigas primeiro</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-[10px] font-bold uppercase text-gray-400">Exibição</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={density} onValueChange={(v) => setDensity(v as 'comfortable' | 'compact')}>
+                <DropdownMenuRadioItem value="comfortable" className="text-sm">Confortável</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="compact" className="text-sm">Compacta</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 mb-4 bg-gray-100 rounded-lg p-1 w-fit">
@@ -252,6 +378,12 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
           Não lidas
         </button>
         <button
+          onClick={() => setFilter('mentions')}
+          className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${filter === 'mentions' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+        >
+          Menções{mentionNotifications.length > 0 ? ` (${mentionNotifications.length})` : ''}
+        </button>
+        <button
           onClick={() => setFilter('snoozed')}
           className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${filter === 'snoozed' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
         >
@@ -266,6 +398,7 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
         {!isLoading && visible.length === 0 && (
           <p className="p-8 text-sm text-gray-400 text-center">
             {filter === 'unread' && 'Nenhuma notificação não lida. 🎉'}
+            {filter === 'mentions' && 'Nenhuma menção direta por aqui.'}
             {filter === 'snoozed' && 'Nenhuma notificação adiada.'}
             {filter === 'all' && 'Nenhuma notificação por aqui. 🎉'}
           </p>
@@ -286,18 +419,18 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
                 >
                   <button
                     onClick={() => handleClickNotification(n)}
-                    className="flex-1 min-w-0 text-left px-4 py-3 flex gap-3 hover:bg-gray-50 transition-colors"
+                    className={`flex-1 min-w-0 text-left flex gap-3 hover:bg-gray-50 transition-colors ${density === 'compact' ? 'px-4 py-1.5' : 'px-4 py-3'}`}
                   >
                     {actor ? (
-                      <img src={actor.avatar} className="w-9 h-9 rounded-full shrink-0 mt-0.5" alt="" />
+                      <img src={actor.avatar} className={`rounded-full shrink-0 ${density === 'compact' ? 'w-6 h-6 mt-0.5' : 'w-9 h-9 mt-0.5'}`} alt="" />
                     ) : (
-                      <span className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5 text-base">
+                      <span className={`rounded-full bg-gray-100 flex items-center justify-center shrink-0 ${density === 'compact' ? 'w-6 h-6 mt-0.5 text-sm' : 'w-9 h-9 mt-0.5 text-base'}`}>
                         {TYPE_ICONS[n.type] || '🔔'}
                       </span>
                     )}
                     <div className="min-w-0 flex-1">
                       <p className={`text-sm leading-snug ${!n.read ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>{n.title}</p>
-                      {n.body && <p className="text-xs text-gray-400 truncate mt-0.5">{n.body}</p>}
+                      {density === 'comfortable' && n.body && <p className="text-xs text-gray-400 truncate mt-0.5">{n.body}</p>}
                       <p className="text-[11px] text-gray-300 mt-1">
                         {filter === 'snoozed' && n.snoozedUntil ? formatSnoozedUntil(n.snoozedUntil) : relativeTime(n.createdAt)}
                       </p>
@@ -305,6 +438,35 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
                     {!n.read && filter !== 'snoozed' && <span className="w-2 h-2 rounded-full bg-orange-500 shrink-0 mt-2"></span>}
                   </button>
                   <div className="flex items-center gap-0.5 pr-2 shrink-0">
+                    {n.commentId && (
+                      createdTaskByNotification[n.id] ? (
+                        <button
+                          onClick={() => onOpenTask(createdTaskByNotification[n.id])}
+                          className="text-[11px] font-semibold text-blue-500 hover:underline px-1.5"
+                        >
+                          Ver tarefa
+                        </button>
+                      ) : (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              disabled={creatingTaskFor === n.id}
+                              title="Criar tarefa a partir do comentário"
+                              className="text-[11px] font-semibold text-gray-400 hover:text-purple-500 px-1.5 disabled:opacity-40"
+                            >
+                              {creatingTaskFor === n.id ? 'Criando...' : 'Criar tarefa'}
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-56 max-h-72 overflow-y-auto">
+                            {[...lists].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')).map((l) => (
+                              <DropdownMenuItem key={l.id} onClick={() => handleCreateTask(n, l.id)} className="text-sm">
+                                {l.name}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )
+                    )}
                     {filter === 'snoozed' ? (
                       <button
                         onClick={() => unsnooze(n.id)}
