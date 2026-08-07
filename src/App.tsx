@@ -27,6 +27,7 @@ import { RecentTasksView } from './components/views/RecentTasksView';
 import { RemindersView } from './components/views/RemindersView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
+import * as taskRepo from './lib/taskRepo';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -1668,199 +1669,38 @@ export default function App() {
     if (!id) return;
     let cancelled = false;
     (async () => {
-      const [attRes, commRes, logRes, checkRes, actRes, watchRes] = await Promise.all([
-        supabase.from('task_attachments').select('*').eq('task_id', id),
-        supabase.from('task_comments').select('*').eq('task_id', id).is('deleted_at', null),
-        supabase.from('task_extension_logs').select('*').eq('task_id', id),
-        supabase.from('task_checklists').select('*').eq('task_id', id),
-        supabase.from('task_activities').select('*').eq('task_id', id),
-        supabase.from('task_watchers').select('task_id, user_id').eq('task_id', id),
-      ]);
+      const subs = await taskRepo.fetchTaskDetails(id);
       if (cancelled) return;
-      const subs = {
-        attachments: (attRes.data || []).map((a: any) => ({
-          id: a.id, name: a.name, url: a.url, type: a.type, size: a.size, uploadedAt: a.uploaded_at
-        })),
-        comments: (commRes.data || []).map((c: any) => ({
-          id: c.id, userId: c.user_id, text: c.text, timestamp: c.created_at, updatedAt: c.updated_at || undefined,
-          parentCommentId: c.parent_comment_id || undefined,
-          assignedTo: c.assigned_to || undefined,
-          assignedBy: c.assigned_by || undefined,
-          resolvedAt: c.resolved_at || undefined,
-          resolvedBy: c.resolved_by || undefined,
-        })),
-        extensionHistory: (logRes.data || []).map((l: any) => ({
-          id: l.id, oldDate: l.old_date, newDate: l.new_date, reason: l.reason, updatedBy: l.updated_by, timestamp: l.created_at
-        })),
-        checklists: (checkRes.data || []).map((ck: any) => ({
-          id: ck.id, text: ck.text, completed: ck.completed
-        })),
-        activities: (actRes.data || []).map((act: any) => ({
-          id: act.id, taskId: act.task_id, userId: act.user_id, type: act.type, oldValue: act.old_value, newValue: act.new_value, createdAt: act.created_at
-        })),
-        watcherIds: (watchRes.data || []).map((w: any) => w.user_id),
-      };
       setTasks(prev => prev.map(t => t.id === id ? { ...t, ...subs } : t));
     })();
     return () => { cancelled = true; };
   }, [selectedTaskId]);
 
 
-  // Hidrata linhas cruas da tabela `tasks` em objetos Task completos, buscando
-  // as sub-entidades (anexos, comentários, logs, checklists, atividades,
-  // watchers) em lotes seguros de IDs. Reutilizado por loadTasks e pela busca
-  // server-side, que traz tarefas fora da janela local carregada.
-  const hydrateTaskRows = useCallback(async (rows: any[]): Promise<Task[]> => {
-    if (!rows || rows.length === 0) return [];
-    const taskIds = rows.map((d: any) => d.id);
-
-    // Um único .in('task_id', [milhares de UUIDs]) gera uma URL de dezenas de
-    // milhares de caracteres e o servidor responde 400. Quebramos em lotes de
-    // 150 IDs (URL segura) e concatenamos os resultados.
-    const fetchInChunks = async (
-      build: (ids: string[]) => PromiseLike<{ data: any[] | null; error: any }>,
-      label: string
-    ): Promise<any[]> => {
-      const CHUNK = 150;
-      const out: any[] = [];
-      for (let i = 0; i < taskIds.length; i += CHUNK) {
-        const slice = taskIds.slice(i, i + CHUNK);
-        if (slice.length === 0) continue;
-        const { data: part, error: partErr } = await build(slice);
-        if (partErr) {
-          console.error(`hydrateTaskRows: erro ao carregar ${label} (lote ${i / CHUNK}):`, partErr);
-          continue;
-        }
-        if (part) out.push(...part);
-      }
-      return out;
-    };
-
-    const [attData, commData, logData, checkData, actData, watchData] = await Promise.all([
-      fetchInChunks((ids) => supabase.from('task_attachments').select('*').in('task_id', ids), 'task_attachments'),
-      fetchInChunks((ids) => supabase.from('task_comments').select('*').in('task_id', ids).is('deleted_at', null), 'task_comments'),
-      fetchInChunks((ids) => supabase.from('task_extension_logs').select('*').in('task_id', ids), 'task_extension_logs'),
-      fetchInChunks((ids) => supabase.from('task_checklists').select('*').in('task_id', ids), 'task_checklists'),
-      fetchInChunks((ids) => supabase.from('task_activities').select('*').in('task_id', ids), 'task_activities'),
-      fetchInChunks((ids) => supabase.from('task_watchers').select('task_id, user_id').in('task_id', ids), 'task_watchers'),
-    ]);
-
-    return rows.map((d: any) => {
-      const tAttachments = (attData || []).filter((a: any) => a.task_id === d.id).map((a: any) => ({
-        id: a.id, name: a.name, url: a.url, type: a.type, size: a.size, uploadedAt: a.uploaded_at
-      }));
-      const tComments = (commData || []).filter((c: any) => c.task_id === d.id).map((c: any) => ({
-        id: c.id, userId: c.user_id, text: c.text, timestamp: c.created_at, updatedAt: c.updated_at || undefined,
-        parentCommentId: c.parent_comment_id || undefined,
-        assignedTo: c.assigned_to || undefined,
-        assignedBy: c.assigned_by || undefined,
-        resolvedAt: c.resolved_at || undefined,
-        resolvedBy: c.resolved_by || undefined,
-      }));
-      const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
-        id: l.id, oldDate: l.old_date, newDate: l.new_date, reason: l.reason, updatedBy: l.updated_by, timestamp: l.created_at
-      }));
-      const tChecklists = (checkData || []).filter((ck: any) => ck.task_id === d.id).map((ck: any) => ({
-        id: ck.id, text: ck.text, completed: ck.completed
-      }));
-      const tActivities = (actData || []).filter((act: any) => act.task_id === d.id).map((act: any) => ({
-        id: act.id, taskId: act.task_id, userId: act.user_id, type: act.type, oldValue: act.old_value, newValue: act.new_value, createdAt: act.created_at
-      }));
-      return {
-        id: d.id,
-        title: d.title,
-        description: d.description || '',
-        status: d.status as string,
-        priority: d.priority as TaskPriority,
-        mainAssigneeId: d.main_assignee_id,
-        secondaryAssigneeIds: d.secondary_assignee_ids || [],
-        startDate: d.start_date,
-        dueDate: d.due_date,
-        extensionCount: d.extension_count || 0,
-        extensionHistory: tLogs,
-        checklists: tChecklists,
-        comments: tComments,
-        attachments: tAttachments,
-        activities: tActivities,
-        listId: d.list_id,
-        projectId: d.project_id,
-        parentId: d.parent_id,
-        createdAt: d.created_at,
-        createdBy: d.created_by || undefined,
-        tags: d.tags || [],
-        watcherIds: (watchData || []).filter((w: any) => w.task_id === d.id).map((w: any) => w.user_id),
-      } as Task;
-    });
-  }, []);
-
   const loadTasks = useCallback(async () => {
     if (!session) return;
 
     const requestId = ++loadTasksRequestIdRef.current;
 
-    // Aplica o filtro de escopo (lista/pasta/espaço) a uma query nova. Como a
-    // paginação refaz a query a cada página, o filtro precisa ser reaplicável.
-    const applyScope = (q: any) => {
-      if (activeListId) return q.eq('list_id', activeListId);
-      if (activeScope.type === 'folder' && activeScope.id) {
-        const folderListIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
-        return q.in('list_id', folderListIds);
-      }
-      if (activeScope.type === 'space' && activeScope.id) {
-        const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
-        const spaceListIds = lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
-        return q.in('list_id', spaceListIds);
-      }
-      return q;
-    };
-
-    // Paginação manual: o PostgREST limita ~1000 linhas por request e o
-    // workspace tem milhares de tarefas — buscar sem paginar truncava as
-    // listagens (bug #9 do #81). Trazemos as linhas em páginas de 1000 e
-    // mapeamos SEM hidratar sub-entidades (comentários/checklists/anexos/etc.),
-    // que agora são carregadas sob demanda ao abrir a tarefa (ver efeito de
-    // lazy-load abaixo). Isso mantém o load barato (~N requests) mesmo com
-    // dezenas de milhares de tarefas. Mesmo padrão já usado em loadDashboardTasks.
-    let allData: any[] = [];
-    let from = 0;
-    const pageSize = 1000;
-    while (true) {
-      const { data: page, error: pageErr } = await applyScope(
-        supabase.from('tasks').select('*')
-      ).range(from, from + pageSize - 1);
-      if (pageErr) { console.error('loadTasks: erro ao paginar tarefas:', pageErr); break; }
-      if (!page || page.length === 0) break;
-      allData = allData.concat(page);
-      if (page.length < pageSize) break;
-      from += pageSize;
+    // Resolve o escopo ativo (lista/pasta/espaço) para o conjunto de listas a
+    // buscar. `null` = todas as tarefas visíveis (RLS restringe no servidor).
+    let listIds: string[] | null = null;
+    if (activeListId) {
+      listIds = [activeListId];
+    } else if (activeScope.type === 'folder' && activeScope.id) {
+      listIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
+    } else if (activeScope.type === 'space' && activeScope.id) {
+      const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
+      listIds = lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
     }
+
+    // Sub-entidades NÃO são hidratadas aqui (carregadas sob demanda ao abrir a
+    // tarefa) — mantém o load barato mesmo com dezenas de milhares de tarefas.
+    const rows = await taskRepo.fetchTaskRowsByListIds(listIds);
 
     if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
     loadTasksCommittedIdRef.current = requestId;
-    setTasks(allData.map((d: any) => ({
-      id: d.id,
-      title: d.title,
-      description: d.description || '',
-      status: d.status as string,
-      priority: d.priority as TaskPriority,
-      mainAssigneeId: d.main_assignee_id,
-      secondaryAssigneeIds: d.secondary_assignee_ids || [],
-      startDate: d.start_date,
-      dueDate: d.due_date,
-      extensionCount: d.extension_count || 0,
-      extensionHistory: [],
-      checklists: [],
-      comments: [],
-      attachments: [],
-      activities: [],
-      listId: d.list_id,
-      projectId: d.project_id,
-      parentId: d.parent_id,
-      createdAt: d.created_at,
-      createdBy: d.created_by || undefined,
-      tags: d.tags || [],
-      watcherIds: [],
-    } as Task)));
+    setTasks(rows.map(taskRepo.mapRowToTaskShell));
   }, [session, activeListId, activeScope, lists, folders]);
 
   // Carrega o índice leve (list_id + status) de TODAS as tarefas visíveis,
@@ -1870,21 +1710,7 @@ export default function App() {
   // restringindo ao que o usuário pode ver.
   const loadTaskCountIndex = useCallback(async () => {
     if (!session) return;
-    let all: { listId: string | null; status: string }[] = [];
-    let from = 0;
-    const pageSize = 1000;
-    while (true) {
-      const { data: page, error } = await supabase
-        .from('tasks')
-        .select('list_id, status')
-        .range(from, from + pageSize - 1);
-      if (error) { console.error('loadTaskCountIndex: erro ao paginar contagem:', error); break; }
-      if (!page || page.length === 0) break;
-      all = all.concat(page.map((r: any) => ({ listId: r.list_id, status: r.status })));
-      if (page.length < pageSize) break;
-      from += pageSize;
-    }
-    setTaskCountIndex(all);
+    setTaskCountIndex(await taskRepo.fetchTaskCountIndex());
   }, [session]);
 
   useEffect(() => {
@@ -1913,16 +1739,10 @@ export default function App() {
     let cancelled = false;
     setIsSearching(true);
     const handle = setTimeout(async () => {
-      // Escapa curingas do LIKE (% _ \) para tratar o termo como texto literal.
-      const pattern = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
-      const { data, error } = await supabase
-        .from('tasks')
-        .select('*')
-        .ilike('title', pattern)
-        .limit(200);
+      const rows = await taskRepo.searchTaskRowsByTitle(q, 200);
       if (cancelled) return;
-      if (data && !error && data.length > 0) {
-        const hydrated = await hydrateTaskRows(data);
+      if (rows.length > 0) {
+        const hydrated = await taskRepo.hydrateTaskRows(rows);
         if (cancelled) return;
         setTasks(prev => {
           const merged = new Map(prev.map(t => [t.id, t]));
@@ -1933,7 +1753,7 @@ export default function App() {
       if (!cancelled) setIsSearching(false);
     }, 400);
     return () => { cancelled = true; clearTimeout(handle); };
-  }, [searchQuery, hydrateTaskRows]);
+  }, [searchQuery]);
 
   // Realtime de tarefas e comentários: reflete alterações feitas por outros
   // usuários/abas sem precisar recarregar a página. As tabelas precisam estar na
