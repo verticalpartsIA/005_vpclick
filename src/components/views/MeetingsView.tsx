@@ -78,6 +78,21 @@ function formatMeetingDate(d: string) {
   return new Date(d).toLocaleString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+// Prefixo de dia pro resumo do status das salas: "" hoje, "amanhã " ou
+// "seg 11/08 " — sem isso "próxima às 10:00" não dizia se era hoje ou dias
+// depois, obrigando a expandir o card pra descobrir.
+function roomDatePrefix(dateStr: string) {
+  const d = new Date(dateStr);
+  const now = new Date();
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((startOfDay(d) - startOfDay(now)) / 86400000);
+  if (diffDays === 0) return '';
+  if (diffDays === 1) return 'amanhã ';
+  const weekday = d.toLocaleDateString('pt-BR', { weekday: 'short' });
+  const dayMonth = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  return `${weekday} ${dayMonth} `;
+}
+
 /**
  * Reuniões (item 4 da sidebar "Início", estilo ClickUp) — versão manual + IA:
  * sem integração de calendário nem bot entrando em chamada de vídeo (o
@@ -820,12 +835,12 @@ function RoomStatusPanel({ rooms, users, onSelectMeeting }: { rooms: MeetingRoom
               <p className="text-[11px] text-gray-500 mt-1">
                 {!hasLoaded && style.label}
                 {hasLoaded && status?.state === 'busy' && status.current &&
-                  `${style.label} · até ${formatTimeRange(status.current.end_date)} · ${nameOf(status.current.created_by)}`}
+                  `${style.label} · até ${roomDatePrefix(status.current.end_date)}${formatTimeRange(status.current.end_date)} · ${nameOf(status.current.created_by)}`}
                 {hasLoaded && status?.state === 'soon' && status.next &&
-                  `${style.label} · às ${formatTimeRange(status.next.meeting_date)} · ${nameOf(status.next.created_by)}`}
+                  `${style.label} · ${roomDatePrefix(status.next.meeting_date)}às ${formatTimeRange(status.next.meeting_date)} · ${nameOf(status.next.created_by)}`}
                 {hasLoaded && (!status || status.state === 'free') &&
                   (status?.next
-                    ? `Livre · próxima às ${formatTimeRange(status.next.meeting_date)} · ${nameOf(status.next.created_by)}`
+                    ? `Livre · próxima ${roomDatePrefix(status.next.meeting_date)}às ${formatTimeRange(status.next.meeting_date)} · ${nameOf(status.next.created_by)}`
                     : 'Livre')}
               </p>
               {hasLoaded && extraCount > 0 && (
