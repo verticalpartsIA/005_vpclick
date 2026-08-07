@@ -6,6 +6,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 
@@ -29,6 +33,38 @@ const TYPE_ICONS: Record<string, string> = {
   comment_resolved: '✅',
   meeting: '🗓️',
 };
+
+const TYPE_LABELS: Record<string, string> = {
+  mention: 'Menções',
+  team_mention: 'Menções de equipe',
+  reply: 'Respostas',
+  comment_assigned: 'Comentários atribuídos',
+  comment_resolved: 'Comentários resolvidos',
+  assignment: 'Atribuições',
+  meeting: 'Reuniões',
+  automation: 'Automações',
+  comment: 'Comentários',
+};
+const TYPE_ORDER = Object.keys(TYPE_LABELS);
+
+type GroupBy = 'date' | 'type' | 'none';
+type SortOrder = 'newest' | 'oldest';
+
+const prefsKey = (userId: string) => `vpclick_inbox_prefs_${userId}`;
+
+// Preferências de exibição/agrupamento/ordenação da Caixa de Entrada — só
+// no navegador (localStorage), sem coluna no banco: é uma preferência de
+// UI por usuário neste dispositivo, não um dado que precise sincronizar
+// entre aparelhos.
+function loadPrefs(userId: string): { groupBy: GroupBy; sortOrder: SortOrder; density: 'comfortable' | 'compact' } {
+  try {
+    const raw = localStorage.getItem(prefsKey(userId));
+    if (raw) return { groupBy: 'date', sortOrder: 'newest', density: 'comfortable', ...JSON.parse(raw) };
+  } catch {
+    // ignora localStorage indisponível/corrompido — cai pro padrão
+  }
+  return { groupBy: 'date', sortOrder: 'newest', density: 'comfortable' };
+}
 
 function relativeTime(date: string) {
   const diffMs = Date.now() - new Date(date).getTime();
@@ -94,6 +130,14 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
   // evita clicar duas vezes por engano sem sair da página.
   const [createdTaskByNotification, setCreatedTaskByNotification] = useState<Record<string, string>>({});
   const [creatingTaskFor, setCreatingTaskFor] = useState<string | null>(null);
+
+  const initialPrefs = useMemo(() => loadPrefs(currentUser.id), [currentUser.id]);
+  const [groupBy, setGroupBy] = useState<GroupBy>(initialPrefs.groupBy);
+  const [sortOrder, setSortOrder] = useState<SortOrder>(initialPrefs.sortOrder);
+  const [density, setDensity] = useState<'comfortable' | 'compact'>(initialPrefs.density);
+  useEffect(() => {
+    localStorage.setItem(prefsKey(currentUser.id), JSON.stringify({ groupBy, sortOrder, density }));
+  }, [currentUser.id, groupBy, sortOrder, density]);
 
   const mapRow = (n: any): AppNotification => ({
     id: n.id,
@@ -241,16 +285,36 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
     : activeNotifications;
 
   const groups = useMemo(() => {
+    // Adiadas tem ordenação própria (retorno mais próximo primeiro) — não
+    // faz sentido reordenar por data de criação nem agrupar por tipo ali.
     if (filter === 'snoozed') return [{ label: '', items: visible }];
-    const order = ['Hoje', 'Ontem', 'Esta semana', 'Mais antigas'];
+
+    const ordered = sortOrder === 'oldest' ? [...visible].reverse() : visible;
+
+    if (groupBy === 'none') return [{ label: '', items: ordered }];
+
+    if (groupBy === 'type') {
+      const byLabel = new Map<string, AppNotification[]>();
+      ordered.forEach((n) => {
+        const label = TYPE_LABELS[n.type] || n.type;
+        if (!byLabel.has(label)) byLabel.set(label, []);
+        byLabel.get(label)!.push(n);
+      });
+      const knownLabels = TYPE_ORDER.map((t) => TYPE_LABELS[t]).filter((label) => byLabel.has(label));
+      const extraLabels = [...byLabel.keys()].filter((label) => !knownLabels.includes(label));
+      return [...knownLabels, ...extraLabels].map((label) => ({ label, items: byLabel.get(label)! }));
+    }
+
+    // groupBy === 'date' (padrão)
+    const dateOrder = sortOrder === 'oldest' ? ['Mais antigas', 'Esta semana', 'Ontem', 'Hoje'] : ['Hoje', 'Ontem', 'Esta semana', 'Mais antigas'];
     const byLabel = new Map<string, AppNotification[]>();
-    visible.forEach((n) => {
+    ordered.forEach((n) => {
       const label = dateGroupLabel(n.createdAt);
       if (!byLabel.has(label)) byLabel.set(label, []);
       byLabel.get(label)!.push(n);
     });
-    return order.filter((label) => byLabel.has(label)).map((label) => ({ label, items: byLabel.get(label)! }));
-  }, [visible, filter]);
+    return dateOrder.filter((label) => byLabel.has(label)).map((label) => ({ label, items: byLabel.get(label)! }));
+  }, [visible, filter, groupBy, sortOrder]);
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -261,14 +325,43 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
             <span className="bg-orange-100 text-orange-600 text-xs font-bold px-2 py-0.5 rounded-full">{unreadCount} não lida{unreadCount === 1 ? '' : 's'}</span>
           )}
         </div>
-        {filter !== 'snoozed' && visible.some((n) => !n.read) && (
-          <button
-            onClick={() => markAsRead(visible.filter((n) => !n.read).map((n) => n.id))}
-            className="text-xs text-orange-500 font-semibold hover:underline"
-          >
-            Marcar todas como lidas
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {filter !== 'snoozed' && visible.some((n) => !n.read) && (
+            <button
+              onClick={() => markAsRead(visible.filter((n) => !n.read).map((n) => n.id))}
+              className="text-xs text-orange-500 font-semibold hover:underline"
+            >
+              Marcar todas como lidas
+            </button>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button title="Personalizar exibição" className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 text-sm">
+                ⚙️
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuLabel className="text-[10px] font-bold uppercase text-gray-400">Agrupar por</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={groupBy} onValueChange={(v) => setGroupBy(v as GroupBy)}>
+                <DropdownMenuRadioItem value="date" className="text-sm">Data</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="type" className="text-sm">Tipo</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="none" className="text-sm">Nenhum</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-[10px] font-bold uppercase text-gray-400">Ordenar por</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={sortOrder} onValueChange={(v) => setSortOrder(v as SortOrder)}>
+                <DropdownMenuRadioItem value="newest" className="text-sm">Mais recentes primeiro</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="oldest" className="text-sm">Mais antigas primeiro</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-[10px] font-bold uppercase text-gray-400">Exibição</DropdownMenuLabel>
+              <DropdownMenuRadioGroup value={density} onValueChange={(v) => setDensity(v as 'comfortable' | 'compact')}>
+                <DropdownMenuRadioItem value="comfortable" className="text-sm">Confortável</DropdownMenuRadioItem>
+                <DropdownMenuRadioItem value="compact" className="text-sm">Compacta</DropdownMenuRadioItem>
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 mb-4 bg-gray-100 rounded-lg p-1 w-fit">
@@ -326,18 +419,18 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
                 >
                   <button
                     onClick={() => handleClickNotification(n)}
-                    className="flex-1 min-w-0 text-left px-4 py-3 flex gap-3 hover:bg-gray-50 transition-colors"
+                    className={`flex-1 min-w-0 text-left flex gap-3 hover:bg-gray-50 transition-colors ${density === 'compact' ? 'px-4 py-1.5' : 'px-4 py-3'}`}
                   >
                     {actor ? (
-                      <img src={actor.avatar} className="w-9 h-9 rounded-full shrink-0 mt-0.5" alt="" />
+                      <img src={actor.avatar} className={`rounded-full shrink-0 ${density === 'compact' ? 'w-6 h-6 mt-0.5' : 'w-9 h-9 mt-0.5'}`} alt="" />
                     ) : (
-                      <span className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5 text-base">
+                      <span className={`rounded-full bg-gray-100 flex items-center justify-center shrink-0 ${density === 'compact' ? 'w-6 h-6 mt-0.5 text-sm' : 'w-9 h-9 mt-0.5 text-base'}`}>
                         {TYPE_ICONS[n.type] || '🔔'}
                       </span>
                     )}
                     <div className="min-w-0 flex-1">
                       <p className={`text-sm leading-snug ${!n.read ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>{n.title}</p>
-                      {n.body && <p className="text-xs text-gray-400 truncate mt-0.5">{n.body}</p>}
+                      {density === 'comfortable' && n.body && <p className="text-xs text-gray-400 truncate mt-0.5">{n.body}</p>}
                       <p className="text-[11px] text-gray-300 mt-1">
                         {filter === 'snoozed' && n.snoozedUntil ? formatSnoozedUntil(n.snoozedUntil) : relativeTime(n.createdAt)}
                       </p>
