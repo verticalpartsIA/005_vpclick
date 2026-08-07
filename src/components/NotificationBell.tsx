@@ -7,6 +7,17 @@ interface NotificationBellProps {
   users: User[];
   onOpenTask: (taskId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
+  onOpenTaskComment: (taskId: string, commentId: string, action?: 'reply' | 'resolve') => void;
+}
+
+// Qual ação já deixar pronta ao abrir o comentário que gerou a notificação:
+// menção/resposta → campo de resposta focado; comentário atribuído a você →
+// destaque no botão "Resolver". Os outros tipos de comentário (ex:
+// comment_resolved) só rolam/destacam, sem abrir nada.
+function commentFocusAction(type: string): 'reply' | 'resolve' | undefined {
+  if (type === 'comment_assigned') return 'resolve';
+  if (type === 'mention' || type === 'team_mention' || type === 'reply') return 'reply';
+  return undefined;
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -39,7 +50,7 @@ function relativeTime(date: string) {
 }
 
 /** Sino de notificações in-app (menções, atribuições, automações) com atualização em tempo real. */
-export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting }: NotificationBellProps) {
+export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting, onOpenTaskComment }: NotificationBellProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -141,7 +152,13 @@ export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting
 
   const handleClickNotification = (n: AppNotification) => {
     if (!n.read) markAsRead([n.id]);
-    if (n.taskId) {
+    if (n.taskId && n.commentId) {
+      // Vai direto pro comentário que gerou a notificação (rolado e
+      // destacado), não só pra tarefa em geral — sem isso, numa tarefa com
+      // muitos comentários, achar o que te mencionou era na mão.
+      onOpenTaskComment(n.taskId, n.commentId, commentFocusAction(n.type));
+      setIsOpen(false);
+    } else if (n.taskId) {
       onOpenTask(n.taskId);
       setIsOpen(false);
     } else if (n.meetingId) {

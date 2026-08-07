@@ -381,7 +381,7 @@ function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete
 }
 
 // ── CommentItem: comentário com edição/exclusão inline + thread de respostas ──
-function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdit, onDelete, onReply, onAssign, onResolve, formatDate }: {
+function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdit, onDelete, onReply, onAssign, onResolve, formatDate, autoFocus, onFocusHandled }: {
   item: any;
   replies: any[];
   users: any[];
@@ -394,6 +394,12 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
   onAssign: (taskId: string, commentId: string, userId: string | null) => void;
   onResolve: (taskId: string, commentId: string) => void;
   formatDate: (d: string) => string;
+  // Quando a tarefa é aberta a partir de uma notificação de comentário: rola
+  // até aqui e destaca — 'reply' também abre o campo de resposta já
+  // focado, 'resolve' só destaca mesmo (o botão "Resolver" já fica visível
+  // no CommentAssignmentBar abaixo).
+  autoFocus?: 'reply' | 'resolve' | 'view';
+  onFocusHandled?: () => void;
 }) {
   const [editing, setEditing] = React.useState(false);
   const [editText, setEditText] = React.useState(item.text);
@@ -402,8 +408,22 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
   const [replyText, setReplyText] = React.useState('');
   const [sendingReply, setSendingReply] = React.useState(false);
   const [repliesOpen, setRepliesOpen] = React.useState(false);
+  const [isHighlighted, setIsHighlighted] = React.useState(false);
+  const cardRef = React.useRef<HTMLDivElement>(null);
   const author = users.find((u: any) => u.id === item.userId);
   const isOwn = item.userId === currentUserId;
+
+  React.useEffect(() => {
+    if (!autoFocus) return;
+    cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setIsHighlighted(true);
+    if (replies.length > 0) setRepliesOpen(true);
+    if (autoFocus === 'reply') setShowReplyBox(true);
+    onFocusHandled?.();
+    const timer = setTimeout(() => setIsHighlighted(false), 2500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoFocus]);
 
   const handleSave = async () => {
     if (!editText.trim() || editText === item.text) { setEditing(false); return; }
@@ -439,7 +459,10 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
         <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
           <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
         </div>
-        <div className="bg-gray-50/50 p-4 rounded-2xl border border-gray-100 ml-2 shadow-sm">
+        <div
+          ref={cardRef}
+          className={`p-4 rounded-2xl border ml-2 shadow-sm transition-colors duration-500 ${isHighlighted ? 'bg-orange-50 border-orange-300 ring-2 ring-orange-200' : 'bg-gray-50/50 border-gray-100'}`}
+        >
           <div className="flex items-center justify-between mb-2">
             <span className="text-xs font-bold text-gray-900">{author?.name}</span>
             <div className="flex items-center gap-2">
@@ -1572,6 +1595,27 @@ export default function App() {
   }, []);
 
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
+
+  // Qual comentário deixar rolado/destacado (e qual ação já deixar pronta —
+  // responder ou resolver) quando a tarefa é aberta a partir de uma
+  // notificação de comentário/menção, em vez de abrir só a tarefa em geral.
+  const [taskCommentFocus, setTaskCommentFocus] = useState<{ commentId: string; action?: 'reply' | 'resolve' } | null>(null);
+  const openTaskComment = useCallback((taskId: string, commentId: string, action?: 'reply' | 'resolve') => {
+    setSelectedTaskId(taskId);
+    setTaskCommentFocus({ commentId, action });
+  }, []);
+
+  // Notificação/link apontando pra uma tarefa que já foi apagada (ou que o
+  // usuário não tem mais acesso): antes o clique simplesmente não abria nada
+  // e não dava nenhuma pista do porquê. `tasks.length > 0` evita um falso
+  // positivo enquanto a lista ainda está carregando pela primeira vez.
+  useEffect(() => {
+    if (selectedTaskId && tasks.length > 0 && !tasks.some(t => t.id === selectedTaskId)) {
+      toast.error('Essa tarefa não existe mais ou você não tem acesso a ela.');
+      setSelectedTaskId(null);
+      setTaskCommentFocus(null);
+    }
+  }, [selectedTaskId, tasks]);
 
   // Card "Recentes" de Minhas Tarefas: registra toda tarefa aberta, pra
   // qualquer entrada (clique na lista, notificação, link direto etc.).
@@ -3771,6 +3815,7 @@ export default function App() {
                 users={adminUsers}
                 onOpenTask={(taskId) => setSelectedTaskId(taskId)}
                 onOpenMeeting={handleOpenMeeting}
+                onOpenTaskComment={openTaskComment}
               />
 
               <div className="hidden sm:flex flex-col items-end">
@@ -4039,6 +4084,7 @@ export default function App() {
                 lists={lists}
                 onOpenTask={setSelectedTaskId}
                 onOpenMeeting={handleOpenMeeting}
+                onOpenTaskComment={openTaskComment}
                 onCreateTaskFromComment={createTaskFromComment}
               />
             )}
@@ -4136,6 +4182,7 @@ export default function App() {
             key={selectedTask.id}
             onClose={() => {
               setSelectedTaskId(null);
+              setTaskCommentFocus(null);
               const url = new URL(window.location.href);
               url.searchParams.delete('taskId');
               window.history.replaceState({}, '', url.toString());
@@ -4147,10 +4194,14 @@ export default function App() {
               tasks={tasks}
               onClose={() => {
                 setSelectedTaskId(null);
+                setTaskCommentFocus(null);
                 const url = new URL(window.location.href);
                 url.searchParams.delete('taskId');
                 window.history.replaceState({}, '', url.toString());
               }}
+              focusCommentId={taskCommentFocus?.commentId ?? null}
+              focusAction={taskCommentFocus?.action ?? null}
+              onFocusHandled={() => setTaskCommentFocus(null)}
               onUpdate={updateTask}
               currentUser={currentUser}
               customFields={customFields}
@@ -8456,6 +8507,9 @@ function TaskDetailModal(props: any) {
     workspaceId,
     onTagsChange,
     teams = [],
+    focusCommentId = null,
+    focusAction = null,
+    onFocusHandled,
   } = props;
 
   const currentList = lists?.find((l: any) => l.id === task.listId);
@@ -9565,22 +9619,26 @@ function TaskDetailModal(props: any) {
                     const replies = (task.comments || [])
                       .filter((c: any) => c.parentCommentId === item.id)
                       .sort((a: any, b: any) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+                    const isFocusTarget = focusCommentId === item.id;
                     return (
-                      <CommentItem
-                        key={item.id}
-                        item={item}
-                        replies={replies}
-                        users={users}
-                        teams={teams}
-                        currentUserId={currentUser.id}
-                        taskId={task.id}
-                        onEdit={editComment}
-                        onDelete={deleteComment}
-                        onReply={handleAddReply}
-                        onAssign={handleAssignComment}
-                        onResolve={handleResolveComment}
-                        formatDate={formatDate}
-                      />
+                      <div key={item.id} id={`comment-${item.id}`}>
+                        <CommentItem
+                          item={item}
+                          replies={replies}
+                          users={users}
+                          teams={teams}
+                          currentUserId={currentUser.id}
+                          taskId={task.id}
+                          onEdit={editComment}
+                          onDelete={deleteComment}
+                          onReply={handleAddReply}
+                          onAssign={handleAssignComment}
+                          onResolve={handleResolveComment}
+                          formatDate={formatDate}
+                          autoFocus={isFocusTarget ? (focusAction || 'view') : undefined}
+                          onFocusHandled={isFocusTarget ? onFocusHandled : undefined}
+                        />
+                      </div>
                     );
                   }
 

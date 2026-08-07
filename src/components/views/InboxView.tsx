@@ -19,7 +19,18 @@ interface InboxViewProps {
   lists: List[];
   onOpenTask: (taskId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
+  onOpenTaskComment: (taskId: string, commentId: string, action?: 'reply' | 'resolve') => void;
   onCreateTaskFromComment: (comment: { text: string }, listId: string) => Promise<string | null>;
+}
+
+// Qual ação já deixar pronta ao abrir o comentário que gerou a notificação:
+// menção/resposta → campo de resposta focado; comentário atribuído a você →
+// destaque no botão "Resolver". Os outros tipos de comentário (ex:
+// comment_resolved) só rolam/destacam, sem abrir nada.
+function commentFocusAction(type: string): 'reply' | 'resolve' | undefined {
+  if (type === 'comment_assigned') return 'resolve';
+  if (type === 'mention' || type === 'team_mention' || type === 'reply') return 'reply';
+  return undefined;
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -120,7 +131,7 @@ function formatSnoozedUntil(d: string) {
  * ações de apagar e adiar (as duas que faltavam pra virar um inbox de
  * verdade — antes só dava pra marcar como lida).
  */
-export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting, onCreateTaskFromComment }: InboxViewProps) {
+export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting, onOpenTaskComment, onCreateTaskFromComment }: InboxViewProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [filter, setFilter] = useState<'all' | 'unread' | 'mentions' | 'snoozed'>('all');
   const [isLoading, setIsLoading] = useState(true);
@@ -274,8 +285,16 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
 
   const handleClickNotification = (n: AppNotification) => {
     if (!n.read) markAsRead([n.id]);
-    if (n.taskId) onOpenTask(n.taskId);
-    else if (n.meetingId) onOpenMeeting(n.meetingId);
+    if (n.taskId && n.commentId) {
+      // Vai direto pro comentário que gerou a notificação (rolado e
+      // destacado), não só pra tarefa em geral — sem isso, numa tarefa com
+      // muitos comentários, achar o que te mencionou era na mão.
+      onOpenTaskComment(n.taskId, n.commentId, commentFocusAction(n.type));
+    } else if (n.taskId) {
+      onOpenTask(n.taskId);
+    } else if (n.meetingId) {
+      onOpenMeeting(n.meetingId);
+    }
   };
 
   const visible =
