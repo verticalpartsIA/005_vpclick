@@ -6,6 +6,18 @@ interface NotificationBellProps {
   currentUser: User;
   users: User[];
   onOpenTask: (taskId: string) => void;
+  onOpenMeeting: (meetingId: string) => void;
+  onOpenTaskComment: (taskId: string, commentId: string, action?: 'reply' | 'resolve') => void;
+}
+
+// Qual ação já deixar pronta ao abrir o comentário que gerou a notificação:
+// menção/resposta → campo de resposta focado; comentário atribuído a você →
+// destaque no botão "Resolver". Os outros tipos de comentário (ex:
+// comment_resolved) só rolam/destacam, sem abrir nada.
+function commentFocusAction(type: string): 'reply' | 'resolve' | undefined {
+  if (type === 'comment_assigned') return 'resolve';
+  if (type === 'mention' || type === 'team_mention' || type === 'reply') return 'reply';
+  return undefined;
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -14,7 +26,15 @@ const TYPE_ICONS: Record<string, string> = {
   assignment: '📌',
   comment: '💬',
   automation: '⚡',
+  reply: '↩️',
+  comment_assigned: '📝',
+  comment_resolved: '✅',
+  meeting: '🗓️',
 };
+
+function isSnoozedActive(n: AppNotification) {
+  return !!n.snoozedUntil && new Date(n.snoozedUntil) > new Date();
+}
 
 function relativeTime(date: string) {
   const diffMs = Date.now() - new Date(date).getTime();
@@ -30,7 +50,7 @@ function relativeTime(date: string) {
 }
 
 /** Sino de notificações in-app (menções, atribuições, automações) com atualização em tempo real. */
-export function NotificationBell({ currentUser, users, onOpenTask }: NotificationBellProps) {
+export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting, onOpenTaskComment }: NotificationBellProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -44,18 +64,30 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
     body: n.body || '',
     taskId: n.task_id,
     commentId: n.comment_id,
+    meetingId: n.meeting_id,
     read: n.read,
+    snoozedUntil: n.snoozed_until || undefined,
     createdAt: n.created_at,
   });
 
   const loadNotifications = useCallback(async () => {
-    const { data } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', currentUser.id)
-      .order('created_at', { ascending: false })
-      .limit(30);
-    if (data) setNotifications(data.map(mapRow));
+    try {
+      // Exclui quem está adiado (snooze) já na query — filtrar só depois de
+      // buscar as 30 mais recentes deixava o sino "vazio" se as mais novas
+      // fossem justamente as adiadas, escondendo notificações ativas mais
+      // antigas que ainda caberiam na janela de 30.
+      const { data, error } = await supabase
+        .from('notifications')
+        .select('*')
+        .eq('user_id', currentUser.id)
+        .or(`snoozed_until.is.null,snoozed_until.lte.${new Date().toISOString()}`)
+        .order('created_at', { ascending: false })
+        .limit(30);
+      if (error) throw error;
+      if (data) setNotifications(data.map(mapRow));
+    } catch (err) {
+      console.error('Erro ao carregar notificações:', err);
+    }
   }, [currentUser.id]);
 
   useEffect(() => {
@@ -69,6 +101,28 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
         filter: `user_id=eq.${currentUser.id}`,
       }, (payload: any) => {
         if (payload.new) setNotifications((prev) => [mapRow(payload.new), ...prev].slice(0, 30));
+      })
+      .on('postgres_changes', {
+        // Reflete leituras feitas em outro lugar (ex: página da Caixa de
+        // Entrada) — sem isso o badge de não lidas do sino ficava desatualizado
+        // até a próxima notificação nova chegar.
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'notifications',
+        filter: `user_id=eq.${currentUser.id}`,
+      }, (payload: any) => {
+        if (payload.new) setNotifications((prev) => prev.map((n) => (n.id === payload.new.id ? mapRow(payload.new) : n)));
+      })
+      .on('postgres_changes', {
+        // Reflete exclusões (ex: notificação de convite quando a reunião é
+        // desmarcada) — sem isso o item ficava visível/clicável até recarregar,
+        // levando a uma reunião que não existe mais.
+        event: 'DELETE',
+        schema: 'public',
+        table: 'notifications',
+        filter: `user_id=eq.${currentUser.id}`,
+      }, (payload: any) => {
+        if (payload.old) setNotifications((prev) => prev.filter((n) => n.id !== payload.old.id));
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
@@ -84,7 +138,11 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
     return () => document.removeEventListener('click', onClick);
   }, [isOpen]);
 
-  const unreadCount = notifications.filter((n) => !n.read).length;
+  // Adiadas (snooze) ficam fora do sino até a data voltar — mesmo
+  // comportamento da Caixa de Entrada, senão o badge contaria algo que o
+  // usuário já escondeu de propósito.
+  const visibleNotifications = notifications.filter((n) => !isSnoozedActive(n));
+  const unreadCount = visibleNotifications.filter((n) => !n.read).length;
 
   const markAsRead = async (ids: string[]) => {
     if (ids.length === 0) return;
@@ -94,8 +152,17 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
 
   const handleClickNotification = (n: AppNotification) => {
     if (!n.read) markAsRead([n.id]);
-    if (n.taskId) {
+    if (n.taskId && n.commentId) {
+      // Vai direto pro comentário que gerou a notificação (rolado e
+      // destacado), não só pra tarefa em geral — sem isso, numa tarefa com
+      // muitos comentários, achar o que te mencionou era na mão.
+      onOpenTaskComment(n.taskId, n.commentId, commentFocusAction(n.type));
+      setIsOpen(false);
+    } else if (n.taskId) {
       onOpenTask(n.taskId);
+      setIsOpen(false);
+    } else if (n.meetingId) {
+      onOpenMeeting(n.meetingId);
       setIsOpen(false);
     }
   };
@@ -121,7 +188,7 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
             <p className="font-bold text-gray-800 text-sm">Notificações</p>
             {unreadCount > 0 && (
               <button
-                onClick={() => markAsRead(notifications.filter((n) => !n.read).map((n) => n.id))}
+                onClick={() => markAsRead(visibleNotifications.filter((n) => !n.read).map((n) => n.id))}
                 className="text-xs text-orange-500 font-semibold hover:underline"
               >
                 Marcar todas como lidas
@@ -129,10 +196,10 @@ export function NotificationBell({ currentUser, users, onOpenTask }: Notificatio
             )}
           </div>
           <div className="max-h-96 overflow-y-auto custom-scrollbar">
-            {notifications.length === 0 && (
+            {visibleNotifications.length === 0 && (
               <p className="p-6 text-sm text-gray-400 text-center">Nenhuma notificação por aqui. 🎉</p>
             )}
-            {notifications.map((n) => {
+            {visibleNotifications.map((n) => {
               const actor = users.find((u) => u.id === n.actorId);
               return (
                 <button

@@ -109,6 +109,47 @@ export interface Comment {
   text: string;
   timestamp: string;
   updatedAt?: string;
+  parentCommentId?: string;
+  assignedTo?: string;
+  assignedBy?: string;
+  resolvedAt?: string;
+  resolvedBy?: string;
+}
+
+// ── Reuniões (item 4 da sidebar "Início", estilo ClickUp) — versão manual +
+// IA: sem calendário nem bot entrando em chamada, o resumo/itens de ação vêm
+// de notas coladas à mão e processadas pela edge function summarize-meeting.
+export interface MeetingActionItem {
+  id: string;
+  meetingId: string;
+  text: string;
+  completed: boolean;
+  taskId?: string;
+  createdAt: string;
+}
+
+export interface Meeting {
+  id: string;
+  title: string;
+  meetingDate: string;
+  endDate?: string;
+  roomId?: string;
+  participantIds: string[];
+  notes: string;
+  summary?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt?: string;
+  actionItems: MeetingActionItem[];
+}
+
+// ── Salas de reunião (reserva com detecção de conflito de horário) ───────
+export interface MeetingRoom {
+  id: string;
+  name: string;
+  isActive: boolean;
+  createdBy?: string;
+  createdAt: string;
 }
 
 export interface Attachment {
@@ -150,6 +191,7 @@ export interface Task {
   projectId: string;
   parentId?: string;
   createdAt?: string;
+  createdBy?: string;
   dependencies?: TaskDependency[];
   tags?: string[];
   watcherIds?: string[];
@@ -165,7 +207,7 @@ export interface Team {
 }
 
 // ── Notificações in-app (sino) ────────────────────────────
-export type NotificationType = 'mention' | 'team_mention' | 'assignment' | 'comment' | 'automation';
+export type NotificationType = 'mention' | 'team_mention' | 'assignment' | 'comment' | 'automation' | 'reply' | 'comment_assigned' | 'comment_resolved' | 'meeting';
 
 export interface AppNotification {
   id: string;
@@ -176,7 +218,9 @@ export interface AppNotification {
   body: string;
   taskId?: string;
   commentId?: string;
+  meetingId?: string;
   read: boolean;
+  snoozedUntil?: string;
   createdAt: string;
 }
 
@@ -198,6 +242,26 @@ export interface List {
   name: string;
   folderId: string;
   statusGroupId: string;
+  ownerId?: string;
+}
+
+// ── Lembretes ("Hoje e atrasadas", item 7 da sidebar "Início") ───────────
+export type ReminderNotifyPreference = 'on_due' | '10_min_before' | '1_hour_before' | 'custom' | 'off';
+
+export interface Reminder {
+  id: string;
+  title: string;
+  details?: string;
+  dueAt: string;
+  notifyPreference: ReminderNotifyPreference;
+  customNotifyAt?: string;
+  userId: string;
+  createdBy?: string;
+  completed: boolean;
+  completedAt?: string;
+  taskId?: string;
+  createdAt: string;
+  updatedAt?: string;
 }
 
 export interface Folder {
@@ -213,6 +277,7 @@ export interface Space {
   color: string;
   icon?: string;
   isSystem?: boolean; // true = space nativo do Hub, não pode ser deletado
+  createdAt?: string;
 }
 
 export interface Workspace {
