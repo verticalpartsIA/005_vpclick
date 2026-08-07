@@ -61,10 +61,15 @@ export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting
 
   const loadNotifications = useCallback(async () => {
     try {
+      // Exclui quem está adiado (snooze) já na query — filtrar só depois de
+      // buscar as 30 mais recentes deixava o sino "vazio" se as mais novas
+      // fossem justamente as adiadas, escondendo notificações ativas mais
+      // antigas que ainda caberiam na janela de 30.
       const { data, error } = await supabase
         .from('notifications')
         .select('*')
         .eq('user_id', currentUser.id)
+        .or(`snoozed_until.is.null,snoozed_until.lte.${new Date().toISOString()}`)
         .order('created_at', { ascending: false })
         .limit(30);
       if (error) throw error;

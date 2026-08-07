@@ -158,13 +158,23 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
     return () => { supabase.removeChannel(channel); };
   }, [currentUser.id, loadNotifications]);
 
+  // Recalcula quem ainda está adiado a cada minuto — sem isso, o item ficava
+  // preso em "Adiadas" (e fora de Todas/Não lidas) até a página recarregar
+  // ou outra notificação mudar o array, mesmo com o prazo de adiamento já
+  // vencido, já que os memos abaixo só reagem a mudanças em `notifications`.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Adiadas ficam fora de Todas/Não lidas (e do contador) até a data voltar.
-  const activeNotifications = useMemo(() => notifications.filter((n) => !isSnoozedActive(n)), [notifications]);
+  const activeNotifications = useMemo(() => notifications.filter((n) => !isSnoozedActive(n)), [notifications, nowTick]);
   const snoozedNotifications = useMemo(
     () => notifications
       .filter(isSnoozedActive)
       .sort((a, b) => new Date(a.snoozedUntil!).getTime() - new Date(b.snoozedUntil!).getTime()),
-    [notifications]
+    [notifications, nowTick]
   );
   const unreadCount = activeNotifications.filter((n) => !n.read).length;
 
