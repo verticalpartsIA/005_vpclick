@@ -3944,6 +3944,8 @@ export default function App() {
                 <div className="flex-1" />
                 <button
                   onClick={() => setIsTaskModalOpen(true)}
+                  aria-label="Criar tarefa"
+                  aria-haspopup="dialog"
                   className="bg-[var(--primary-color)] hover:brightness-90 text-[#2c3e50] font-semibold text-sm px-4 py-1.5 rounded-md flex items-center gap-2 transition-all whitespace-nowrap"
                 >
                   <Icons.Plus /> <span className="hidden sm:inline">Criar Tarefa</span>
@@ -5377,6 +5379,8 @@ function Sidebar({
             key={item.id}
             onClick={item.action}
             title={item.label}
+            aria-label={`Ir para ${item.label}`}
+            aria-current={item.active ? 'page' : undefined}
             className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
               item.active
                 ? 'bg-sidebar-accent text-primary'
@@ -6075,6 +6079,8 @@ function ViewTab({ active, onClick, label }: any) {
   return (
     <button
       onClick={onClick}
+      aria-label={`Visualização ${label}`}
+      aria-current={active ? 'page' : undefined}
       className={`px-3 py-3 text-sm font-medium transition-all relative whitespace-nowrap ${active ? 'text-[var(--primary-color)]' : 'text-gray-500 hover:text-gray-900'
         }`}
     >
@@ -8299,10 +8305,10 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
 
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 backdrop-blur-md p-4" onClick={(e) => e.stopPropagation()}>
-      <div className="bg-white w-full max-w-2xl flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200 max-h-[90vh]">
+      <div role="dialog" aria-modal="true" aria-labelledby="create-task-title" className="bg-white w-full max-w-2xl flex flex-col rounded-2xl shadow-2xl overflow-hidden animate-in zoom-in duration-200 max-h-[90vh]">
         <div className="p-6 border-b flex items-center justify-between bg-gray-50">
           <div>
-            <h3 className="text-lg font-bold text-gray-800">
+            <h3 id="create-task-title" className="text-lg font-bold text-gray-800">
               {prefilledData?.parentId ? 'Adicionar Subtarefa' : 'Criar Nova Tarefa'}
             </h3>
             {prefilledData?.parentId && (
