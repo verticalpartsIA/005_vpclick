@@ -1595,6 +1595,7 @@ export default function App() {
   }, [session, loadAllUsers]);
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
 
   // Detect taskId in URL on load — abre a tarefa direto (deep link), sem
   // travar em somente-leitura: quem recebe o link já está autenticado no
@@ -1650,6 +1651,94 @@ export default function App() {
   // uma mais antiga que ainda está terminando.
   const loadTasksRequestIdRef = useRef(0);
   const loadTasksCommittedIdRef = useRef(0);
+
+  // Hidrata linhas cruas da tabela `tasks` em objetos Task completos, buscando
+  // as sub-entidades (anexos, comentários, logs, checklists, atividades,
+  // watchers) em lotes seguros de IDs. Reutilizado por loadTasks e pela busca
+  // server-side, que traz tarefas fora da janela local carregada.
+  const hydrateTaskRows = useCallback(async (rows: any[]): Promise<Task[]> => {
+    if (!rows || rows.length === 0) return [];
+    const taskIds = rows.map((d: any) => d.id);
+
+    // Um único .in('task_id', [milhares de UUIDs]) gera uma URL de dezenas de
+    // milhares de caracteres e o servidor responde 400. Quebramos em lotes de
+    // 150 IDs (URL segura) e concatenamos os resultados.
+    const fetchInChunks = async (
+      build: (ids: string[]) => PromiseLike<{ data: any[] | null; error: any }>,
+      label: string
+    ): Promise<any[]> => {
+      const CHUNK = 150;
+      const out: any[] = [];
+      for (let i = 0; i < taskIds.length; i += CHUNK) {
+        const slice = taskIds.slice(i, i + CHUNK);
+        if (slice.length === 0) continue;
+        const { data: part, error: partErr } = await build(slice);
+        if (partErr) {
+          console.error(`hydrateTaskRows: erro ao carregar ${label} (lote ${i / CHUNK}):`, partErr);
+          continue;
+        }
+        if (part) out.push(...part);
+      }
+      return out;
+    };
+
+    const [attData, commData, logData, checkData, actData, watchData] = await Promise.all([
+      fetchInChunks((ids) => supabase.from('task_attachments').select('*').in('task_id', ids), 'task_attachments'),
+      fetchInChunks((ids) => supabase.from('task_comments').select('*').in('task_id', ids).is('deleted_at', null), 'task_comments'),
+      fetchInChunks((ids) => supabase.from('task_extension_logs').select('*').in('task_id', ids), 'task_extension_logs'),
+      fetchInChunks((ids) => supabase.from('task_checklists').select('*').in('task_id', ids), 'task_checklists'),
+      fetchInChunks((ids) => supabase.from('task_activities').select('*').in('task_id', ids), 'task_activities'),
+      fetchInChunks((ids) => supabase.from('task_watchers').select('task_id, user_id').in('task_id', ids), 'task_watchers'),
+    ]);
+
+    return rows.map((d: any) => {
+      const tAttachments = (attData || []).filter((a: any) => a.task_id === d.id).map((a: any) => ({
+        id: a.id, name: a.name, url: a.url, type: a.type, size: a.size, uploadedAt: a.uploaded_at
+      }));
+      const tComments = (commData || []).filter((c: any) => c.task_id === d.id).map((c: any) => ({
+        id: c.id, userId: c.user_id, text: c.text, timestamp: c.created_at, updatedAt: c.updated_at || undefined,
+        parentCommentId: c.parent_comment_id || undefined,
+        assignedTo: c.assigned_to || undefined,
+        assignedBy: c.assigned_by || undefined,
+        resolvedAt: c.resolved_at || undefined,
+        resolvedBy: c.resolved_by || undefined,
+      }));
+      const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
+        id: l.id, oldDate: l.old_date, newDate: l.new_date, reason: l.reason, updatedBy: l.updated_by, timestamp: l.created_at
+      }));
+      const tChecklists = (checkData || []).filter((ck: any) => ck.task_id === d.id).map((ck: any) => ({
+        id: ck.id, text: ck.text, completed: ck.completed
+      }));
+      const tActivities = (actData || []).filter((act: any) => act.task_id === d.id).map((act: any) => ({
+        id: act.id, taskId: act.task_id, userId: act.user_id, type: act.type, oldValue: act.old_value, newValue: act.new_value, createdAt: act.created_at
+      }));
+      return {
+        id: d.id,
+        title: d.title,
+        description: d.description || '',
+        status: d.status as string,
+        priority: d.priority as TaskPriority,
+        mainAssigneeId: d.main_assignee_id,
+        secondaryAssigneeIds: d.secondary_assignee_ids || [],
+        startDate: d.start_date,
+        dueDate: d.due_date,
+        extensionCount: d.extension_count || 0,
+        extensionHistory: tLogs,
+        checklists: tChecklists,
+        comments: tComments,
+        attachments: tAttachments,
+        activities: tActivities,
+        listId: d.list_id,
+        projectId: d.project_id,
+        parentId: d.parent_id,
+        createdAt: d.created_at,
+        createdBy: d.created_by || undefined,
+        tags: d.tags || [],
+        watcherIds: (watchData || []).filter((w: any) => w.task_id === d.id).map((w: any) => w.user_id),
+      } as Task;
+    });
+  }, []);
+
   const loadTasks = useCallback(async () => {
     if (!session) return;
 
@@ -1674,119 +1763,12 @@ export default function App() {
     if (requestId < loadTasksCommittedIdRef.current) return; // resultado mais novo já foi gravado
 
     if (data && !error) {
-      const taskIds = data.map((d: any) => d.id);
-
-      // Busca uma sub-entidade filtrando por task_id em LOTES.
-      // Um único .in('task_id', [milhares de UUIDs]) gera uma URL de dezenas de
-      // milhares de caracteres e o servidor responde 400 (Bad Request), fazendo
-      // comentários/checklists/anexos/etc sumirem silenciosamente no escopo global.
-      // Quebramos em lotes de 150 IDs (URL segura) e concatenamos os resultados.
-      const fetchInChunks = async (
-        build: (ids: string[]) => PromiseLike<{ data: any[] | null; error: any }>,
-        label: string
-      ): Promise<any[]> => {
-        const CHUNK = 150;
-        const out: any[] = [];
-        for (let i = 0; i < taskIds.length; i += CHUNK) {
-          const slice = taskIds.slice(i, i + CHUNK);
-          if (slice.length === 0) continue;
-          const { data: part, error: partErr } = await build(slice);
-          if (partErr) {
-            console.error(`loadTasks: erro ao carregar ${label} (lote ${i / CHUNK}):`, partErr);
-            continue;
-          }
-          if (part) out.push(...part);
-        }
-        return out;
-      };
-
-      // Lotes rodam em paralelo por tabela
-      const [attData, commData, logData, checkData, actData, watchData] = await Promise.all([
-        fetchInChunks((ids) => supabase.from('task_attachments').select('*').in('task_id', ids), 'task_attachments'),
-        fetchInChunks((ids) => supabase.from('task_comments').select('*').in('task_id', ids).is('deleted_at', null), 'task_comments'),
-        fetchInChunks((ids) => supabase.from('task_extension_logs').select('*').in('task_id', ids), 'task_extension_logs'),
-        fetchInChunks((ids) => supabase.from('task_checklists').select('*').in('task_id', ids), 'task_checklists'),
-        fetchInChunks((ids) => supabase.from('task_activities').select('*').in('task_id', ids), 'task_activities'),
-        fetchInChunks((ids) => supabase.from('task_watchers').select('task_id, user_id').in('task_id', ids), 'task_watchers'),
-      ]);
-      if (requestId < loadTasksCommittedIdRef.current) return; // idem: um resultado mais novo já foi gravado durante os lotes
-
+      const hydrated = await hydrateTaskRows(data);
+      if (requestId < loadTasksCommittedIdRef.current) return; // um resultado mais novo já foi gravado durante a hidratação
       loadTasksCommittedIdRef.current = requestId;
-      setTasks(data.map((d: any) => {
-        const tAttachments = (attData || []).filter((a: any) => a.task_id === d.id).map((a: any) => ({
-          id: a.id,
-          name: a.name,
-          url: a.url,
-          type: a.type,
-          size: a.size,
-          uploadedAt: a.uploaded_at
-        }));
-
-        const tComments = (commData || []).filter((c: any) => c.task_id === d.id).map((c: any) => ({
-          id: c.id,
-          userId: c.user_id,
-          text: c.text,
-          timestamp: c.created_at,
-          updatedAt: c.updated_at || undefined,
-          parentCommentId: c.parent_comment_id || undefined,
-          assignedTo: c.assigned_to || undefined,
-          assignedBy: c.assigned_by || undefined,
-          resolvedAt: c.resolved_at || undefined,
-          resolvedBy: c.resolved_by || undefined,
-        }));
-
-        const tLogs = (logData || []).filter((l: any) => l.task_id === d.id).map((l: any) => ({
-          id: l.id,
-          oldDate: l.old_date,
-          newDate: l.new_date,
-          reason: l.reason,
-          updatedBy: l.updated_by,
-          timestamp: l.created_at
-        }));
-
-        const tChecklists = (checkData || []).filter((ck: any) => ck.task_id === d.id).map((ck: any) => ({
-          id: ck.id,
-          text: ck.text,
-          completed: ck.completed
-        }));
-
-        const tActivities = (actData || []).filter((act: any) => act.task_id === d.id).map((act: any) => ({
-          id: act.id,
-          taskId: act.task_id,
-          userId: act.user_id,
-          type: act.type,
-          oldValue: act.old_value,
-          newValue: act.new_value,
-          createdAt: act.created_at
-        }));
-
-        return {
-          id: d.id,
-          title: d.title,
-          description: d.description || '',
-          status: d.status as string,
-          priority: d.priority as TaskPriority,
-          mainAssigneeId: d.main_assignee_id,
-          secondaryAssigneeIds: d.secondary_assignee_ids || [],
-          startDate: d.start_date,
-          dueDate: d.due_date,
-          extensionCount: d.extension_count || 0,
-          extensionHistory: tLogs,
-          checklists: tChecklists,
-          comments: tComments,
-          attachments: tAttachments,
-          activities: tActivities,
-          listId: d.list_id,
-          projectId: d.project_id,
-          parentId: d.parent_id,
-          createdAt: d.created_at,
-          createdBy: d.created_by || undefined,
-          tags: d.tags || [],
-          watcherIds: (watchData || []).filter((w: any) => w.task_id === d.id).map((w: any) => w.user_id),
-        };
-      }));
+      setTasks(hydrated);
     }
-  }, [session, activeListId, activeScope, lists, folders]);
+  }, [session, activeListId, activeScope, lists, folders, hydrateTaskRows]);
 
   useEffect(() => {
     loadTasks();
@@ -1796,6 +1778,42 @@ export default function App() {
   // precisar recriar o canal a cada mudança de escopo.
   const loadTasksRef = useRef(loadTasks);
   useEffect(() => { loadTasksRef.current = loadTasks; }, [loadTasks]);
+
+  // ── Busca server-side de tarefas por título (bug #9 do #81) ──────────────
+  // O array `tasks` é limitado à janela carregada: o PostgREST devolve no
+  // máximo ~1000 linhas por request e o workspace tem milhares de tarefas.
+  // Filtrar apenas localmente fazia a busca não encontrar tarefas fora dessa
+  // janela. Aqui consultamos o banco por título e mesclamos os resultados
+  // hidratados em `tasks`, para que tanto as views quanto o modal de detalhe
+  // (que lê de `tasks`) os enxerguem. O filtro client-side em `filteredTasks`
+  // continua aplicando escopo/papel/tags/ordenação por cima.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2) { setIsSearching(false); return; }
+    let cancelled = false;
+    setIsSearching(true);
+    const handle = setTimeout(async () => {
+      // Escapa curingas do LIKE (% _ \) para tratar o termo como texto literal.
+      const pattern = `%${q.replace(/[\\%_]/g, '\\$&')}%`;
+      const { data, error } = await supabase
+        .from('tasks')
+        .select('*')
+        .ilike('title', pattern)
+        .limit(200);
+      if (cancelled) return;
+      if (data && !error && data.length > 0) {
+        const hydrated = await hydrateTaskRows(data);
+        if (cancelled) return;
+        setTasks(prev => {
+          const merged = new Map(prev.map(t => [t.id, t]));
+          for (const t of hydrated) merged.set(t.id, t);
+          return Array.from(merged.values());
+        });
+      }
+      if (!cancelled) setIsSearching(false);
+    }, 400);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [searchQuery, hydrateTaskRows]);
 
   // Realtime de tarefas e comentários: reflete alterações feitas por outros
   // usuários/abas sem precisar recarregar a página. As tabelas precisam estar na
@@ -3686,6 +3704,12 @@ export default function App() {
                 <div className="absolute left-2 top-2 text-gray-400">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
                 </div>
+                {isSearching && (
+                  <svg className="w-4 h-4 animate-spin text-gray-400 absolute right-2 top-2" fill="none" viewBox="0 0 24 24" aria-label="Buscando">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                )}
               </div>
 
               {/* Tag filter */}
