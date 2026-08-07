@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { isToday, isYesterday } from 'date-fns';
 import { supabase } from '../../lib/supabase';
-import { AppNotification, User } from '../../types';
+import { AppNotification, List, User } from '../../types';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,8 +12,10 @@ import {
 interface InboxViewProps {
   currentUser: User;
   users: User[];
+  lists: List[];
   onOpenTask: (taskId: string) => void;
   onOpenMeeting: (meetingId: string) => void;
+  onCreateTaskFromComment: (comment: { text: string }, listId: string) => Promise<string | null>;
 }
 
 const TYPE_ICONS: Record<string, string> = {
@@ -82,10 +84,16 @@ function formatSnoozedUntil(d: string) {
  * ações de apagar e adiar (as duas que faltavam pra virar um inbox de
  * verdade — antes só dava pra marcar como lida).
  */
-export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: InboxViewProps) {
+export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting, onCreateTaskFromComment }: InboxViewProps) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [filter, setFilter] = useState<'all' | 'unread' | 'snoozed'>('all');
   const [isLoading, setIsLoading] = useState(true);
+  // Só local/desta sessão: qual tarefa nova já foi criada a partir de qual
+  // notificação. Sem coluna de vínculo no banco (a notificação em si é
+  // efêmera), então recarregar a página perde essa marca — aceitável, só
+  // evita clicar duas vezes por engano sem sair da página.
+  const [createdTaskByNotification, setCreatedTaskByNotification] = useState<Record<string, string>>({});
+  const [creatingTaskFor, setCreatingTaskFor] = useState<string | null>(null);
 
   const mapRow = (n: any): AppNotification => ({
     id: n.id,
@@ -199,6 +207,13 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
     await supabase.from('notifications').delete().eq('id', id);
   };
 
+  const handleCreateTask = async (n: AppNotification, listId: string) => {
+    setCreatingTaskFor(n.id);
+    const taskId = await onCreateTaskFromComment({ text: n.body }, listId);
+    setCreatingTaskFor(null);
+    if (taskId) setCreatedTaskByNotification((prev) => ({ ...prev, [n.id]: taskId }));
+  };
+
   const handleClickNotification = (n: AppNotification) => {
     if (!n.read) markAsRead([n.id]);
     if (n.taskId) onOpenTask(n.taskId);
@@ -305,6 +320,35 @@ export function InboxView({ currentUser, users, onOpenTask, onOpenMeeting }: Inb
                     {!n.read && filter !== 'snoozed' && <span className="w-2 h-2 rounded-full bg-orange-500 shrink-0 mt-2"></span>}
                   </button>
                   <div className="flex items-center gap-0.5 pr-2 shrink-0">
+                    {n.commentId && (
+                      createdTaskByNotification[n.id] ? (
+                        <button
+                          onClick={() => onOpenTask(createdTaskByNotification[n.id])}
+                          className="text-[11px] font-semibold text-blue-500 hover:underline px-1.5"
+                        >
+                          Ver tarefa
+                        </button>
+                      ) : (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              disabled={creatingTaskFor === n.id}
+                              title="Criar tarefa a partir do comentário"
+                              className="text-[11px] font-semibold text-gray-400 hover:text-purple-500 px-1.5 disabled:opacity-40"
+                            >
+                              {creatingTaskFor === n.id ? 'Criando...' : 'Criar tarefa'}
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-56 max-h-72 overflow-y-auto">
+                            {[...lists].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')).map((l) => (
+                              <DropdownMenuItem key={l.id} onClick={() => handleCreateTask(n, l.id)} className="text-sm">
+                                {l.name}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )
+                    )}
                     {filter === 'snoozed' ? (
                       <button
                         onClick={() => unsnooze(n.id)}
