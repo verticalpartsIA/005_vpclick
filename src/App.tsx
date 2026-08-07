@@ -1652,6 +1652,55 @@ export default function App() {
   const loadTasksRequestIdRef = useRef(0);
   const loadTasksCommittedIdRef = useRef(0);
 
+  // Lazy-load das sub-entidades ao abrir uma tarefa. As listagens carregam as
+  // tarefas SEM comentários/checklists/anexos/atividades/logs/watchers (para
+  // escalar a milhares de tarefas — ver loadTasks). Quando a tarefa é aberta,
+  // buscamos essas sub-entidades só para ela e mesclamos no array `tasks`, de
+  // onde o modal de detalhe lê. Sempre refetch ao abrir (idempotente, poucas
+  // queries) para refletir alterações feitas por outros usuários.
+  useEffect(() => {
+    const id = selectedTaskId;
+    if (!id) return;
+    let cancelled = false;
+    (async () => {
+      const [attRes, commRes, logRes, checkRes, actRes, watchRes] = await Promise.all([
+        supabase.from('task_attachments').select('*').eq('task_id', id),
+        supabase.from('task_comments').select('*').eq('task_id', id).is('deleted_at', null),
+        supabase.from('task_extension_logs').select('*').eq('task_id', id),
+        supabase.from('task_checklists').select('*').eq('task_id', id),
+        supabase.from('task_activities').select('*').eq('task_id', id),
+        supabase.from('task_watchers').select('task_id, user_id').eq('task_id', id),
+      ]);
+      if (cancelled) return;
+      const subs = {
+        attachments: (attRes.data || []).map((a: any) => ({
+          id: a.id, name: a.name, url: a.url, type: a.type, size: a.size, uploadedAt: a.uploaded_at
+        })),
+        comments: (commRes.data || []).map((c: any) => ({
+          id: c.id, userId: c.user_id, text: c.text, timestamp: c.created_at, updatedAt: c.updated_at || undefined,
+          parentCommentId: c.parent_comment_id || undefined,
+          assignedTo: c.assigned_to || undefined,
+          assignedBy: c.assigned_by || undefined,
+          resolvedAt: c.resolved_at || undefined,
+          resolvedBy: c.resolved_by || undefined,
+        })),
+        extensionHistory: (logRes.data || []).map((l: any) => ({
+          id: l.id, oldDate: l.old_date, newDate: l.new_date, reason: l.reason, updatedBy: l.updated_by, timestamp: l.created_at
+        })),
+        checklists: (checkRes.data || []).map((ck: any) => ({
+          id: ck.id, text: ck.text, completed: ck.completed
+        })),
+        activities: (actRes.data || []).map((act: any) => ({
+          id: act.id, taskId: act.task_id, userId: act.user_id, type: act.type, oldValue: act.old_value, newValue: act.new_value, createdAt: act.created_at
+        })),
+        watcherIds: (watchRes.data || []).map((w: any) => w.user_id),
+      };
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, ...subs } : t));
+    })();
+    return () => { cancelled = true; };
+  }, [selectedTaskId]);
+
+
   // Hidrata linhas cruas da tabela `tasks` em objetos Task completos, buscando
   // as sub-entidades (anexos, comentários, logs, checklists, atividades,
   // watchers) em lotes seguros de IDs. Reutilizado por loadTasks e pela busca
@@ -1744,31 +1793,70 @@ export default function App() {
 
     const requestId = ++loadTasksRequestIdRef.current;
 
-    let query = supabase.from('tasks').select('*');
+    // Aplica o filtro de escopo (lista/pasta/espaço) a uma query nova. Como a
+    // paginação refaz a query a cada página, o filtro precisa ser reaplicável.
+    const applyScope = (q: any) => {
+      if (activeListId) return q.eq('list_id', activeListId);
+      if (activeScope.type === 'folder' && activeScope.id) {
+        const folderListIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
+        return q.in('list_id', folderListIds);
+      }
+      if (activeScope.type === 'space' && activeScope.id) {
+        const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
+        const spaceListIds = lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
+        return q.in('list_id', spaceListIds);
+      }
+      return q;
+    };
 
-    if (activeListId) {
-      query = query.eq('list_id', activeListId);
-    } else if (activeScope.type === 'folder' && activeScope.id) {
-      // Buscar listas da pasta
-      const folderListIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
-      query = query.in('list_id', folderListIds);
-    } else if (activeScope.type === 'space' && activeScope.id) {
-      // Buscar pastas do espaço
-      const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
-      const spaceListIds = lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
-      query = query.in('list_id', spaceListIds);
+    // Paginação manual: o PostgREST limita ~1000 linhas por request e o
+    // workspace tem milhares de tarefas — buscar sem paginar truncava as
+    // listagens (bug #9 do #81). Trazemos as linhas em páginas de 1000 e
+    // mapeamos SEM hidratar sub-entidades (comentários/checklists/anexos/etc.),
+    // que agora são carregadas sob demanda ao abrir a tarefa (ver efeito de
+    // lazy-load abaixo). Isso mantém o load barato (~N requests) mesmo com
+    // dezenas de milhares de tarefas. Mesmo padrão já usado em loadDashboardTasks.
+    let allData: any[] = [];
+    let from = 0;
+    const pageSize = 1000;
+    while (true) {
+      const { data: page, error: pageErr } = await applyScope(
+        supabase.from('tasks').select('*')
+      ).range(from, from + pageSize - 1);
+      if (pageErr) { console.error('loadTasks: erro ao paginar tarefas:', pageErr); break; }
+      if (!page || page.length === 0) break;
+      allData = allData.concat(page);
+      if (page.length < pageSize) break;
+      from += pageSize;
     }
 
-    const { data, error } = await query;
-    if (requestId < loadTasksCommittedIdRef.current) return; // resultado mais novo já foi gravado
-
-    if (data && !error) {
-      const hydrated = await hydrateTaskRows(data);
-      if (requestId < loadTasksCommittedIdRef.current) return; // um resultado mais novo já foi gravado durante a hidratação
-      loadTasksCommittedIdRef.current = requestId;
-      setTasks(hydrated);
-    }
-  }, [session, activeListId, activeScope, lists, folders, hydrateTaskRows]);
+    if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
+    loadTasksCommittedIdRef.current = requestId;
+    setTasks(allData.map((d: any) => ({
+      id: d.id,
+      title: d.title,
+      description: d.description || '',
+      status: d.status as string,
+      priority: d.priority as TaskPriority,
+      mainAssigneeId: d.main_assignee_id,
+      secondaryAssigneeIds: d.secondary_assignee_ids || [],
+      startDate: d.start_date,
+      dueDate: d.due_date,
+      extensionCount: d.extension_count || 0,
+      extensionHistory: [],
+      checklists: [],
+      comments: [],
+      attachments: [],
+      activities: [],
+      listId: d.list_id,
+      projectId: d.project_id,
+      parentId: d.parent_id,
+      createdAt: d.created_at,
+      createdBy: d.created_by || undefined,
+      tags: d.tags || [],
+      watcherIds: [],
+    } as Task)));
+  }, [session, activeListId, activeScope, lists, folders]);
 
   useEffect(() => {
     loadTasks();
@@ -3177,23 +3265,31 @@ export default function App() {
       const stateTasksToAdd: Task[] = [duplicatedTask];
       const fieldValuesToAdd: CustomFieldValue[] = [];
 
-      if (options.includeChecklists && (sourceTask.checklists || []).length > 0) {
-        const checklistRows = sourceTask.checklists.map((item) => ({
-          task_id: duplicatedTask.id,
-          text: item.text,
-          completed: item.completed,
-        }));
-        const { data: checklistData, error: checklistError } = await supabase
+      if (options.includeChecklists) {
+        // Busca os checklists do DB (não da memória): com o lazy-load, a tarefa
+        // de origem pode não ter os checklists carregados se não foi aberta.
+        const { data: srcChecklists } = await supabase
           .from('task_checklists')
-          .insert(checklistRows)
-          .select();
+          .select('text, completed')
+          .eq('task_id', sourceTask.id);
+        if (srcChecklists && srcChecklists.length > 0) {
+          const checklistRows = srcChecklists.map((item: any) => ({
+            task_id: duplicatedTask.id,
+            text: item.text,
+            completed: item.completed,
+          }));
+          const { data: checklistData, error: checklistError } = await supabase
+            .from('task_checklists')
+            .insert(checklistRows)
+            .select();
 
-        if (checklistError) throw checklistError;
-        duplicatedTask.checklists = (checklistData || []).map((item: any) => ({
-          id: item.id,
-          text: item.text,
-          completed: item.completed,
-        }));
+          if (checklistError) throw checklistError;
+          duplicatedTask.checklists = (checklistData || []).map((item: any) => ({
+            id: item.id,
+            text: item.text,
+            completed: item.completed,
+          }));
+        }
       }
 
       if (options.includeCustomFields) {
@@ -3266,22 +3362,30 @@ export default function App() {
             tags: createdSubtask.tags || [],
           };
 
-          if (options.includeChecklists && (subtask.checklists || []).length > 0) {
-            const { data: subChecklistData, error: subChecklistError } = await supabase
+          if (options.includeChecklists) {
+            // Busca do DB (não da memória): subtarefas raramente têm checklists
+            // hidratados sob o lazy-load.
+            const { data: subSrcChecklists } = await supabase
               .from('task_checklists')
-              .insert(subtask.checklists.map((item) => ({
-                task_id: duplicatedSubtask.id,
+              .select('text, completed')
+              .eq('task_id', subtask.id);
+            if (subSrcChecklists && subSrcChecklists.length > 0) {
+              const { data: subChecklistData, error: subChecklistError } = await supabase
+                .from('task_checklists')
+                .insert(subSrcChecklists.map((item: any) => ({
+                  task_id: duplicatedSubtask.id,
+                  text: item.text,
+                  completed: item.completed,
+                })))
+                .select();
+
+              if (subChecklistError) throw subChecklistError;
+              duplicatedSubtask.checklists = (subChecklistData || []).map((item: any) => ({
+                id: item.id,
                 text: item.text,
                 completed: item.completed,
-              })))
-              .select();
-
-            if (subChecklistError) throw subChecklistError;
-            duplicatedSubtask.checklists = (subChecklistData || []).map((item: any) => ({
-              id: item.id,
-              text: item.text,
-              completed: item.completed,
-            }));
+              }));
+            }
           }
 
           if (options.includeCustomFields) {
