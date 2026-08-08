@@ -3461,6 +3461,7 @@ export default function App() {
               customFields={customFields}
               fieldValues={fieldValues}
               onUpdateFieldValue={handleUpdateFieldValue}
+              hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
               onManageFields={(listId: string) => {
                 setFieldManagerListIdOverride(listId || null);
                 setIsFieldManagerOpen(true);
@@ -7791,6 +7792,7 @@ function TaskDetailModal(props: any) {
     fieldValues,
     onUpdateFieldValue,
     onManageFields,
+    hiddenTaskFieldIdsByList,
     onDelete,
     onDuplicate,
     tasks,
@@ -7946,10 +7948,16 @@ function TaskDetailModal(props: any) {
   };
 
   const taskCustomFields = useMemo(() => {
+    // Respeita os campos ocultados por lista (toggles de "Adicionar um
+    // existente" no gerenciador): um campo desligado para a lista desta tarefa
+    // some também daqui, não só da tabela — senão a aba Detalhes fica enorme.
+    const hiddenForList: string[] = (task.listId && hiddenTaskFieldIdsByList?.[task.listId]) || [];
     return (customFields || []).filter((f: CustomField) =>
-      f.target === 'TASK' && (f.visibleTo ?? []).includes(currentUser.role)
+      f.target === 'TASK' &&
+      (f.visibleTo ?? []).includes(currentUser.role) &&
+      !hiddenForList.includes(f.id)
     );
-  }, [customFields, currentUser.role]);
+  }, [customFields, currentUser.role, task.listId, hiddenTaskFieldIdsByList]);
 
   // Registro de atividade é auxiliar (histórico/auditoria) — nunca deve impedir
   // a mudança real (status, prioridade, responsável) de acontecer. Antes, uma
