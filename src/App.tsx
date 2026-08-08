@@ -7692,13 +7692,12 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-bold text-gray-400 uppercase">Data de Início</label>
-                  <input
-                    type="date"
+                  <DateFieldEditor
                     className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
                     value={startDate}
-                    onChange={(e) => {
-                      setStartDate(e.target.value);
-                      handleStartOrDurationChange(e.target.value, duration);
+                    onCommit={(v) => {
+                      setStartDate(v);
+                      handleStartOrDurationChange(v, duration);
                     }}
                   />
                 </div>
@@ -7723,9 +7722,10 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
               <div>
                 <label className="text-xs font-bold text-gray-400 uppercase">Data Limite</label>
                 <input
-                  type="date"
+                  type="text"
                   className="w-full p-2 border rounded mt-1 text-sm bg-gray-50 text-gray-500 cursor-not-allowed outline-none"
-                  value={dueDate}
+                  value={isoToBr(dueDate)}
+                  placeholder="dd/mm/aaaa"
                   readOnly
                 />
                 <p className="text-[10px] text-gray-400 mt-1">Calculada automaticamente a partir da data de início + duração</p>
@@ -9071,11 +9071,10 @@ function TaskDetailModal(props: any) {
               <div className="p-8 space-y-6">
                 <div className="space-y-2">
                   <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Novo Vencimento</label>
-                  <input
-                    type="date"
+                  <DateFieldEditor
                     className="w-full p-4 bg-gray-50 border-2 border-gray-100 rounded-2xl focus:border-orange-500 focus:ring-4 focus:ring-orange-50 outline-none transition-all font-bold text-gray-900"
                     value={newDueDate}
-                    onChange={(e) => setNewDueDate(e.target.value)}
+                    onCommit={(v) => setNewDueDate(v)}
                   />
                 </div>
                 <div className="space-y-2">
@@ -9788,20 +9787,81 @@ function CreateFolderModal({ onClose, onCreate }: any) {
 // valor local que não depende do round-trip de rede para continuar exibindo
 // o que foi digitado, e (b) só disparamos onCommit quando o usuário termina
 // uma data válida ou explicitamente limpa um valor que já existia.
+// ISO 'YYYY-MM-DD' (formato de armazenamento) → 'dd/mm/aaaa' (exibição pt-BR).
+function isoToBr(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
+}
+
+// 'dd/mm/aaaa' → ISO 'YYYY-MM-DD'. Retorna '' se a data estiver incompleta ou
+// for inválida (ex: 31/02) — assim só persistimos datas completas e reais.
+function brToIso(br: string): string {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((br || '').trim());
+  if (!m) return '';
+  const dd = Number(m[1]), mo = Number(m[2]), yyyy = Number(m[3]);
+  if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return '';
+  const dt = new Date(yyyy, mo - 1, dd);
+  if (dt.getFullYear() !== yyyy || dt.getMonth() !== mo - 1 || dt.getDate() !== dd) return '';
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+// Aplica a máscara dd/mm/aaaa a uma sequência crua de dígitos.
+function maskBrDate(raw: string): string {
+  const d = (raw || '').replace(/\D/g, '').slice(0, 8);
+  if (d.length > 4) return `${d.slice(0, 2)}/${d.slice(2, 4)}/${d.slice(4)}`;
+  if (d.length > 2) return `${d.slice(0, 2)}/${d.slice(2)}`;
+  return d;
+}
+
+// Editor de data para campos personalizados/tabela. Exibe e aceita entrada
+// SEMPRE em dd/mm/aaaa — o <input type="date"> nativo formatava no locale do
+// NAVEGADOR (mostrava mm/dd/aaaa para muitos usuários, apesar da página ser
+// pt-BR). Aqui o texto é um input mascarado determinístico; o calendário nativo
+// continua disponível num input oculto acionado pelo botão (showPicker). O valor
+// persistido continua ISO 'YYYY-MM-DD'. O buffer local preserva o que foi
+// digitado independentemente do round-trip do upsert (ver histórico abaixo).
 export function DateFieldEditor({ value, onCommit, className }: { value: any; onCommit: (v: string) => void; className?: string }) {
-  const [local, setLocal] = useState(value ?? '');
-  useEffect(() => { setLocal(value ?? ''); }, [value]);
+  const [text, setText] = useState(() => isoToBr(value ?? ''));
+  const pickerRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { setText(isoToBr(value ?? '')); }, [value]);
+
+  const commitFromText = (raw: string) => {
+    const masked = maskBrDate(raw);
+    setText(masked);
+    if (masked === '') { if (value) onCommit(''); return; }
+    const iso = brToIso(masked);
+    if (iso) onCommit(iso); // só persiste data completa e válida
+  };
+
   return (
-    <input
-      type="date"
-      value={local}
-      onChange={(e) => {
-        const v = e.target.value;
-        setLocal(v);
-        if (v || value) onCommit(v);
-      }}
-      className={className}
-    />
+    <div className="relative">
+      <input
+        type="text"
+        inputMode="numeric"
+        placeholder="dd/mm/aaaa"
+        value={text}
+        onChange={(e) => commitFromText(e.target.value)}
+        className={`${className ?? ''} pr-9`}
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label="Abrir calendário"
+        onClick={() => pickerRef.current?.showPicker?.()}
+        className="absolute inset-y-0 right-0 flex items-center px-2 text-gray-400 hover:text-gray-600"
+      >
+        <Icons.Calendar className="h-4 w-4" />
+      </button>
+      <input
+        ref={pickerRef}
+        type="date"
+        value={value ?? ''}
+        onChange={(e) => { const v = e.target.value; setText(isoToBr(v)); if (v || value) onCommit(v); }}
+        tabIndex={-1}
+        aria-hidden="true"
+        className="sr-only absolute right-0 bottom-0"
+      />
+    </div>
   );
 }
 
