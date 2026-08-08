@@ -1161,6 +1161,12 @@ export default function App() {
     setActiveView('Meetings');
   };
   const [isFieldManagerOpen, setIsFieldManagerOpen] = useState(false);
+  // Quando o gerenciador de campos é aberto de DENTRO de uma tarefa, o escopo
+  // deve ser a lista da tarefa — não o `fieldManagerListId` derivado do
+  // activeListId (que pode ser outro se a tarefa foi aberta via busca/dashboard/
+  // minhas tarefas). Este override carrega a lista da tarefa; null = usa a
+  // resolução padrão (sidebar/listview).
+  const [fieldManagerListIdOverride, setFieldManagerListIdOverride] = useState<string | null>(null);
   const [taskToDuplicate, setTaskToDuplicate] = useState<Task | null>(null);
   const [isDuplicatingTask, setIsDuplicatingTask] = useState(false);
 
@@ -3455,6 +3461,10 @@ export default function App() {
               customFields={customFields}
               fieldValues={fieldValues}
               onUpdateFieldValue={handleUpdateFieldValue}
+              onManageFields={(listId: string) => {
+                setFieldManagerListIdOverride(listId || null);
+                setIsFieldManagerOpen(true);
+              }}
               onDelete={() => handleDeleteTask(selectedTask.id)}
               onDuplicate={() => setTaskToDuplicate(selectedTask)}
               onSelectTask={setSelectedTaskId}
@@ -3531,14 +3541,14 @@ export default function App() {
         {/* Custom Fields Manager */}
         {isFieldManagerOpen && (
           <CustomFieldsManager
-            onClose={() => setIsFieldManagerOpen(false)}
+            onClose={() => { setIsFieldManagerOpen(false); setFieldManagerListIdOverride(null); }}
             fields={customFields}
             onCreateField={handleCreateField}
             onUpdateField={handleUpdateField}
             onDeleteField={handleDeleteField}
             onReorderField={handleReorderField}
             currentUser={currentUser}
-            activeListId={fieldManagerListId}
+            activeListId={fieldManagerListIdOverride ?? fieldManagerListId}
             hiddenStandardColumnKeysByList={hiddenStandardColumnKeysByList}
             onToggleStandardColumn={(listId: string, key: any) => {
               setHiddenStandardColumnKeysByList((prev) => {
@@ -7780,6 +7790,7 @@ function TaskDetailModal(props: any) {
     customFields,
     fieldValues,
     onUpdateFieldValue,
+    onManageFields,
     onDelete,
     onDuplicate,
     tasks,
@@ -8612,7 +8623,20 @@ function TaskDetailModal(props: any) {
                     />
                   </section>
                   <section>
-                    <h3 className="text-sm font-bold text-gray-900 mb-6">Campos personalizados</h3>
+                    <div className="flex items-center justify-between mb-6">
+                      <h3 className="text-sm font-bold text-gray-900">Campos personalizados</h3>
+                      {!isReadOnly && onManageFields && (
+                        <button
+                          type="button"
+                          onClick={() => onManageFields(task.listId)}
+                          className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
+                          title="Criar, adicionar, mostrar/ocultar e reordenar campos desta lista"
+                        >
+                          <Icons.Settings2 className="w-3.5 h-3.5" />
+                          Gerenciar campos
+                        </button>
+                      )}
+                    </div>
                     <div className="space-y-6">
                       {(taskCustomFields || []).map((field: CustomField) => {
                         const currentValue = (fieldValues || []).find(v => v.fieldId === field.id && v.entityId === task.id)?.value;
