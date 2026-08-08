@@ -420,9 +420,10 @@ export async function insertExtensionLog(
 }
 
 // ── Duplicação (clone de linha de tarefa) ───────────────────────────────────
-// Distinto de insertTask: NÃO define created_by (preserva o comportamento do
-// duplicar) e aceita tags/parent explícitos. Usado tanto para a tarefa clonada
-// quanto para as subtarefas.
+// Distinto de insertTask: aceita tags/parent explícitos. Define created_by como
+// quem executou a duplicação — a cópia é uma tarefa NOVA, então o criador é o
+// duplicador (antes ficava nulo, o que aparecia como "Tarefa criada" sem autor).
+// Usado tanto para a tarefa clonada quanto para as subtarefas.
 export interface TaskCloneInput {
   title: string;
   description: string;
@@ -436,6 +437,7 @@ export interface TaskCloneInput {
   projectId: string | null;
   parentId: string | null;
   tags: string[];
+  createdBy: string;
 }
 
 export async function insertTaskClone(input: TaskCloneInput): Promise<{ task: Task } | { error: string }> {
@@ -455,6 +457,7 @@ export async function insertTaskClone(input: TaskCloneInput): Promise<{ task: Ta
       parent_id: input.parentId,
       extension_count: 0,
       tags: input.tags,
+      created_by: input.createdBy,
     })
     .select()
     .single();
