@@ -30,6 +30,7 @@ import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
 import { useDashboard } from './hooks/useDashboard';
+import { useTaskCountIndex } from './hooks/useTaskCountIndex';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -1458,11 +1459,10 @@ export default function App() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
-  // Índice leve (list_id + status) de TODAS as tarefas visíveis, carregado
-  // independentemente do escopo, para que os contadores por lista (badges da
-  // sidebar e progresso da SpaceOverview) sejam exatos — e não fiquem presos à
-  // janela de tarefas do escopo ativo. Ver loadTaskCountIndex.
-  const [taskCountIndex, setTaskCountIndex] = useState<{ listId: string | null; status: string }[]>([]);
+  // Contadores exatos por lista (badges da sidebar + progresso da SpaceOverview),
+  // independentes do escopo carregado. `refreshTaskCountIndex` é religado no
+  // realtime abaixo.
+  const { listTaskCounts, listProgressMap, refreshTaskCountIndex } = useTaskCountIndex(session);
 
   // Detect taskId in URL on load — abre a tarefa direto (deep link), sem
   // travar em somente-leitura: quem recebe o link já está autenticado no
@@ -1564,27 +1564,16 @@ export default function App() {
     setTasks(rows.map(taskRepo.mapRowToTaskShell));
   }, [session, activeListId, activeScope, lists, folders]);
 
-  // Carrega o índice leve (list_id + status) de TODAS as tarefas visíveis,
-  // paginando para escapar do teto de ~1000 linhas do PostgREST. Só 2 colunas,
-  // então é barato mesmo com dezenas de milhares de tarefas. Alimenta os
-  // contadores exatos por lista (independentes do escopo ativo). RLS continua
-  // restringindo ao que o usuário pode ver.
-  const loadTaskCountIndex = useCallback(async () => {
-    if (!session) return;
-    setTaskCountIndex(await taskRepo.fetchTaskCountIndex());
-  }, [session]);
-
   useEffect(() => {
     loadTasks();
-    loadTaskCountIndex();
-  }, [loadTasks, loadTaskCountIndex]);
+  }, [loadTasks]);
 
   // Mantém uma referência sempre atualizada de loadTasks para o realtime não
   // precisar recriar o canal a cada mudança de escopo.
   const loadTasksRef = useRef(loadTasks);
   useEffect(() => { loadTasksRef.current = loadTasks; }, [loadTasks]);
-  const loadTaskCountIndexRef = useRef(loadTaskCountIndex);
-  useEffect(() => { loadTaskCountIndexRef.current = loadTaskCountIndex; }, [loadTaskCountIndex]);
+  const refreshTaskCountIndexRef = useRef(refreshTaskCountIndex);
+  useEffect(() => { refreshTaskCountIndexRef.current = refreshTaskCountIndex; }, [refreshTaskCountIndex]);
 
   // ── Busca server-side de tarefas por título (bug #9 do #81) ──────────────
   // O array `tasks` é limitado à janela carregada: o PostgREST devolve no
@@ -1627,7 +1616,7 @@ export default function App() {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         loadTasksRef.current?.();
-        loadTaskCountIndexRef.current?.();
+        refreshTaskCountIndexRef.current?.();
       }, 1200);
     };
     const channel = supabase
@@ -2843,36 +2832,6 @@ export default function App() {
     }
     return result;
   }, [tasks, activeScope, lists, folders, currentUser, allowedFolderIdSet]);
-
-  // ── Badge counts: tarefas abertas por lista (ClickUp-style) ──────────────
-  // Contadores exatos por lista: derivam do índice global (taskCountIndex), que
-  // cobre TODAS as tarefas visíveis independentemente do escopo carregado —
-  // assim os badges/progresso não zeram para listas fora do escopo ativo.
-  const listTaskCounts = useMemo(() => {
-    const map = new Map<string, number>();
-    for (const t of taskCountIndex) {
-      if (!t.listId) continue;
-      const s = (t.status || '').toLowerCase();
-      const isDone = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
-      if (!isDone) {
-        map.set(t.listId, (map.get(t.listId) || 0) + 1);
-      }
-    }
-    return map;
-  }, [taskCountIndex]);
-
-  // ── Progress map: { done, total } por lista (Space Overview) ────────────
-  const listProgressMap = useMemo(() => {
-    const map = new Map<string, { done: number; total: number }>();
-    for (const t of taskCountIndex) {
-      if (!t.listId) continue;
-      const s = (t.status || '').toLowerCase();
-      const isDone = s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
-      const cur = map.get(t.listId) || { done: 0, total: 0 };
-      map.set(t.listId, { done: cur.done + (isDone ? 1 : 0), total: cur.total + 1 });
-    }
-    return map;
-  }, [taskCountIndex]);
 
   // ── Favorites (Supabase-synced, localStorage como seed inicial) ──────────
   const [favorites, setFavorites] = useState<{ type: 'list' | 'folder' | 'space'; id: string; name: string }[]>(() => {
