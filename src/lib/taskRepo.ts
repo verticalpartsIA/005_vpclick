@@ -8,8 +8,9 @@
 // visibilidade no servidor.
 //
 // Sem React: são funções puras de acesso a dados, testáveis por si só (troque
-// `supabase` por um fake no teste). As mutações (create/update/duplicate)
-// continuam no App por enquanto e migram num passo seguinte.
+// `supabase` por um fake no teste). Cobre leitura, escrita (nível-tarefa e
+// sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
+// regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
 import { Task, TaskPriority } from '../types';
 
@@ -475,4 +476,71 @@ export async function copyChecklists(
   const { data: inserted, error } = await supabase.from('task_checklists').insert(rows).select();
   if (error) return { error: error.message };
   return { items: ((inserted || []) as ChecklistRow[]).map(mapChecklist) };
+}
+
+// ── Dashboard ───────────────────────────────────────────────────────────────
+// Linha enxuta do Dashboard: só as colunas usadas (contadores, radar de saúde,
+// performance por usuário). Evita baixar `description` (texto rico) das 7000+
+// tarefas — payload gigante sem ganho visível.
+interface DashboardRow {
+  id: string; title: string; status: string; priority: string;
+  main_assignee_id: string; start_date: string | null; due_date: string | null;
+  extension_count: number | null; list_id: string | null; created_at: string;
+}
+
+// Carrega os dados do Dashboard: tarefas (projeção enxuta, paginadas) com as
+// atividades recentes já anexadas, mais a lista de listas para os rótulos.
+export async function fetchDashboardData(): Promise<{ tasks: Task[]; lists: { id: string; name: string }[] }> {
+  const rows = await fetchAllPages<DashboardRow>(
+    (from, to) => supabase
+      .from('tasks')
+      .select('id, title, status, priority, main_assignee_id, start_date, due_date, extension_count, list_id, created_at')
+      .range(from, to),
+    'fetchDashboardData',
+  );
+  if (rows.length === 0) return { tasks: [], lists: [] };
+
+  // Atividades + listas em paralelo (evita IN com milhares de IDs).
+  const [actResult, listsResult] = await Promise.all([
+    supabase
+      .from('task_activities')
+      .select('id,task_id,user_id,type,old_value,new_value,created_at')
+      .order('created_at', { ascending: false })
+      .limit(200),
+    supabase.from('lists').select('id,name'),
+  ]);
+
+  const actMap = new Map<string, ActivityRow[]>();
+  ((actResult.data || []) as ActivityRow[]).forEach((a) => {
+    if (!actMap.has(a.task_id)) actMap.set(a.task_id, []);
+    actMap.get(a.task_id)!.push(a);
+  });
+
+  const tasks = rows.map((d) => ({
+    ...mapRowToTaskShell(d as TaskRow),
+    activities: (actMap.get(d.id) || []).map(mapActivity),
+  }));
+
+  return { tasks, lists: (listsResult.data || []) as { id: string; name: string }[] };
+}
+
+// ── Ações em massa ──────────────────────────────────────────────────────────
+export async function bulkUpdateStatus(ids: string[], status: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('tasks').update({ status }).in('id', ids);
+  return { error: error ? error.message : null };
+}
+
+export async function bulkUpdatePriority(ids: string[], priority: TaskPriority): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('tasks').update({ priority }).in('id', ids);
+  return { error: error ? error.message : null };
+}
+
+export async function bulkMove(ids: string[], listId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('tasks').update({ list_id: listId }).in('id', ids);
+  return { error: error ? error.message : null };
+}
+
+export async function bulkDelete(ids: string[]): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('tasks').delete().in('id', ids).select();
+  return { error: error ? error.message : null };
 }

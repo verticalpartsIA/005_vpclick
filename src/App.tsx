@@ -1656,70 +1656,10 @@ export default function App() {
     if (!session) return;
     setIsDashboardLoading(true);
     try {
-      // Paginação manual: Supabase limita 1000 linhas por request por padrão
-      let allData: any[] = [];
-      let from = 0;
-      const pageSize = 1000;
-      while (true) {
-        const { data: page, error: pageErr } = await supabase
-          .from('tasks')
-          // Só as colunas que o Dashboard realmente usa (contadores, radar de
-          // saúde, performance por usuário). `select('*')` baixava `description`
-          // (texto rico, o maior peso por linha) e outros campos não exibidos
-          // aqui pras 7000+ tarefas do workspace inteiro — payload gigante e
-          // caminho crítico de ~16s no Lighthouse, sem nenhum ganho visível.
-          .select('id, title, status, priority, main_assignee_id, start_date, due_date, extension_count, list_id, created_at')
-          .range(from, from + pageSize - 1);
-        if (pageErr || !page || page.length === 0) break;
-        allData = [...allData, ...page];
-        if (page.length < pageSize) break;
-        from += pageSize;
-      }
-      const data = allData;
-      if (data.length > 0) {
-        // Atividades + listas em paralelo (evita IN com milhares de IDs)
-        const [actResult, listsResult] = await Promise.all([
-          supabase
-            .from('task_activities')
-            .select('id,task_id,user_id,type,old_value,new_value,created_at')
-            .order('created_at', { ascending: false })
-            .limit(200),
-          supabase.from('lists').select('id,name'),
-        ]);
-        const actData = actResult.data;
-        if (listsResult.data) setDashboardLists(listsResult.data);
-
-        const actMap = new Map<string, any[]>();
-        (actData || []).forEach((a: any) => {
-          if (!actMap.has(a.task_id)) actMap.set(a.task_id, []);
-          actMap.get(a.task_id)!.push(a);
-        });
-
-        setDashboardTasks(data.map((d: any) => ({
-          id: d.id,
-          title: d.title,
-          description: d.description || '',
-          status: d.status as string,
-          priority: d.priority as TaskPriority,
-          mainAssigneeId: d.main_assignee_id,
-          secondaryAssigneeIds: d.secondary_assignee_ids || [],
-          startDate: d.start_date,
-          dueDate: d.due_date,
-          extensionCount: d.extension_count || 0,
-          extensionHistory: [],
-          checklists: [],
-          comments: [],
-          attachments: [],
-          activities: (actMap.get(d.id) || []).map((a: any) => ({
-            id: a.id, taskId: a.task_id, userId: a.user_id,
-            type: a.type, oldValue: a.old_value, newValue: a.new_value, createdAt: a.created_at
-          })),
-          listId: d.list_id,
-          projectId: d.project_id,
-          parentId: d.parent_id,
-          createdAt: d.created_at,
-          tags: d.tags || []
-        })));
+      const { tasks: dashTasks, lists: dashLists } = await taskRepo.fetchDashboardData();
+      if (dashTasks.length > 0) {
+        setDashboardTasks(dashTasks);
+        setDashboardLists(dashLists);
       }
     } catch (err) {
       console.error('Erro ao carregar tarefas para Dashboard:', err);
@@ -1800,22 +1740,22 @@ export default function App() {
       if (targetIds.length === 0) return;
     }
 
-    const { error } = await supabase.from('tasks').update({ status }).in('id', targetIds);
+    const { error } = await taskRepo.bulkUpdateStatus(targetIds, status);
     if (!error) {
       setTasks(prev => prev.map(t => targetIds.includes(t.id) ? { ...t, status } : t));
       toast.success(`${targetIds.length} tarefa(s) atualizadas para "${status}"`);
     } else {
-      toast.error('Erro ao alterar status: ' + error.message);
+      toast.error('Erro ao alterar status: ' + error);
     }
   };
 
   const handleBulkPriorityChange = async (ids: string[], priority: TaskPriority) => {
-    const { error } = await supabase.from('tasks').update({ priority }).in('id', ids);
+    const { error } = await taskRepo.bulkUpdatePriority(ids, priority);
     if (!error) {
       setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, priority } : t));
       toast.success(`${ids.length} tarefa(s) com prioridade alterada para "${priority}"`);
     } else {
-      toast.error('Erro ao alterar prioridade: ' + error.message);
+      toast.error('Erro ao alterar prioridade: ' + error);
     }
   };
 
@@ -1823,24 +1763,24 @@ export default function App() {
     setConfirmModal({
       message: `Excluir ${ids.length} tarefa(s) permanentemente?`,
       onConfirm: async () => {
-        const { error } = await supabase.from('tasks').delete().in('id', ids).select();
+        const { error } = await taskRepo.bulkDelete(ids);
         if (!error) {
           setTasks(prev => prev.filter(t => !ids.includes(t.id)));
           toast.success(`${ids.length} tarefa(s) removidas.`);
         } else {
-          toast.error('Erro ao deletar tarefas: ' + error.message);
+          toast.error('Erro ao deletar tarefas: ' + error);
         }
       }
     });
   };
 
   const handleBulkMove = async (ids: string[], listId: string) => {
-    const { error } = await supabase.from('tasks').update({ list_id: listId }).in('id', ids);
+    const { error } = await taskRepo.bulkMove(ids, listId);
     if (!error) {
       setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, listId } : t));
       toast.success(`${ids.length} tarefa(s) movidas.`);
     } else {
-      toast.error('Erro ao mover tarefas: ' + error.message);
+      toast.error('Erro ao mover tarefas: ' + error);
     }
   };
 
