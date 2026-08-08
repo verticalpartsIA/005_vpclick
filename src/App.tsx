@@ -8632,7 +8632,7 @@ function TaskDetailModal(props: any) {
                           className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
                           title="Criar, adicionar, mostrar/ocultar e reordenar campos desta lista"
                         >
-                          <Icons.Settings2 className="w-3.5 h-3.5" />
+                          <Icons.Settings className="w-3.5 h-3.5" />
                           Gerenciar campos
                         </button>
                       )}
