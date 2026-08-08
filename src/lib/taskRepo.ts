@@ -227,3 +227,78 @@ export async function fetchTaskDetails(taskId: string): Promise<Partial<Task>> {
     watcherIds: ((watchRes.data || []) as WatcherRow[]).map((w) => w.user_id),
   } as Partial<Task>;
 }
+
+// ── Escrita (mutações de nível-tarefa) ──────────────────────────────────────
+// Regras de negócio (status padrão, validações, automações, estado otimista)
+// continuam no App; aqui vive só o acesso ao banco + mapeamento. As funções
+// devolvem um resultado em domínio (Task ou ok/erro), sem expor o formato de
+// erro do PostgREST ao chamador.
+
+export interface NewTaskInput {
+  title: string;
+  description?: string;
+  status: string;
+  priority: TaskPriority;
+  mainAssigneeId: string;
+  secondaryAssigneeIds?: string[];
+  startDate: string;
+  dueDate: string;
+  listId: string | null;
+  projectId?: string | null;
+  parentId?: string | null;
+  createdBy: string;
+}
+
+// Insere uma tarefa e devolve o Task recém-criado (sub-entidades vazias).
+export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | { error: string }> {
+  const { data, error } = await supabase
+    .from('tasks')
+    .insert({
+      title: input.title,
+      description: input.description ?? '',
+      status: input.status,
+      priority: input.priority,
+      main_assignee_id: input.mainAssigneeId,
+      secondary_assignee_ids: input.secondaryAssigneeIds ?? [],
+      start_date: input.startDate,
+      due_date: input.dueDate,
+      list_id: input.listId,
+      project_id: input.projectId ?? null,
+      parent_id: input.parentId ?? null,
+      created_by: input.createdBy,
+    })
+    .select()
+    .single();
+  if (error || !data) return { error: error?.message ?? 'Falha ao criar tarefa.' };
+  return { task: mapRowToTaskShell(data as TaskRow) };
+}
+
+// Atualiza os campos de nível-tarefa (não mexe em sub-entidades).
+export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase
+    .from('tasks')
+    .update({
+      title: task.title,
+      description: task.description,
+      status: task.status,
+      priority: task.priority,
+      main_assignee_id: task.mainAssigneeId,
+      secondary_assignee_ids: task.secondaryAssigneeIds,
+      start_date: task.startDate,
+      due_date: task.dueDate,
+      list_id: task.listId,
+      project_id: task.projectId,
+      parent_id: task.parentId ?? null,
+      extension_count: task.extensionCount,
+    })
+    .eq('id', task.id);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+// Exclui uma tarefa por id.
+export async function deleteTask(taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('tasks').delete().eq('id', taskId).select();
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}

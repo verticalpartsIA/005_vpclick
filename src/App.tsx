@@ -1863,32 +1863,14 @@ export default function App() {
 
   const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
-      const { error } = await supabase
-        .from('tasks')
-        .update({
-          title: updatedTask.title,
-          description: updatedTask.description,
-          status: updatedTask.status,
-          priority: updatedTask.priority,
-          main_assignee_id: updatedTask.mainAssigneeId,
-          secondary_assignee_ids: updatedTask.secondaryAssigneeIds,
-          start_date: updatedTask.startDate,
-          due_date: updatedTask.dueDate,
-          list_id: updatedTask.listId,
-          project_id: updatedTask.projectId,
-          parent_id: updatedTask.parentId ?? null,
-          extension_count: updatedTask.extensionCount,
-        })
-        .eq('id', updatedTask.id);
-
-      if (!error) {
+      const res = await taskRepo.updateTaskFields(updatedTask);
+      if (res.ok) {
         setTasks(prev => prev.map(t => t.id === updatedTask.id ? { ...t, ...updatedTask } : t));
         return true;
-      } else {
-        console.error('Erro ao atualizar tarefa:', error);
-        toast.error('Erro ao salvar tarefa: ' + error.message);
-        return false;
       }
+      console.error('Erro ao atualizar tarefa:', res.message);
+      toast.error('Erro ao salvar tarefa: ' + res.message);
+      return false;
     } catch (err) {
       console.error('Erro inesperado ao atualizar tarefa:', err);
       toast.error('Erro inesperado ao salvar tarefa.');
@@ -1993,12 +1975,12 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta tarefa permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabase.from('tasks').delete().eq('id', taskId).select();
-        if (!error) {
+        const res = await taskRepo.deleteTask(taskId);
+        if (res.ok) {
           setTasks(prev => prev.filter(t => t.id !== taskId));
           if (selectedTaskId === taskId) setSelectedTaskId(null);
           toast.success('Tarefa excluída.');
-        } else { toast.error('Erro ao excluir tarefa: ' + error.message); }
+        } else { toast.error('Erro ao excluir tarefa: ' + res.message); }
       }
     });
   };
@@ -2877,58 +2859,32 @@ export default function App() {
         return;
       }
 
-      const { data, error } = await supabase
-        .from('tasks')
-        .insert({
-          title: newTaskPartial.title || 'Nova Tarefa',
-          description: newTaskPartial.description || '',
-          status: newTaskPartial.status || defaultStatus,
-          priority: newTaskPartial.priority || TaskPriority.MEDIA,
-          main_assignee_id: newTaskPartial.mainAssigneeId || currentUser.id,
-          secondary_assignee_ids: [],
-          // `toISOString()` converte para UTC: à noite no Brasil (UTC-3) já
-          // é o dia seguinte em UTC, o que fazia tarefas criadas de noite
-          // nascerem com data de início/prazo erradas. Usamos data local.
-          start_date: formatLocalDate(new Date()),
-          due_date: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
-          list_id: newTaskPartial.listId,
-          project_id: newTaskPartial.projectId || null,
-          parent_id: newTaskPartial.parentId || null,
-          created_by: currentUser.id
-        })
-        .select()
-        .single();
+      // `toISOString()` converte para UTC: à noite no Brasil (UTC-3) já é o dia
+      // seguinte em UTC, o que fazia tarefas criadas de noite nascerem com data
+      // de início/prazo erradas. Usamos data local.
+      const res = await taskRepo.insertTask({
+        title: newTaskPartial.title || 'Nova Tarefa',
+        description: newTaskPartial.description || '',
+        status: newTaskPartial.status || defaultStatus,
+        priority: newTaskPartial.priority || TaskPriority.MEDIA,
+        mainAssigneeId: newTaskPartial.mainAssigneeId || currentUser.id,
+        secondaryAssigneeIds: [],
+        startDate: formatLocalDate(new Date()),
+        dueDate: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+        listId: newTaskPartial.listId,
+        projectId: newTaskPartial.projectId || null,
+        parentId: newTaskPartial.parentId || null,
+        createdBy: currentUser.id,
+      });
 
-      if (data && !error) {
-        const newTask: Task = {
-          id: data.id,
-          title: data.title,
-          description: data.description || '',
-          status: data.status,
-          priority: data.priority as TaskPriority,
-          mainAssigneeId: data.main_assignee_id,
-          secondaryAssigneeIds: data.secondary_assignee_ids || [],
-          startDate: data.start_date,
-          dueDate: data.due_date,
-          extensionCount: data.extension_count || 0,
-          extensionHistory: [],
-          checklists: [],
-          comments: [],
-          attachments: [],
-          activities: [],
-          listId: data.list_id,
-          projectId: data.project_id,
-          parentId: data.parent_id,
-          createdAt: data.created_at,
-          createdBy: data.created_by || undefined
-        };
-        setTasks(prev => [newTask, ...prev]);
+      if ('task' in res) {
+        setTasks(prev => [res.task, ...prev]);
         setIsTaskModalOpen(false);
         setPrefilledTaskData(null);
         toast.success('Tarefa criada com sucesso!');
       } else {
-        console.error('Erro ao criar tarefa:', error);
-        toast.error('Erro ao criar tarefa: ' + error?.message);
+        console.error('Erro ao criar tarefa:', res.error);
+        toast.error('Erro ao criar tarefa: ' + res.error);
       }
     } catch (err) {
       console.error('Erro inesperado ao criar tarefa:', err);
@@ -2947,51 +2903,24 @@ export default function App() {
     const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
     const defaultStatus = group && group.options.length > 0 ? group.options[0].label : 'A fazer';
 
-    const { data, error } = await supabase
-      .from('tasks')
-      .insert({
-        title,
-        status: defaultStatus,
-        priority: TaskPriority.MEDIA,
-        main_assignee_id: currentUser.id,
-        secondary_assignee_ids: [],
-        start_date: formatLocalDate(new Date()),
-        due_date: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
-        list_id: listId,
-        created_by: currentUser.id,
-      })
-      .select()
-      .single();
+    const res = await taskRepo.insertTask({
+      title,
+      status: defaultStatus,
+      priority: TaskPriority.MEDIA,
+      mainAssigneeId: currentUser.id,
+      secondaryAssigneeIds: [],
+      startDate: formatLocalDate(new Date()),
+      dueDate: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+      listId,
+      createdBy: currentUser.id,
+    });
 
-    if (error || !data) {
-      toast.error('Erro ao criar tarefa: ' + error?.message);
+    if ('error' in res) {
+      toast.error('Erro ao criar tarefa: ' + res.error);
       return null;
     }
-
-    const newTask: Task = {
-      id: data.id,
-      title: data.title,
-      description: data.description || '',
-      status: data.status,
-      priority: data.priority as TaskPriority,
-      mainAssigneeId: data.main_assignee_id,
-      secondaryAssigneeIds: data.secondary_assignee_ids || [],
-      startDate: data.start_date,
-      dueDate: data.due_date,
-      extensionCount: data.extension_count || 0,
-      extensionHistory: [],
-      checklists: [],
-      comments: [],
-      attachments: [],
-      activities: [],
-      listId: data.list_id,
-      projectId: data.project_id,
-      parentId: data.parent_id,
-      createdAt: data.created_at,
-      createdBy: data.created_by || undefined,
-    };
-    setTasks(prev => [newTask, ...prev]);
-    return newTask;
+    setTasks(prev => [res.task, ...prev]);
+    return res.task;
   }, [lists, statusGroups, currentUser]);
 
   const createTaskFromMeetingActionItem = useCallback(async (item: { id: string; text: string }, listId: string): Promise<string | null> => {
