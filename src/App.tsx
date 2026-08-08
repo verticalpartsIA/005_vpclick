@@ -31,6 +31,7 @@ import * as taskRepo from './lib/taskRepo';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
 import { useDashboard } from './hooks/useDashboard';
 import { useTaskCountIndex } from './hooks/useTaskCountIndex';
+import { useUsers } from './hooks/useUsers';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -1177,8 +1178,17 @@ export default function App() {
   const [isChangePasswordModalOpen, setIsChangePasswordModalOpen] = useState(false);
 
   // Admin - carregado do Supabase
-  const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [userAccess, setUserAccess] = useState<Record<string, { spaceIds: string[]; folderIds: string[] }>>({});
+  // Diretório de usuários do workspace + operações de admin (ver useUsers).
+  const {
+    adminUsers,
+    handleAdminUpdateRole,
+    handleAdminUpdateAccess,
+    handleAdminDeleteUser,
+    handleAdminUpdateUserAvatar,
+    handleAdminUpdatePassword,
+    handleAdminCreateUser,
+  } = useUsers({ session, currentUser, setCurrentUser, setUserAccess });
 
   // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
   const { dashboardTasks, dashboardLists, isDashboardLoading } = useDashboard(session, activeView);
@@ -1357,41 +1367,11 @@ export default function App() {
     }
   }, [session]);
 
-  const loadAllUsers = useCallback(async () => {
-    const { data } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('is_active', true);           // exclui usuários inativados
-    if (data && data.length > 0) {
-      const users: User[] = data
-        .filter((d: any) => !d.email?.includes('@vpclick.test')) // exclui contas CI/teste
-        .map((d: any) => ({
-          id: d.id,
-          name: d.name,
-          email: d.email,
-          avatar: d.avatar || `https://picsum.photos/seed/${d.id}/100`,
-          role: d.role as UserRole,
-          theme: d.theme,
-        }));
-
-      // Ensure the logged-in user is always in the list even if they have no profile
-      if (currentUser.id !== 'loading' && !users.some(u => u.id === currentUser.id)) {
-        users.push(currentUser);
-      }
-
-      setAdminUsers(users);
-      // User Access agora é carregado no loadInitialData
-    } else {
-      setAdminUsers([currentUser]);
-    }
-  }, [currentUser]);
-
   useEffect(() => {
     if (session) {
-      loadAllUsers();
       loadInitialData();
     }
-  }, [session, loadAllUsers, loadInitialData]);
+  }, [session, loadInitialData]);
 
   // Realtime: atualiza userAccess + recarrega spaces/folders quando admin alterar permissões
   useEffect(() => {
@@ -1442,20 +1422,6 @@ export default function App() {
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [session?.user?.id]);
-
-  // Realtime: mantém adminUsers (usado no autocomplete de menção "@") atualizado
-  // quando um perfil é criado/ativado após a sessão já estar aberta — sem isso,
-  // usuários provisionados depois do login só apareciam nas menções após reload.
-  useEffect(() => {
-    if (!session) return;
-    const channel = supabase
-      .channel('profiles-mentions')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => {
-        loadAllUsers();
-      })
-      .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [session, loadAllUsers]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
@@ -2050,159 +2016,6 @@ export default function App() {
   };
 
   // --- Admin Persistence Handlers ---
-  const handleAdminUpdateRole = async (userId: string, role: UserRole) => {
-    const { error } = await supabase.from('profiles').update({ role }).eq('id', userId);
-    if (!error) {
-      setAdminUsers(prev => prev.map(u => u.id === userId ? { ...u, role } : u));
-    } else {
-      console.error('Erro ao atualizar papel do usuário:', error);
-    }
-  };
-
-  const handleAdminUpdateAccess = async (userId: string, spaceIds: string[], folderIds: string[]) => {
-    // Insere ou atualiza o acesso do usuário usando o padrão OnConflict
-    const saveAccess = () => supabase
-      .from('user_access')
-      .upsert({
-        user_id: userId,
-        space_ids: spaceIds,
-        folder_ids: folderIds,
-        updated_at: new Date().toISOString()
-      }, { onConflict: 'user_id' });
-
-    let { error } = await saveAccess();
-
-    // 23503 = FK violada: o usuário existe no Auth mas ainda não tem linha em
-    // profiles (criado pelo admin e nunca logou). Cria o perfil e tenta de novo.
-    if (error?.code === '23503') {
-      const user = adminUsers.find(u => u.id === userId);
-      if (user) {
-        const { error: profileError } = await supabase.from('profiles').upsert({
-          id: user.id,
-          name: user.name,
-          email: user.email,
-          avatar: user.avatar,
-          role: user.role,
-          is_active: true,
-        }, { onConflict: 'id' });
-        if (!profileError) ({ error } = await saveAccess());
-      }
-    }
-
-    if (error) {
-      console.error('Erro ao atualizar acessos:', error);
-      toast.error('Erro ao salvar acessos: ' + error.message);
-      return;
-    }
-
-    // Atualizar estado local
-    setUserAccess(prev => ({
-      ...prev,
-      [userId]: { spaceIds, folderIds }
-    }));
-    toast.success('Acessos atualizados!');
-  };
-
-  const handleAdminDeleteUser = async (userId: string) => {
-    if (window.confirm("Excluir este usuário permanentemente?")) {
-      // auth.admin.deleteUser exige a service_role key — vive na Edge Function
-      // admin-user-management, que só executa se o chamador for ADMIN.
-      const { data, error } = await supabase.functions.invoke('admin-user-management', {
-        body: { action: 'delete', userId },
-      });
-      if (!error && !data?.error) {
-        setAdminUsers(prev => prev.filter(u => u.id !== userId));
-      } else {
-        console.error('Erro ao excluir usuário:', data?.error || error);
-        toast.error('Erro ao excluir usuário: ' + (data?.error || error?.message));
-      }
-    }
-  };
-
-  const handleAdminUpdateUserAvatar = async (userId: string, avatarUrl: string) => {
-    const { data, error } = await supabase.from('profiles').update({ avatar: avatarUrl }).eq('id', userId).select();
-    if (error) {
-      console.error('Erro ao atualizar avatar:', error);
-      throw error;
-    }
-    if (!data || data.length === 0) {
-      // Nenhuma linha atualizada: o perfil ainda não existe em profiles
-      // (usuário criado pelo admin e que nunca logou). Cria já com o avatar.
-      const user = adminUsers.find(u => u.id === userId);
-      if (!user) throw new Error('Usuário não encontrado.');
-      const { error: upsertError } = await supabase.from('profiles').upsert({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        avatar: avatarUrl,
-        role: user.role,
-        is_active: true,
-      }, { onConflict: 'id' });
-      if (upsertError) {
-        console.error('Erro ao criar perfil com avatar:', upsertError);
-        throw upsertError;
-      }
-    }
-    setAdminUsers(prev => prev.map(u => u.id === userId ? { ...u, avatar: avatarUrl } : u));
-    if (currentUser.id === userId) {
-      setCurrentUser(prev => ({ ...prev, avatar: avatarUrl }));
-    }
-  };
-
-  const handleAdminUpdatePassword = async (userId: string, newPassword: string) => {
-    const { data, error } = await supabase.functions.invoke('admin-user-management', {
-      body: { action: 'updatePassword', userId, newPassword },
-    });
-    if (error || data?.error) {
-      const message = data?.error || error?.message;
-      console.error('Erro ao atualizar senha:', message);
-      throw new Error(message);
-    }
-  };
-
-  const handleAdminCreateUser = async (user: Partial<User>, password?: string) => {
-    const { data, error } = await supabase.functions.invoke('admin-user-management', {
-      body: {
-        action: 'create',
-        email: user.email,
-        password: password || 'Click@2026',
-        name: user.name,
-        role: user.role,
-      },
-    });
-
-    if (data?.userId && !error && !data?.error) {
-      const newUser: User = {
-        id: data.userId,
-        name: user.name || '',
-        email: user.email || '',
-        avatar: user.avatar || `https://picsum.photos/seed/${data.userId}/100`,
-        role: (user.role as UserRole) || UserRole.COLABORADOR
-      };
-      // Garante a linha em profiles na hora (FKs de user_access/teams dependem
-      // dela) em vez de esperar o trigger do Auth ou o primeiro login.
-      const { error: profileError } = await supabase.from('profiles').upsert({
-        id: newUser.id,
-        name: newUser.name,
-        email: newUser.email,
-        avatar: newUser.avatar,
-        role: newUser.role,
-        is_active: true,
-      }, { onConflict: 'id' });
-      if (profileError) {
-        console.error('Erro ao criar perfil do novo usuário:', profileError);
-        toast.error('Usuário criado no Auth, mas houve erro ao criar o perfil: ' + profileError.message);
-      }
-      setAdminUsers(prev => [newUser, ...prev]);
-      setUserAccess(prev => ({ ...prev, [newUser.id]: { spaceIds: [], folderIds: [] } }));
-      return newUser;
-    } else {
-      const message = data?.error || error?.message || 'Erro desconhecido';
-      console.error('Erro ao criar usuário:', message);
-      throw new Error(message);
-    }
-  };
-
   const handleUpdateDoc = async (updatedDoc: Doc) => {
     const { error } = await supabase
       .from('docs')
