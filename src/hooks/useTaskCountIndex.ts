@@ -14,13 +14,23 @@ const isCountedAsDone = (status: string) => {
 // por lista derivados dele. Fica fora do escopo ativo de propósito: os badges da
 // sidebar e o progresso da SpaceOverview não zeram para listas não carregadas.
 // `refreshTaskCountIndex` é exposto para o realtime do App religar a contagem.
-export function useTaskCountIndex(session: Session | null) {
+export function useTaskCountIndex(session: Session | null, listIds: string[] | null) {
   const [taskCountIndex, setTaskCountIndex] = useState<{ listId: string | null; status: string }[]>([]);
+
+  // Chave estável por conteúdo: evita recarregar a cada render (o chamador passa
+  // lists.map(...), que muda de identidade mas não de conteúdo). `null` = sem
+  // filtro; string (possivelmente '') = filtrar por essas listas. Ordena para
+  // não depender da ordem das listas.
+  const listIdsKey = useMemo(
+    () => (listIds === null ? null : [...listIds].sort().join(',')),
+    [listIds],
+  );
 
   const refreshTaskCountIndex = useCallback(async () => {
     if (!session) return;
-    setTaskCountIndex(await taskRepo.fetchTaskCountIndex());
-  }, [session]);
+    const ids = listIdsKey === null ? null : (listIdsKey ? listIdsKey.split(',') : []);
+    setTaskCountIndex(await taskRepo.fetchTaskCountIndex(ids));
+  }, [session, listIdsKey]);
 
   useEffect(() => { refreshTaskCountIndex(); }, [refreshTaskCountIndex]);
 

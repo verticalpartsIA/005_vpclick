@@ -1434,7 +1434,10 @@ export default function App() {
   // Contadores exatos por lista (badges da sidebar + progresso da SpaceOverview),
   // independentes do escopo carregado. `refreshTaskCountIndex` é religado no
   // realtime abaixo.
-  const { listTaskCounts, listProgressMap, refreshTaskCountIndex } = useTaskCountIndex(session);
+  // Filtra os contadores pelas listas acessíveis (RLS restringe `lists`): usa o
+  // índice em vez de varrer todas as ~7k tarefas avaliando a RLS por linha.
+  const countListIds = useMemo(() => lists.map((l) => l.id), [lists]);
+  const { listTaskCounts, listProgressMap, refreshTaskCountIndex } = useTaskCountIndex(session, countListIds);
 
   // Detect taskId in URL on load — abre a tarefa direto (deep link), sem
   // travar em somente-leitura: quem recebe o link já está autenticado no

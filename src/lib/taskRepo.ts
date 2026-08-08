@@ -142,9 +142,18 @@ export function fetchTaskRowsByListIds(listIds: string[] | null): Promise<TaskRo
 
 // Índice leve (list_id + status) de TODAS as tarefas visíveis — alimenta os
 // contadores exatos por lista, independentes do escopo carregado.
-export async function fetchTaskCountIndex(): Promise<{ listId: string | null; status: string }[]> {
+// `listIds` (as listas acessíveis) filtra a busca por list_id: usa o índice
+// idx_tasks_list_id em vez de varrer todas as ~7k tarefas avaliando a RLS
+// can_access_task por linha (que sem filtro custa ~1,7s p/ não-admins). Como os
+// badges só existem para listas acessíveis, filtrar por elas é equivalente e
+// muito mais rápido. `null` = sem filtro (a RLS restringe; caminho antigo).
+export async function fetchTaskCountIndex(listIds: string[] | null = null): Promise<{ listId: string | null; status: string }[]> {
+  if (listIds && listIds.length === 0) return [];
   const rows = await fetchAllPages<CountRow>(
-    (from, to) => supabase.from('tasks').select('list_id, status').range(from, to),
+    (from, to) => {
+      const q = supabase.from('tasks').select('list_id, status');
+      return (listIds ? q.in('list_id', listIds) : q).range(from, to);
+    },
     'fetchTaskCountIndex',
   );
   return rows.map((r) => ({ listId: r.list_id, status: r.status }));
