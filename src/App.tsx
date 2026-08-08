@@ -7862,15 +7862,21 @@ function TaskDetailModal(props: any) {
       ...(task.extensionHistory || []).map((e: any) => ({ ...e, unifiedType: 'EXTENSION', date: e.timestamp }))
     ];
     if (task.createdAt) {
+      // Autoria real: resolve o nome pelo created_by da tarefa. Tarefas antigas/
+      // importadas têm created_by nulo — nesse caso um texto neutro, nunca um
+      // nome inventado (antes era hardcoded "Logística criou esta tarefa").
+      const creator = task.createdBy
+        ? (users || []).find((u: any) => u.id === task.createdBy)?.name
+        : null;
       all.push({
         id: 'creation',
         unifiedType: 'CREATION',
         date: task.createdAt,
-        text: 'Logística criou esta tarefa' // Default text
+        text: creator ? `${creator} criou esta tarefa` : 'Tarefa criada'
       });
     }
     return all.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-  }, [task.comments, task.activities, task.extensionHistory, task.createdAt]);
+  }, [task.comments, task.activities, task.extensionHistory, task.createdAt, task.createdBy, users]);
 
   // Texto pesquisável de cada item da timeline (usado pela lupa de busca)
   const getTimelineItemText = (item: any): string => {
