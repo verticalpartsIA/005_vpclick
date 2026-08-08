@@ -79,6 +79,20 @@ export interface CustomFieldValue {
   value: any;
 }
 
+// Opções do fluxo de duplicação de tarefa (o que copiar da origem).
+export interface DuplicateTaskOptions {
+  title: string;
+  listId: string;
+  includeDescription: boolean;
+  includeAssignees: boolean;
+  includeDates: boolean;
+  includePriority: boolean;
+  includeSubtasks: boolean;
+  includeChecklists: boolean;
+  includeTags: boolean;
+  includeCustomFields: boolean;
+}
+
 export interface User {
   id: string;
   name: string;

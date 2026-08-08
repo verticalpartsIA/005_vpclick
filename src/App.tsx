@@ -3,7 +3,7 @@ import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIco
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
-  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification
+  CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification, DuplicateTaskOptions
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -28,7 +28,7 @@ import { RemindersView } from './components/views/RemindersView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
 import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
-import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason } from './lib/taskService';
+import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -95,19 +95,6 @@ interface NavigationScope {
   type: ScopeType;
   id: string | null;
   name: string;
-}
-
-interface DuplicateTaskOptions {
-  title: string;
-  listId: string;
-  includeDescription: boolean;
-  includeAssignees: boolean;
-  includeDates: boolean;
-  includePriority: boolean;
-  includeSubtasks: boolean;
-  includeChecklists: boolean;
-  includeTags: boolean;
-  includeCustomFields: boolean;
 }
 
 type DuplicateTaskBooleanOption = Exclude<keyof DuplicateTaskOptions, 'title' | 'listId'>;
@@ -2769,8 +2756,7 @@ export default function App() {
 
   const handleDuplicateTask = async (sourceTask: Task, options: DuplicateTaskOptions) => {
     if (!sourceTask || isDuplicatingTask) return;
-    const title = options.title.trim();
-    if (!title) {
+    if (!options.title.trim()) {
       toast.error('Informe um nome para a nova tarefa.');
       return;
     }
@@ -2781,112 +2767,20 @@ export default function App() {
 
     setIsDuplicatingTask(true);
     try {
-      const cloneRes = await taskRepo.insertTaskClone({
-        title,
-        description: options.includeDescription ? (sourceTask.description || '') : '',
-        status: sourceTask.status,
-        priority: options.includePriority ? sourceTask.priority : TaskPriority.MEDIA,
-        mainAssigneeId: options.includeAssignees ? sourceTask.mainAssigneeId : currentUser.id,
-        secondaryAssigneeIds: options.includeAssignees ? (sourceTask.secondaryAssigneeIds || []) : [],
-        startDate: options.includeDates ? (sourceTask.startDate || null) : null,
-        dueDate: options.includeDates ? (sourceTask.dueDate || null) : null,
-        listId: options.listId,
-        projectId: sourceTask.projectId || null,
-        parentId: null,
-        tags: options.includeTags ? (sourceTask.tags || []) : [],
+      const res = await duplicateTask(sourceTask, options, {
+        currentUserId: currentUser.id,
+        subtasks: tasks.filter(t => t.parentId === sourceTask.id),
+        fieldValuesByEntity: (id) => fieldValues.filter(v => v.entityId === id),
       });
-      if ('error' in cloneRes) throw new Error(cloneRes.error);
-      const duplicatedTask = cloneRes.task;
+      if ('error' in res) throw new Error(res.error);
 
-      const stateTasksToAdd: Task[] = [duplicatedTask];
-      const fieldValuesToAdd: CustomFieldValue[] = [];
-
-      if (options.includeChecklists) {
-        // Copia os checklists do DB (não da memória): com o lazy-load, a origem
-        // pode não ter os checklists carregados se não foi aberta.
-        const res = await taskRepo.copyChecklists(sourceTask.id, duplicatedTask.id);
-        if ('error' in res) throw new Error(res.error);
-        duplicatedTask.checklists = res.items;
-      }
-
-      if (options.includeCustomFields) {
-        const originalValues = fieldValues.filter((value) => value.entityId === sourceTask.id);
-        if (originalValues.length > 0) {
-          const customValueRows = originalValues.map((value) => ({
-            field_id: value.fieldId,
-            entity_id: duplicatedTask.id,
-            value: value.value,
-          }));
-          const { error: customValuesError } = await supabase
-            .from('custom_field_values')
-            .insert(customValueRows);
-
-          if (customValuesError) throw customValuesError;
-          fieldValuesToAdd.push(...originalValues.map((value) => ({
-            ...value,
-            entityId: duplicatedTask.id,
-          })));
-        }
-      }
-
-      if (options.includeSubtasks) {
-        const subtasks = tasks.filter((task) => task.parentId === sourceTask.id);
-        for (const subtask of subtasks) {
-          const subRes = await taskRepo.insertTaskClone({
-            title: subtask.title,
-            description: options.includeDescription ? (subtask.description || '') : '',
-            status: subtask.status,
-            priority: options.includePriority ? subtask.priority : TaskPriority.MEDIA,
-            mainAssigneeId: options.includeAssignees ? subtask.mainAssigneeId : currentUser.id,
-            secondaryAssigneeIds: options.includeAssignees ? (subtask.secondaryAssigneeIds || []) : [],
-            startDate: options.includeDates ? (subtask.startDate || null) : null,
-            dueDate: options.includeDates ? (subtask.dueDate || null) : null,
-            listId: options.listId,
-            projectId: subtask.projectId || sourceTask.projectId || null,
-            parentId: duplicatedTask.id,
-            tags: options.includeTags ? (subtask.tags || []) : [],
-          });
-          if ('error' in subRes) throw new Error(`Não foi possível duplicar a subtarefa "${subtask.title}": ${subRes.error}`);
-          const duplicatedSubtask = subRes.task;
-
-          if (options.includeChecklists) {
-            const res = await taskRepo.copyChecklists(subtask.id, duplicatedSubtask.id);
-            if ('error' in res) throw new Error(res.error);
-            duplicatedSubtask.checklists = res.items;
-          }
-
-          if (options.includeCustomFields) {
-            const subtaskValues = fieldValues.filter((value) => value.entityId === subtask.id);
-            if (subtaskValues.length > 0) {
-              const { error: subtaskValuesError } = await supabase
-                .from('custom_field_values')
-                .insert(subtaskValues.map((value) => ({
-                  field_id: value.fieldId,
-                  entity_id: duplicatedSubtask.id,
-                  value: value.value,
-                })));
-
-              if (subtaskValuesError) throw subtaskValuesError;
-              fieldValuesToAdd.push(...subtaskValues.map((value) => ({
-                ...value,
-                entityId: duplicatedSubtask.id,
-              })));
-            }
-          }
-
-          stateTasksToAdd.push(duplicatedSubtask);
-        }
-      }
-
-      await taskRepo.insertActivity(duplicatedTask.id, currentUser.id, 'TASK_DUPLICATED', sourceTask.id, sourceTask.title);
-
-      setTasks(prev => [...stateTasksToAdd, ...prev]);
-      if (fieldValuesToAdd.length > 0) {
-        setFieldValues(prev => [...prev, ...fieldValuesToAdd]);
+      setTasks(prev => [...res.tasks, ...prev]);
+      if (res.fieldValues.length > 0) {
+        setFieldValues(prev => [...prev, ...res.fieldValues]);
       }
       setTaskToDuplicate(null);
-      setSelectedTaskId(duplicatedTask.id);
-      toast.success(`Tarefa "${duplicatedTask.title}" duplicada com sucesso.`);
+      setSelectedTaskId(res.tasks[0].id);
+      toast.success(`Tarefa "${res.tasks[0].title}" duplicada com sucesso.`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('Erro ao duplicar tarefa:', err);
