@@ -740,40 +740,16 @@ export default function App() {
 
   const saveTaskAttachment = useCallback(async (taskId: string, attachment: Partial<Attachment>) => {
     try {
-      const { data, error } = await supabase
-        .from('task_attachments')
-        .insert({
-          task_id: taskId,
-          name: attachment.name,
-          url: attachment.url,
-          type: attachment.type,
-          size: attachment.size
-        })
-        .select()
-        .single();
-
-      if (error || !data) {
+      const { attachment: created, error } = await taskRepo.insertAttachment(taskId, attachment);
+      if (!created) {
         console.error('Erro ao salvar anexo:', error);
-        toast.error(`Falha ao salvar o anexo${error ? `: ${error.message}` : '.'}`);
+        toast.error(`Falha ao salvar o anexo${error ? `: ${error}` : '.'}`);
         return false;
       }
 
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            attachments: [...(t.attachments || []), {
-              id: data.id,
-              name: data.name,
-              url: data.url,
-              type: data.type,
-              size: data.size,
-              uploadedAt: data.uploaded_at
-            }]
-          };
-        }
-        return t;
-      }));
+      setTasks(prev => prev.map(t => t.id === taskId
+        ? { ...t, attachments: [...(t.attachments || []), created] }
+        : t));
       return true;
     } catch (err: any) {
       console.error('Erro ao salvar anexo:', err);
@@ -783,40 +759,16 @@ export default function App() {
   }, []);
 
   const removeTaskAttachment = useCallback(async (taskId: string, attachmentId: string) => {
-    const { data, error } = await supabase
-      .from('task_attachments')
-      .delete()
-      .eq('id', attachmentId)
-      .select();
-
+    const { error } = await taskRepo.deleteAttachment(attachmentId);
     if (error) {
       console.error('Erro ao excluir anexo:', error);
-      toast.error(`Falha ao excluir o anexo: ${error.message}`);
-      return;
-    }
-    if (!data || data.length === 0) {
-      toast.error('Falha ao excluir o anexo: registro não encontrado.');
+      toast.error(`Falha ao excluir o anexo: ${error}`);
       return;
     }
 
-    // Remove o arquivo físico do Storage (a URL pública contém bucket + caminho)
-    const url: string = (data[0] as any)?.url || '';
-    const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
-    if (match) {
-      const storagePath = decodeURIComponent(match[2]);
-      const { error: storageError } = await supabase.storage.from(match[1]).remove([storagePath]);
-      if (storageError) console.error('Erro ao remover arquivo do Storage:', storageError);
-    }
-
-    setTasks(prev => prev.map(t => {
-      if (t.id === taskId) {
-        return {
-          ...t,
-          attachments: (t.attachments || []).filter(a => a.id !== attachmentId)
-        };
-      }
-      return t;
-    }));
+    setTasks(prev => prev.map(t => t.id === taskId
+      ? { ...t, attachments: (t.attachments || []).filter(a => a.id !== attachmentId) }
+      : t));
     toast.success('Anexo excluído.');
   }, []);
 
@@ -826,37 +778,15 @@ export default function App() {
   const saveTaskComment = useCallback(async (taskId: string, text: string, parentCommentId?: string): Promise<string | false> => {
     if (!currentUser) return false;
     try {
-      const { data, error } = await supabase
-        .from('task_comments')
-        .insert({
-          task_id: taskId,
-          user_id: currentUser.id,
-          text: text,
-          parent_comment_id: parentCommentId || null,
-        })
-        .select()
-        .single();
-
-      if (data && !error) {
-        setTasks(prev => prev.map(t => {
-          if (t.id === taskId) {
-            return {
-              ...t,
-              comments: [...(t.comments || []), {
-                id: data.id,
-                userId: data.user_id,
-                text: data.text,
-                timestamp: data.created_at,
-                parentCommentId: data.parent_comment_id || undefined,
-              }]
-            };
-          }
-          return t;
-        }));
-        return data.id;
+      const { comment, error } = await taskRepo.insertComment(taskId, currentUser.id, text, parentCommentId);
+      if (comment) {
+        setTasks(prev => prev.map(t => t.id === taskId
+          ? { ...t, comments: [...(t.comments || []), comment] }
+          : t));
+        return comment.id;
       }
       console.error('Erro ao salvar comentário:', error);
-      toast.error('Erro ao salvar comentário: ' + (error?.message || 'tente novamente.'));
+      toast.error('Erro ao salvar comentário: ' + (error || 'tente novamente.'));
       return false;
     } catch (err) {
       console.error('Erro inesperado ao salvar comentário:', err);
@@ -867,10 +797,7 @@ export default function App() {
 
   const editTaskComment = useCallback(async (taskId: string, commentId: string, newText: string) => {
     const now = new Date().toISOString();
-    const { error } = await supabase
-      .from('task_comments')
-      .update({ text: newText, updated_at: now })
-      .eq('id', commentId);
+    const { error } = await taskRepo.updateCommentText(commentId, newText, now);
     if (error) { toast.error('Erro ao editar comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -882,10 +809,7 @@ export default function App() {
     // Exclui o comentário e, junto, as respostas da thread (soft delete não
     // aciona o ON DELETE CASCADE do banco — sem isso as respostas ficariam
     // órfãs: continuariam na tabela mas sem comentário raiz pra aparecer).
-    const { error } = await supabase
-      .from('task_comments')
-      .update({ deleted_at: new Date().toISOString() })
-      .or(`id.eq.${commentId},parent_comment_id.eq.${commentId}`);
+    const { error } = await taskRepo.softDeleteCommentThread(commentId, new Date().toISOString());
     if (error) { toast.error('Erro ao excluir comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -900,15 +824,7 @@ export default function App() {
   // o item volta a valer como pendente para o novo estado.
   const assignTaskComment = useCallback(async (taskId: string, commentId: string, userId: string | null) => {
     if (!currentUser) return;
-    const { error } = await supabase
-      .from('task_comments')
-      .update({
-        assigned_to: userId,
-        assigned_by: userId ? currentUser.id : null,
-        resolved_at: null,
-        resolved_by: null,
-      })
-      .eq('id', commentId);
+    const { error } = await taskRepo.assignComment(commentId, userId, userId ? currentUser.id : null);
     if (error) { toast.error('Erro ao atribuir comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -927,10 +843,7 @@ export default function App() {
   const resolveTaskComment = useCallback(async (taskId: string, commentId: string) => {
     if (!currentUser) return;
     const now = new Date().toISOString();
-    const { error } = await supabase
-      .from('task_comments')
-      .update({ resolved_at: now, resolved_by: currentUser.id })
-      .eq('id', commentId);
+    const { error } = await taskRepo.resolveComment(commentId, currentUser.id, now);
     if (error) { toast.error('Erro ao resolver comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -942,11 +855,11 @@ export default function App() {
   const toggleWatcher = useCallback(async (taskId: string, isWatching: boolean) => {
     if (!currentUser || currentUser.id === 'loading') return;
     if (isWatching) {
-      const { error } = await supabase.from('task_watchers').delete().eq('task_id', taskId).eq('user_id', currentUser.id);
+      const { error } = await taskRepo.removeWatcher(taskId, currentUser.id);
       if (error) { toast.error('Erro ao parar de observar.'); return; }
       setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: (t.watcherIds || []).filter(id => id !== currentUser.id) }));
     } else {
-      const { error } = await supabase.from('task_watchers').insert({ task_id: taskId, user_id: currentUser.id });
+      const { error } = await taskRepo.addWatcher(taskId, currentUser.id);
       if (error) { toast.error('Erro ao observar tarefa.'); return; }
       setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: [...(t.watcherIds || []), currentUser.id] }));
       toast.success('Você está observando esta tarefa.');
@@ -955,59 +868,20 @@ export default function App() {
 
   const saveTaskActivity = useCallback(async (taskId: string, type: string, oldValue?: string, newValue?: string) => {
     if (!currentUser || currentUser.id === 'loading') return null;
-    const { data, error } = await supabase
-      .from('task_activities')
-      .insert({
-        task_id: taskId,
-        user_id: currentUser.id,
-        type: type,
-        old_value: oldValue,
-        new_value: newValue
-      })
-      .select()
-      .single();
-
-    if (data && !error) {
-      const activity: TaskActivity = {
-        id: data.id,
-        taskId: data.task_id,
-        userId: data.user_id,
-        type: data.type,
-        oldValue: data.old_value,
-        newValue: data.new_value,
-        createdAt: data.created_at
-      };
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            activities: [activity, ...(t.activities || [])]
-          };
-        }
-        return t;
-      }));
+    const { activity, error } = await taskRepo.insertActivity(taskId, currentUser.id, type, oldValue, newValue);
+    if (activity) {
+      setTasks(prev => prev.map(t => t.id === taskId
+        ? { ...t, activities: [activity, ...(t.activities || [])] }
+        : t));
       return activity;
     }
+    if (error) console.error('Erro ao registrar atividade:', error);
     return null;
   }, [currentUser]);
 
   const saveExtensionLog = useCallback(async (taskId: string, log: ExtensionLog) => {
     if (!currentUser) return;
-    const { data, error } = await supabase
-      .from('task_extension_logs')
-      .insert({
-        task_id: taskId,
-        old_date: log.oldDate,
-        new_date: log.newDate,
-        reason: log.reason,
-        updated_by: currentUser.id
-      })
-      .select()
-      .single();
-
-    if (data && !error) {
-      // update local state too if not already updated by caller
-    }
+    await taskRepo.insertExtensionLog(taskId, log, currentUser.id);
   }, [currentUser]);
 
   const loadUserProfile = useCallback(async (userId: string) => {
@@ -1863,32 +1737,14 @@ export default function App() {
 
   const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
-      const { error } = await supabase
-        .from('tasks')
-        .update({
-          title: updatedTask.title,
-          description: updatedTask.description,
-          status: updatedTask.status,
-          priority: updatedTask.priority,
-          main_assignee_id: updatedTask.mainAssigneeId,
-          secondary_assignee_ids: updatedTask.secondaryAssigneeIds,
-          start_date: updatedTask.startDate,
-          due_date: updatedTask.dueDate,
-          list_id: updatedTask.listId,
-          project_id: updatedTask.projectId,
-          parent_id: updatedTask.parentId ?? null,
-          extension_count: updatedTask.extensionCount,
-        })
-        .eq('id', updatedTask.id);
-
-      if (!error) {
+      const res = await taskRepo.updateTaskFields(updatedTask);
+      if (res.ok) {
         setTasks(prev => prev.map(t => t.id === updatedTask.id ? { ...t, ...updatedTask } : t));
         return true;
-      } else {
-        console.error('Erro ao atualizar tarefa:', error);
-        toast.error('Erro ao salvar tarefa: ' + error.message);
-        return false;
       }
+      console.error('Erro ao atualizar tarefa:', res.message);
+      toast.error('Erro ao salvar tarefa: ' + res.message);
+      return false;
     } catch (err) {
       console.error('Erro inesperado ao atualizar tarefa:', err);
       toast.error('Erro inesperado ao salvar tarefa.');
@@ -1993,12 +1849,12 @@ export default function App() {
     setConfirmModal({
       message: 'Excluir esta tarefa permanentemente?',
       onConfirm: async () => {
-        const { error } = await supabase.from('tasks').delete().eq('id', taskId).select();
-        if (!error) {
+        const res = await taskRepo.deleteTask(taskId);
+        if (res.ok) {
           setTasks(prev => prev.filter(t => t.id !== taskId));
           if (selectedTaskId === taskId) setSelectedTaskId(null);
           toast.success('Tarefa excluída.');
-        } else { toast.error('Erro ao excluir tarefa: ' + error.message); }
+        } else { toast.error('Erro ao excluir tarefa: ' + res.message); }
       }
     });
   };
@@ -2877,58 +2733,32 @@ export default function App() {
         return;
       }
 
-      const { data, error } = await supabase
-        .from('tasks')
-        .insert({
-          title: newTaskPartial.title || 'Nova Tarefa',
-          description: newTaskPartial.description || '',
-          status: newTaskPartial.status || defaultStatus,
-          priority: newTaskPartial.priority || TaskPriority.MEDIA,
-          main_assignee_id: newTaskPartial.mainAssigneeId || currentUser.id,
-          secondary_assignee_ids: [],
-          // `toISOString()` converte para UTC: à noite no Brasil (UTC-3) já
-          // é o dia seguinte em UTC, o que fazia tarefas criadas de noite
-          // nascerem com data de início/prazo erradas. Usamos data local.
-          start_date: formatLocalDate(new Date()),
-          due_date: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
-          list_id: newTaskPartial.listId,
-          project_id: newTaskPartial.projectId || null,
-          parent_id: newTaskPartial.parentId || null,
-          created_by: currentUser.id
-        })
-        .select()
-        .single();
+      // `toISOString()` converte para UTC: à noite no Brasil (UTC-3) já é o dia
+      // seguinte em UTC, o que fazia tarefas criadas de noite nascerem com data
+      // de início/prazo erradas. Usamos data local.
+      const res = await taskRepo.insertTask({
+        title: newTaskPartial.title || 'Nova Tarefa',
+        description: newTaskPartial.description || '',
+        status: newTaskPartial.status || defaultStatus,
+        priority: newTaskPartial.priority || TaskPriority.MEDIA,
+        mainAssigneeId: newTaskPartial.mainAssigneeId || currentUser.id,
+        secondaryAssigneeIds: [],
+        startDate: formatLocalDate(new Date()),
+        dueDate: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+        listId: newTaskPartial.listId,
+        projectId: newTaskPartial.projectId || null,
+        parentId: newTaskPartial.parentId || null,
+        createdBy: currentUser.id,
+      });
 
-      if (data && !error) {
-        const newTask: Task = {
-          id: data.id,
-          title: data.title,
-          description: data.description || '',
-          status: data.status,
-          priority: data.priority as TaskPriority,
-          mainAssigneeId: data.main_assignee_id,
-          secondaryAssigneeIds: data.secondary_assignee_ids || [],
-          startDate: data.start_date,
-          dueDate: data.due_date,
-          extensionCount: data.extension_count || 0,
-          extensionHistory: [],
-          checklists: [],
-          comments: [],
-          attachments: [],
-          activities: [],
-          listId: data.list_id,
-          projectId: data.project_id,
-          parentId: data.parent_id,
-          createdAt: data.created_at,
-          createdBy: data.created_by || undefined
-        };
-        setTasks(prev => [newTask, ...prev]);
+      if ('task' in res) {
+        setTasks(prev => [res.task, ...prev]);
         setIsTaskModalOpen(false);
         setPrefilledTaskData(null);
         toast.success('Tarefa criada com sucesso!');
       } else {
-        console.error('Erro ao criar tarefa:', error);
-        toast.error('Erro ao criar tarefa: ' + error?.message);
+        console.error('Erro ao criar tarefa:', res.error);
+        toast.error('Erro ao criar tarefa: ' + res.error);
       }
     } catch (err) {
       console.error('Erro inesperado ao criar tarefa:', err);
@@ -2947,51 +2777,24 @@ export default function App() {
     const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
     const defaultStatus = group && group.options.length > 0 ? group.options[0].label : 'A fazer';
 
-    const { data, error } = await supabase
-      .from('tasks')
-      .insert({
-        title,
-        status: defaultStatus,
-        priority: TaskPriority.MEDIA,
-        main_assignee_id: currentUser.id,
-        secondary_assignee_ids: [],
-        start_date: formatLocalDate(new Date()),
-        due_date: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
-        list_id: listId,
-        created_by: currentUser.id,
-      })
-      .select()
-      .single();
+    const res = await taskRepo.insertTask({
+      title,
+      status: defaultStatus,
+      priority: TaskPriority.MEDIA,
+      mainAssigneeId: currentUser.id,
+      secondaryAssigneeIds: [],
+      startDate: formatLocalDate(new Date()),
+      dueDate: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+      listId,
+      createdBy: currentUser.id,
+    });
 
-    if (error || !data) {
-      toast.error('Erro ao criar tarefa: ' + error?.message);
+    if ('error' in res) {
+      toast.error('Erro ao criar tarefa: ' + res.error);
       return null;
     }
-
-    const newTask: Task = {
-      id: data.id,
-      title: data.title,
-      description: data.description || '',
-      status: data.status,
-      priority: data.priority as TaskPriority,
-      mainAssigneeId: data.main_assignee_id,
-      secondaryAssigneeIds: data.secondary_assignee_ids || [],
-      startDate: data.start_date,
-      dueDate: data.due_date,
-      extensionCount: data.extension_count || 0,
-      extensionHistory: [],
-      checklists: [],
-      comments: [],
-      attachments: [],
-      activities: [],
-      listId: data.list_id,
-      projectId: data.project_id,
-      parentId: data.parent_id,
-      createdAt: data.created_at,
-      createdBy: data.created_by || undefined,
-    };
-    setTasks(prev => [newTask, ...prev]);
-    return newTask;
+    setTasks(prev => [res.task, ...prev]);
+    return res.task;
   }, [lists, statusGroups, currentUser]);
 
   const createTaskFromMeetingActionItem = useCallback(async (item: { id: string; text: string }, listId: string): Promise<string | null> => {
@@ -3068,83 +2871,32 @@ export default function App() {
 
     setIsDuplicatingTask(true);
     try {
-      const clonePayload = {
+      const cloneRes = await taskRepo.insertTaskClone({
         title,
         description: options.includeDescription ? (sourceTask.description || '') : '',
         status: sourceTask.status,
         priority: options.includePriority ? sourceTask.priority : TaskPriority.MEDIA,
-        main_assignee_id: options.includeAssignees ? sourceTask.mainAssigneeId : currentUser.id,
-        secondary_assignee_ids: options.includeAssignees ? (sourceTask.secondaryAssigneeIds || []) : [],
-        start_date: options.includeDates ? (sourceTask.startDate || null) : null,
-        due_date: options.includeDates ? (sourceTask.dueDate || null) : null,
-        list_id: options.listId,
-        project_id: sourceTask.projectId || null,
-        parent_id: null,
-        extension_count: 0,
+        mainAssigneeId: options.includeAssignees ? sourceTask.mainAssigneeId : currentUser.id,
+        secondaryAssigneeIds: options.includeAssignees ? (sourceTask.secondaryAssigneeIds || []) : [],
+        startDate: options.includeDates ? (sourceTask.startDate || null) : null,
+        dueDate: options.includeDates ? (sourceTask.dueDate || null) : null,
+        listId: options.listId,
+        projectId: sourceTask.projectId || null,
+        parentId: null,
         tags: options.includeTags ? (sourceTask.tags || []) : [],
-      };
-
-      const { data: created, error } = await supabase
-        .from('tasks')
-        .insert(clonePayload)
-        .select()
-        .single();
-
-      if (error || !created) {
-        throw error || new Error('A tarefa duplicada não foi retornada pelo banco.');
-      }
-
-      const duplicatedTask: Task = {
-        id: created.id,
-        title: created.title,
-        description: created.description || '',
-        status: created.status,
-        priority: created.priority as TaskPriority,
-        mainAssigneeId: created.main_assignee_id,
-        secondaryAssigneeIds: created.secondary_assignee_ids || [],
-        startDate: created.start_date,
-        dueDate: created.due_date,
-        extensionCount: created.extension_count || 0,
-        extensionHistory: [],
-        checklists: [],
-        comments: [],
-        attachments: [],
-        activities: [],
-        listId: created.list_id,
-        projectId: created.project_id,
-        parentId: created.parent_id,
-        createdAt: created.created_at,
-        tags: created.tags || [],
-      };
+      });
+      if ('error' in cloneRes) throw new Error(cloneRes.error);
+      const duplicatedTask = cloneRes.task;
 
       const stateTasksToAdd: Task[] = [duplicatedTask];
       const fieldValuesToAdd: CustomFieldValue[] = [];
 
       if (options.includeChecklists) {
-        // Busca os checklists do DB (não da memória): com o lazy-load, a tarefa
-        // de origem pode não ter os checklists carregados se não foi aberta.
-        const { data: srcChecklists } = await supabase
-          .from('task_checklists')
-          .select('text, completed')
-          .eq('task_id', sourceTask.id);
-        if (srcChecklists && srcChecklists.length > 0) {
-          const checklistRows = srcChecklists.map((item: any) => ({
-            task_id: duplicatedTask.id,
-            text: item.text,
-            completed: item.completed,
-          }));
-          const { data: checklistData, error: checklistError } = await supabase
-            .from('task_checklists')
-            .insert(checklistRows)
-            .select();
-
-          if (checklistError) throw checklistError;
-          duplicatedTask.checklists = (checklistData || []).map((item: any) => ({
-            id: item.id,
-            text: item.text,
-            completed: item.completed,
-          }));
-        }
+        // Copia os checklists do DB (não da memória): com o lazy-load, a origem
+        // pode não ter os checklists carregados se não foi aberta.
+        const res = await taskRepo.copyChecklists(sourceTask.id, duplicatedTask.id);
+        if ('error' in res) throw new Error(res.error);
+        duplicatedTask.checklists = res.items;
       }
 
       if (options.includeCustomFields) {
@@ -3170,77 +2922,27 @@ export default function App() {
       if (options.includeSubtasks) {
         const subtasks = tasks.filter((task) => task.parentId === sourceTask.id);
         for (const subtask of subtasks) {
-          const { data: createdSubtask, error: subtaskError } = await supabase
-            .from('tasks')
-            .insert({
-              title: subtask.title,
-              description: options.includeDescription ? (subtask.description || '') : '',
-              status: subtask.status,
-              priority: options.includePriority ? subtask.priority : TaskPriority.MEDIA,
-              main_assignee_id: options.includeAssignees ? subtask.mainAssigneeId : currentUser.id,
-              secondary_assignee_ids: options.includeAssignees ? (subtask.secondaryAssigneeIds || []) : [],
-              start_date: options.includeDates ? (subtask.startDate || null) : null,
-              due_date: options.includeDates ? (subtask.dueDate || null) : null,
-              list_id: options.listId,
-              project_id: subtask.projectId || sourceTask.projectId || null,
-              parent_id: duplicatedTask.id,
-              extension_count: 0,
-              tags: options.includeTags ? (subtask.tags || []) : [],
-            })
-            .select()
-            .single();
-
-          if (subtaskError || !createdSubtask) {
-            throw subtaskError || new Error(`Não foi possível duplicar a subtarefa "${subtask.title}".`);
-          }
-
-          const duplicatedSubtask: Task = {
-            id: createdSubtask.id,
-            title: createdSubtask.title,
-            description: createdSubtask.description || '',
-            status: createdSubtask.status,
-            priority: createdSubtask.priority as TaskPriority,
-            mainAssigneeId: createdSubtask.main_assignee_id,
-            secondaryAssigneeIds: createdSubtask.secondary_assignee_ids || [],
-            startDate: createdSubtask.start_date,
-            dueDate: createdSubtask.due_date,
-            extensionCount: createdSubtask.extension_count || 0,
-            extensionHistory: [],
-            checklists: [],
-            comments: [],
-            attachments: [],
-            activities: [],
-            listId: createdSubtask.list_id,
-            projectId: createdSubtask.project_id,
-            parentId: createdSubtask.parent_id,
-            createdAt: createdSubtask.created_at,
-            tags: createdSubtask.tags || [],
-          };
+          const subRes = await taskRepo.insertTaskClone({
+            title: subtask.title,
+            description: options.includeDescription ? (subtask.description || '') : '',
+            status: subtask.status,
+            priority: options.includePriority ? subtask.priority : TaskPriority.MEDIA,
+            mainAssigneeId: options.includeAssignees ? subtask.mainAssigneeId : currentUser.id,
+            secondaryAssigneeIds: options.includeAssignees ? (subtask.secondaryAssigneeIds || []) : [],
+            startDate: options.includeDates ? (subtask.startDate || null) : null,
+            dueDate: options.includeDates ? (subtask.dueDate || null) : null,
+            listId: options.listId,
+            projectId: subtask.projectId || sourceTask.projectId || null,
+            parentId: duplicatedTask.id,
+            tags: options.includeTags ? (subtask.tags || []) : [],
+          });
+          if ('error' in subRes) throw new Error(`Não foi possível duplicar a subtarefa "${subtask.title}": ${subRes.error}`);
+          const duplicatedSubtask = subRes.task;
 
           if (options.includeChecklists) {
-            // Busca do DB (não da memória): subtarefas raramente têm checklists
-            // hidratados sob o lazy-load.
-            const { data: subSrcChecklists } = await supabase
-              .from('task_checklists')
-              .select('text, completed')
-              .eq('task_id', subtask.id);
-            if (subSrcChecklists && subSrcChecklists.length > 0) {
-              const { data: subChecklistData, error: subChecklistError } = await supabase
-                .from('task_checklists')
-                .insert(subSrcChecklists.map((item: any) => ({
-                  task_id: duplicatedSubtask.id,
-                  text: item.text,
-                  completed: item.completed,
-                })))
-                .select();
-
-              if (subChecklistError) throw subChecklistError;
-              duplicatedSubtask.checklists = (subChecklistData || []).map((item: any) => ({
-                id: item.id,
-                text: item.text,
-                completed: item.completed,
-              }));
-            }
+            const res = await taskRepo.copyChecklists(subtask.id, duplicatedSubtask.id);
+            if ('error' in res) throw new Error(res.error);
+            duplicatedSubtask.checklists = res.items;
           }
 
           if (options.includeCustomFields) {
@@ -3266,13 +2968,7 @@ export default function App() {
         }
       }
 
-      await supabase.from('task_activities').insert({
-        task_id: duplicatedTask.id,
-        user_id: currentUser.id,
-        type: 'TASK_DUPLICATED',
-        old_value: sourceTask.id,
-        new_value: sourceTask.title,
-      });
+      await taskRepo.insertActivity(duplicatedTask.id, currentUser.id, 'TASK_DUPLICATED', sourceTask.id, sourceTask.title);
 
       setTasks(prev => [...stateTasksToAdd, ...prev]);
       if (fieldValuesToAdd.length > 0) {
