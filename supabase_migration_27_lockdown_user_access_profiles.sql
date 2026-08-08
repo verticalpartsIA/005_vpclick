@@ -58,9 +58,14 @@ create policy profiles_update on public.profiles
 
 -- ── Endurecimento das funções SECURITY DEFINER expostas via RPC (advisors) ───
 -- São funções de trigger — não devem ser chamáveis diretamente pela API. Os
--- triggers continuam disparando normalmente (não dependem do EXECUTE do papel).
-revoke execute on function public.enforce_profile_role_authorization() from anon, authenticated;
-revoke execute on function public.handle_new_user() from anon, authenticated;
+-- triggers continuam disparando (o mecanismo de trigger não checa EXECUTE do
+-- papel). IMPORTANTE: o grant padrão de EXECUTE é para PUBLIC, então revogar
+-- só de anon/authenticated NÃO surte efeito — tem que revogar de PUBLIC.
+revoke execute on function public.enforce_profile_role_authorization() from public;
+revoke execute on function public.handle_new_user() from public;
+-- is_admin também sai de PUBLIC, mas PRECISA ficar para authenticated (a RLS a chama).
+revoke execute on function public.is_admin() from public;
+grant  execute on function public.is_admin() to authenticated;
 
 -- search_path mutável (advisors 0011) — fixa sem alterar o corpo das funções.
 alter function public.handle_new_user() set search_path = public;
