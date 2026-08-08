@@ -29,6 +29,7 @@ import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChar
 import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
+import { useDashboard } from './hooks/useDashboard';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -1179,9 +1180,7 @@ export default function App() {
   const [userAccess, setUserAccess] = useState<Record<string, { spaceIds: string[]; folderIds: string[] }>>({});
 
   // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
-  const [dashboardTasks, setDashboardTasks] = useState<Task[]>([]);
-  const [dashboardLists, setDashboardLists] = useState<{ id: string; name: string }[]>([]);
-  const [isDashboardLoading, setIsDashboardLoading] = useState(false);
+  const { dashboardTasks, dashboardLists, isDashboardLoading } = useDashboard(session, activeView);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -1638,30 +1637,6 @@ export default function App() {
       .subscribe();
     return () => { if (timer) clearTimeout(timer); supabase.removeChannel(channel); };
   }, [session?.user?.id]);
-
-  // ── Dashboard global: carrega TODAS as tarefas sem filtro de escopo ─────────
-  const loadDashboardTasks = useCallback(async () => {
-    if (!session) return;
-    setIsDashboardLoading(true);
-    try {
-      const { tasks: dashTasks, lists: dashLists } = await taskRepo.fetchDashboardData();
-      if (dashTasks.length > 0) {
-        setDashboardTasks(dashTasks);
-        setDashboardLists(dashLists);
-      }
-    } catch (err) {
-      console.error('Erro ao carregar tarefas para Dashboard:', err);
-    } finally {
-      setIsDashboardLoading(false);
-    }
-  }, [session]);
-
-  // Recarrega dados do Dashboard sempre que a view muda para Dashboard
-  useEffect(() => {
-    if (activeView === 'Dashboard') {
-      loadDashboardTasks();
-    }
-  }, [activeView, loadDashboardTasks]);
 
   const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
