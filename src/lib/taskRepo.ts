@@ -417,3 +417,62 @@ export async function insertExtensionLog(
     .insert({ task_id: taskId, old_date: log.oldDate, new_date: log.newDate, reason: log.reason, updated_by: updatedBy });
   return { error: error ? error.message : null };
 }
+
+// ── Duplicação (clone de linha de tarefa) ───────────────────────────────────
+// Distinto de insertTask: NÃO define created_by (preserva o comportamento do
+// duplicar) e aceita tags/parent explícitos. Usado tanto para a tarefa clonada
+// quanto para as subtarefas.
+export interface TaskCloneInput {
+  title: string;
+  description: string;
+  status: string;
+  priority: TaskPriority;
+  mainAssigneeId: string;
+  secondaryAssigneeIds: string[];
+  startDate: string | null;
+  dueDate: string | null;
+  listId: string | null;
+  projectId: string | null;
+  parentId: string | null;
+  tags: string[];
+}
+
+export async function insertTaskClone(input: TaskCloneInput): Promise<{ task: Task } | { error: string }> {
+  const { data, error } = await supabase
+    .from('tasks')
+    .insert({
+      title: input.title,
+      description: input.description,
+      status: input.status,
+      priority: input.priority,
+      main_assignee_id: input.mainAssigneeId,
+      secondary_assignee_ids: input.secondaryAssigneeIds,
+      start_date: input.startDate,
+      due_date: input.dueDate,
+      list_id: input.listId,
+      project_id: input.projectId,
+      parent_id: input.parentId,
+      extension_count: 0,
+      tags: input.tags,
+    })
+    .select()
+    .single();
+  if (error || !data) return { error: error?.message ?? 'A tarefa duplicada não foi retornada pelo banco.' };
+  return { task: mapRowToTaskShell(data as TaskRow) };
+}
+
+// Copia os checklists de uma tarefa para outra. Devolve os itens já mapeados
+// (ou lista vazia se a origem não tiver checklists).
+export async function copyChecklists(
+  fromTaskId: string,
+  toTaskId: string,
+): Promise<{ items: ReturnType<typeof mapChecklist>[] } | { error: string }> {
+  const { data: src } = await supabase.from('task_checklists').select('text, completed').eq('task_id', fromTaskId);
+  if (!src || src.length === 0) return { items: [] };
+  const rows = (src as { text: string; completed: boolean }[]).map((it) => ({
+    task_id: toTaskId, text: it.text, completed: it.completed,
+  }));
+  const { data: inserted, error } = await supabase.from('task_checklists').insert(rows).select();
+  if (error) return { error: error.message };
+  return { items: ((inserted || []) as ChecklistRow[]).map(mapChecklist) };
+}

@@ -2871,83 +2871,32 @@ export default function App() {
 
     setIsDuplicatingTask(true);
     try {
-      const clonePayload = {
+      const cloneRes = await taskRepo.insertTaskClone({
         title,
         description: options.includeDescription ? (sourceTask.description || '') : '',
         status: sourceTask.status,
         priority: options.includePriority ? sourceTask.priority : TaskPriority.MEDIA,
-        main_assignee_id: options.includeAssignees ? sourceTask.mainAssigneeId : currentUser.id,
-        secondary_assignee_ids: options.includeAssignees ? (sourceTask.secondaryAssigneeIds || []) : [],
-        start_date: options.includeDates ? (sourceTask.startDate || null) : null,
-        due_date: options.includeDates ? (sourceTask.dueDate || null) : null,
-        list_id: options.listId,
-        project_id: sourceTask.projectId || null,
-        parent_id: null,
-        extension_count: 0,
+        mainAssigneeId: options.includeAssignees ? sourceTask.mainAssigneeId : currentUser.id,
+        secondaryAssigneeIds: options.includeAssignees ? (sourceTask.secondaryAssigneeIds || []) : [],
+        startDate: options.includeDates ? (sourceTask.startDate || null) : null,
+        dueDate: options.includeDates ? (sourceTask.dueDate || null) : null,
+        listId: options.listId,
+        projectId: sourceTask.projectId || null,
+        parentId: null,
         tags: options.includeTags ? (sourceTask.tags || []) : [],
-      };
-
-      const { data: created, error } = await supabase
-        .from('tasks')
-        .insert(clonePayload)
-        .select()
-        .single();
-
-      if (error || !created) {
-        throw error || new Error('A tarefa duplicada não foi retornada pelo banco.');
-      }
-
-      const duplicatedTask: Task = {
-        id: created.id,
-        title: created.title,
-        description: created.description || '',
-        status: created.status,
-        priority: created.priority as TaskPriority,
-        mainAssigneeId: created.main_assignee_id,
-        secondaryAssigneeIds: created.secondary_assignee_ids || [],
-        startDate: created.start_date,
-        dueDate: created.due_date,
-        extensionCount: created.extension_count || 0,
-        extensionHistory: [],
-        checklists: [],
-        comments: [],
-        attachments: [],
-        activities: [],
-        listId: created.list_id,
-        projectId: created.project_id,
-        parentId: created.parent_id,
-        createdAt: created.created_at,
-        tags: created.tags || [],
-      };
+      });
+      if ('error' in cloneRes) throw new Error(cloneRes.error);
+      const duplicatedTask = cloneRes.task;
 
       const stateTasksToAdd: Task[] = [duplicatedTask];
       const fieldValuesToAdd: CustomFieldValue[] = [];
 
       if (options.includeChecklists) {
-        // Busca os checklists do DB (não da memória): com o lazy-load, a tarefa
-        // de origem pode não ter os checklists carregados se não foi aberta.
-        const { data: srcChecklists } = await supabase
-          .from('task_checklists')
-          .select('text, completed')
-          .eq('task_id', sourceTask.id);
-        if (srcChecklists && srcChecklists.length > 0) {
-          const checklistRows = srcChecklists.map((item: any) => ({
-            task_id: duplicatedTask.id,
-            text: item.text,
-            completed: item.completed,
-          }));
-          const { data: checklistData, error: checklistError } = await supabase
-            .from('task_checklists')
-            .insert(checklistRows)
-            .select();
-
-          if (checklistError) throw checklistError;
-          duplicatedTask.checklists = (checklistData || []).map((item: any) => ({
-            id: item.id,
-            text: item.text,
-            completed: item.completed,
-          }));
-        }
+        // Copia os checklists do DB (não da memória): com o lazy-load, a origem
+        // pode não ter os checklists carregados se não foi aberta.
+        const res = await taskRepo.copyChecklists(sourceTask.id, duplicatedTask.id);
+        if ('error' in res) throw new Error(res.error);
+        duplicatedTask.checklists = res.items;
       }
 
       if (options.includeCustomFields) {
@@ -2973,77 +2922,27 @@ export default function App() {
       if (options.includeSubtasks) {
         const subtasks = tasks.filter((task) => task.parentId === sourceTask.id);
         for (const subtask of subtasks) {
-          const { data: createdSubtask, error: subtaskError } = await supabase
-            .from('tasks')
-            .insert({
-              title: subtask.title,
-              description: options.includeDescription ? (subtask.description || '') : '',
-              status: subtask.status,
-              priority: options.includePriority ? subtask.priority : TaskPriority.MEDIA,
-              main_assignee_id: options.includeAssignees ? subtask.mainAssigneeId : currentUser.id,
-              secondary_assignee_ids: options.includeAssignees ? (subtask.secondaryAssigneeIds || []) : [],
-              start_date: options.includeDates ? (subtask.startDate || null) : null,
-              due_date: options.includeDates ? (subtask.dueDate || null) : null,
-              list_id: options.listId,
-              project_id: subtask.projectId || sourceTask.projectId || null,
-              parent_id: duplicatedTask.id,
-              extension_count: 0,
-              tags: options.includeTags ? (subtask.tags || []) : [],
-            })
-            .select()
-            .single();
-
-          if (subtaskError || !createdSubtask) {
-            throw subtaskError || new Error(`Não foi possível duplicar a subtarefa "${subtask.title}".`);
-          }
-
-          const duplicatedSubtask: Task = {
-            id: createdSubtask.id,
-            title: createdSubtask.title,
-            description: createdSubtask.description || '',
-            status: createdSubtask.status,
-            priority: createdSubtask.priority as TaskPriority,
-            mainAssigneeId: createdSubtask.main_assignee_id,
-            secondaryAssigneeIds: createdSubtask.secondary_assignee_ids || [],
-            startDate: createdSubtask.start_date,
-            dueDate: createdSubtask.due_date,
-            extensionCount: createdSubtask.extension_count || 0,
-            extensionHistory: [],
-            checklists: [],
-            comments: [],
-            attachments: [],
-            activities: [],
-            listId: createdSubtask.list_id,
-            projectId: createdSubtask.project_id,
-            parentId: createdSubtask.parent_id,
-            createdAt: createdSubtask.created_at,
-            tags: createdSubtask.tags || [],
-          };
+          const subRes = await taskRepo.insertTaskClone({
+            title: subtask.title,
+            description: options.includeDescription ? (subtask.description || '') : '',
+            status: subtask.status,
+            priority: options.includePriority ? subtask.priority : TaskPriority.MEDIA,
+            mainAssigneeId: options.includeAssignees ? subtask.mainAssigneeId : currentUser.id,
+            secondaryAssigneeIds: options.includeAssignees ? (subtask.secondaryAssigneeIds || []) : [],
+            startDate: options.includeDates ? (subtask.startDate || null) : null,
+            dueDate: options.includeDates ? (subtask.dueDate || null) : null,
+            listId: options.listId,
+            projectId: subtask.projectId || sourceTask.projectId || null,
+            parentId: duplicatedTask.id,
+            tags: options.includeTags ? (subtask.tags || []) : [],
+          });
+          if ('error' in subRes) throw new Error(`Não foi possível duplicar a subtarefa "${subtask.title}": ${subRes.error}`);
+          const duplicatedSubtask = subRes.task;
 
           if (options.includeChecklists) {
-            // Busca do DB (não da memória): subtarefas raramente têm checklists
-            // hidratados sob o lazy-load.
-            const { data: subSrcChecklists } = await supabase
-              .from('task_checklists')
-              .select('text, completed')
-              .eq('task_id', subtask.id);
-            if (subSrcChecklists && subSrcChecklists.length > 0) {
-              const { data: subChecklistData, error: subChecklistError } = await supabase
-                .from('task_checklists')
-                .insert(subSrcChecklists.map((item: any) => ({
-                  task_id: duplicatedSubtask.id,
-                  text: item.text,
-                  completed: item.completed,
-                })))
-                .select();
-
-              if (subChecklistError) throw subChecklistError;
-              duplicatedSubtask.checklists = (subChecklistData || []).map((item: any) => ({
-                id: item.id,
-                text: item.text,
-                completed: item.completed,
-              }));
-            }
+            const res = await taskRepo.copyChecklists(subtask.id, duplicatedSubtask.id);
+            if ('error' in res) throw new Error(res.error);
+            duplicatedSubtask.checklists = res.items;
           }
 
           if (options.includeCustomFields) {
@@ -3069,13 +2968,7 @@ export default function App() {
         }
       }
 
-      await supabase.from('task_activities').insert({
-        task_id: duplicatedTask.id,
-        user_id: currentUser.id,
-        type: 'TASK_DUPLICATED',
-        old_value: sourceTask.id,
-        new_value: sourceTask.title,
-      });
+      await taskRepo.insertActivity(duplicatedTask.id, currentUser.id, 'TASK_DUPLICATED', sourceTask.id, sourceTask.title);
 
       setTasks(prev => [...stateTasksToAdd, ...prev]);
       if (fieldValuesToAdd.length > 0) {
