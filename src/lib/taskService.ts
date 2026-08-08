@@ -69,6 +69,7 @@ function cloneInputFrom(
   task: Task,
   options: DuplicateTaskOptions,
   fallbackAssigneeId: string,
+  createdBy: string,
   parentId: string | null,
   overrides: { title?: string; projectId?: string | null } = {},
 ): taskRepo.TaskCloneInput {
@@ -85,6 +86,7 @@ function cloneInputFrom(
     projectId: overrides.projectId !== undefined ? overrides.projectId : (task.projectId || null),
     parentId,
     tags: options.includeTags ? (task.tags || []) : [],
+    createdBy,
   };
 }
 
@@ -102,7 +104,7 @@ export async function duplicateTask(
   },
 ): Promise<{ tasks: Task[]; fieldValues: CustomFieldValue[] } | { error: string }> {
   const cloneRes = await taskRepo.insertTaskClone(
-    cloneInputFrom(sourceTask, options, ctx.currentUserId, null, { title: options.title.trim() }),
+    cloneInputFrom(sourceTask, options, ctx.currentUserId, ctx.currentUserId, null, { title: options.title.trim() }),
   );
   if ('error' in cloneRes) return { error: cloneRes.error };
   const duplicatedTask = cloneRes.task;
@@ -124,7 +126,7 @@ export async function duplicateTask(
   if (options.includeSubtasks) {
     for (const subtask of ctx.subtasks) {
       const subRes = await taskRepo.insertTaskClone(
-        cloneInputFrom(subtask, options, ctx.currentUserId, duplicatedTask.id, {
+        cloneInputFrom(subtask, options, ctx.currentUserId, ctx.currentUserId, duplicatedTask.id, {
           projectId: subtask.projectId || sourceTask.projectId || null,
         }),
       );

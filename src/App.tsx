@@ -1854,6 +1854,8 @@ export default function App() {
             parent_id: parentId,
             extension_count: 0,
             tags: t.tags || [],
+            // Quem duplica a lista é o criador das tarefas novas (antes ficava nulo).
+            created_by: currentUser.id,
           });
 
           // 3. Insere tarefas principais em lote (ordem do retorno = ordem do insert)
