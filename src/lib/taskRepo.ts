@@ -302,3 +302,118 @@ export async function deleteTask(taskId: string): Promise<{ ok: true } | { ok: f
   if (error) return { ok: false, message: error.message };
   return { ok: true };
 }
+
+// ── Escrita de sub-entidades ────────────────────────────────────────────────
+// Padrão de retorno `{ <dado>?, error }` espelhando o próprio Supabase: o App
+// checa `error` e cuida do estado otimista/toasts. `error` é uma mensagem em
+// texto (o formato do PostgREST não vaza para o chamador).
+
+export async function insertAttachment(
+  taskId: string,
+  att: { name?: string; url?: string; type?: string; size?: number },
+): Promise<{ attachment: ReturnType<typeof mapAttachment> | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('task_attachments')
+    .insert({ task_id: taskId, name: att.name, url: att.url, type: att.type, size: att.size })
+    .select()
+    .single();
+  if (error || !data) return { attachment: null, error: error?.message ?? 'registro não criado' };
+  return { attachment: mapAttachment(data as AttachmentRow), error: null };
+}
+
+// Exclui a linha do anexo e o arquivo físico do Storage. `notFound` distingue
+// "registro inexistente" de erro do banco.
+export async function deleteAttachment(attachmentId: string): Promise<{ error: string | null; notFound?: boolean }> {
+  const { data, error } = await supabase.from('task_attachments').delete().eq('id', attachmentId).select();
+  if (error) return { error: error.message };
+  if (!data || data.length === 0) return { error: 'registro não encontrado.', notFound: true };
+  // A URL pública contém bucket + caminho.
+  const url = (data[0] as AttachmentRow)?.url || '';
+  const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+  if (match) {
+    const storagePath = decodeURIComponent(match[2]);
+    const { error: storageError } = await supabase.storage.from(match[1]).remove([storagePath]);
+    if (storageError) console.error('taskRepo.deleteAttachment: erro ao remover do Storage:', storageError);
+  }
+  return { error: null };
+}
+
+export async function insertComment(
+  taskId: string,
+  userId: string,
+  text: string,
+  parentCommentId?: string,
+): Promise<{ comment: ReturnType<typeof mapComment> | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('task_comments')
+    .insert({ task_id: taskId, user_id: userId, text, parent_comment_id: parentCommentId || null })
+    .select()
+    .single();
+  if (error || !data) return { comment: null, error: error?.message ?? 'registro não criado' };
+  return { comment: mapComment(data as CommentRow), error: null };
+}
+
+export async function updateCommentText(commentId: string, newText: string, updatedAt: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('task_comments').update({ text: newText, updated_at: updatedAt }).eq('id', commentId);
+  return { error: error ? error.message : null };
+}
+
+// Soft delete do comentário E das respostas da thread (o soft delete não
+// aciona o ON DELETE CASCADE, senão as respostas ficariam órfãs).
+export async function softDeleteCommentThread(commentId: string, deletedAt: string): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('task_comments')
+    .update({ deleted_at: deletedAt })
+    .or(`id.eq.${commentId},parent_comment_id.eq.${commentId}`);
+  return { error: error ? error.message : null };
+}
+
+export async function assignComment(commentId: string, assignedTo: string | null, assignedBy: string | null): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('task_comments')
+    .update({ assigned_to: assignedTo, assigned_by: assignedBy, resolved_at: null, resolved_by: null })
+    .eq('id', commentId);
+  return { error: error ? error.message : null };
+}
+
+export async function resolveComment(commentId: string, resolvedBy: string, resolvedAt: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('task_comments').update({ resolved_at: resolvedAt, resolved_by: resolvedBy }).eq('id', commentId);
+  return { error: error ? error.message : null };
+}
+
+export async function addWatcher(taskId: string, userId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('task_watchers').insert({ task_id: taskId, user_id: userId });
+  return { error: error ? error.message : null };
+}
+
+export async function removeWatcher(taskId: string, userId: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.from('task_watchers').delete().eq('task_id', taskId).eq('user_id', userId);
+  return { error: error ? error.message : null };
+}
+
+export async function insertActivity(
+  taskId: string,
+  userId: string,
+  type: string,
+  oldValue?: string,
+  newValue?: string,
+): Promise<{ activity: ReturnType<typeof mapActivity> | null; error: string | null }> {
+  const { data, error } = await supabase
+    .from('task_activities')
+    .insert({ task_id: taskId, user_id: userId, type, old_value: oldValue, new_value: newValue })
+    .select()
+    .single();
+  if (error || !data) return { activity: null, error: error?.message ?? 'registro não criado' };
+  return { activity: mapActivity(data as ActivityRow), error: null };
+}
+
+export async function insertExtensionLog(
+  taskId: string,
+  log: { oldDate: string | null; newDate: string | null; reason: string | null },
+  updatedBy: string,
+): Promise<{ error: string | null }> {
+  const { error } = await supabase
+    .from('task_extension_logs')
+    .insert({ task_id: taskId, old_date: log.oldDate, new_date: log.newDate, reason: log.reason, updated_by: updatedBy });
+  return { error: error ? error.message : null };
+}

@@ -740,40 +740,16 @@ export default function App() {
 
   const saveTaskAttachment = useCallback(async (taskId: string, attachment: Partial<Attachment>) => {
     try {
-      const { data, error } = await supabase
-        .from('task_attachments')
-        .insert({
-          task_id: taskId,
-          name: attachment.name,
-          url: attachment.url,
-          type: attachment.type,
-          size: attachment.size
-        })
-        .select()
-        .single();
-
-      if (error || !data) {
+      const { attachment: created, error } = await taskRepo.insertAttachment(taskId, attachment);
+      if (!created) {
         console.error('Erro ao salvar anexo:', error);
-        toast.error(`Falha ao salvar o anexo${error ? `: ${error.message}` : '.'}`);
+        toast.error(`Falha ao salvar o anexo${error ? `: ${error}` : '.'}`);
         return false;
       }
 
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            attachments: [...(t.attachments || []), {
-              id: data.id,
-              name: data.name,
-              url: data.url,
-              type: data.type,
-              size: data.size,
-              uploadedAt: data.uploaded_at
-            }]
-          };
-        }
-        return t;
-      }));
+      setTasks(prev => prev.map(t => t.id === taskId
+        ? { ...t, attachments: [...(t.attachments || []), created] }
+        : t));
       return true;
     } catch (err: any) {
       console.error('Erro ao salvar anexo:', err);
@@ -783,40 +759,16 @@ export default function App() {
   }, []);
 
   const removeTaskAttachment = useCallback(async (taskId: string, attachmentId: string) => {
-    const { data, error } = await supabase
-      .from('task_attachments')
-      .delete()
-      .eq('id', attachmentId)
-      .select();
-
+    const { error } = await taskRepo.deleteAttachment(attachmentId);
     if (error) {
       console.error('Erro ao excluir anexo:', error);
-      toast.error(`Falha ao excluir o anexo: ${error.message}`);
-      return;
-    }
-    if (!data || data.length === 0) {
-      toast.error('Falha ao excluir o anexo: registro não encontrado.');
+      toast.error(`Falha ao excluir o anexo: ${error}`);
       return;
     }
 
-    // Remove o arquivo físico do Storage (a URL pública contém bucket + caminho)
-    const url: string = (data[0] as any)?.url || '';
-    const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
-    if (match) {
-      const storagePath = decodeURIComponent(match[2]);
-      const { error: storageError } = await supabase.storage.from(match[1]).remove([storagePath]);
-      if (storageError) console.error('Erro ao remover arquivo do Storage:', storageError);
-    }
-
-    setTasks(prev => prev.map(t => {
-      if (t.id === taskId) {
-        return {
-          ...t,
-          attachments: (t.attachments || []).filter(a => a.id !== attachmentId)
-        };
-      }
-      return t;
-    }));
+    setTasks(prev => prev.map(t => t.id === taskId
+      ? { ...t, attachments: (t.attachments || []).filter(a => a.id !== attachmentId) }
+      : t));
     toast.success('Anexo excluído.');
   }, []);
 
@@ -826,37 +778,15 @@ export default function App() {
   const saveTaskComment = useCallback(async (taskId: string, text: string, parentCommentId?: string): Promise<string | false> => {
     if (!currentUser) return false;
     try {
-      const { data, error } = await supabase
-        .from('task_comments')
-        .insert({
-          task_id: taskId,
-          user_id: currentUser.id,
-          text: text,
-          parent_comment_id: parentCommentId || null,
-        })
-        .select()
-        .single();
-
-      if (data && !error) {
-        setTasks(prev => prev.map(t => {
-          if (t.id === taskId) {
-            return {
-              ...t,
-              comments: [...(t.comments || []), {
-                id: data.id,
-                userId: data.user_id,
-                text: data.text,
-                timestamp: data.created_at,
-                parentCommentId: data.parent_comment_id || undefined,
-              }]
-            };
-          }
-          return t;
-        }));
-        return data.id;
+      const { comment, error } = await taskRepo.insertComment(taskId, currentUser.id, text, parentCommentId);
+      if (comment) {
+        setTasks(prev => prev.map(t => t.id === taskId
+          ? { ...t, comments: [...(t.comments || []), comment] }
+          : t));
+        return comment.id;
       }
       console.error('Erro ao salvar comentário:', error);
-      toast.error('Erro ao salvar comentário: ' + (error?.message || 'tente novamente.'));
+      toast.error('Erro ao salvar comentário: ' + (error || 'tente novamente.'));
       return false;
     } catch (err) {
       console.error('Erro inesperado ao salvar comentário:', err);
@@ -867,10 +797,7 @@ export default function App() {
 
   const editTaskComment = useCallback(async (taskId: string, commentId: string, newText: string) => {
     const now = new Date().toISOString();
-    const { error } = await supabase
-      .from('task_comments')
-      .update({ text: newText, updated_at: now })
-      .eq('id', commentId);
+    const { error } = await taskRepo.updateCommentText(commentId, newText, now);
     if (error) { toast.error('Erro ao editar comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -882,10 +809,7 @@ export default function App() {
     // Exclui o comentário e, junto, as respostas da thread (soft delete não
     // aciona o ON DELETE CASCADE do banco — sem isso as respostas ficariam
     // órfãs: continuariam na tabela mas sem comentário raiz pra aparecer).
-    const { error } = await supabase
-      .from('task_comments')
-      .update({ deleted_at: new Date().toISOString() })
-      .or(`id.eq.${commentId},parent_comment_id.eq.${commentId}`);
+    const { error } = await taskRepo.softDeleteCommentThread(commentId, new Date().toISOString());
     if (error) { toast.error('Erro ao excluir comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -900,15 +824,7 @@ export default function App() {
   // o item volta a valer como pendente para o novo estado.
   const assignTaskComment = useCallback(async (taskId: string, commentId: string, userId: string | null) => {
     if (!currentUser) return;
-    const { error } = await supabase
-      .from('task_comments')
-      .update({
-        assigned_to: userId,
-        assigned_by: userId ? currentUser.id : null,
-        resolved_at: null,
-        resolved_by: null,
-      })
-      .eq('id', commentId);
+    const { error } = await taskRepo.assignComment(commentId, userId, userId ? currentUser.id : null);
     if (error) { toast.error('Erro ao atribuir comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -927,10 +843,7 @@ export default function App() {
   const resolveTaskComment = useCallback(async (taskId: string, commentId: string) => {
     if (!currentUser) return;
     const now = new Date().toISOString();
-    const { error } = await supabase
-      .from('task_comments')
-      .update({ resolved_at: now, resolved_by: currentUser.id })
-      .eq('id', commentId);
+    const { error } = await taskRepo.resolveComment(commentId, currentUser.id, now);
     if (error) { toast.error('Erro ao resolver comentário.'); return; }
     setTasks(prev => prev.map(t => t.id !== taskId ? t : {
       ...t,
@@ -942,11 +855,11 @@ export default function App() {
   const toggleWatcher = useCallback(async (taskId: string, isWatching: boolean) => {
     if (!currentUser || currentUser.id === 'loading') return;
     if (isWatching) {
-      const { error } = await supabase.from('task_watchers').delete().eq('task_id', taskId).eq('user_id', currentUser.id);
+      const { error } = await taskRepo.removeWatcher(taskId, currentUser.id);
       if (error) { toast.error('Erro ao parar de observar.'); return; }
       setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: (t.watcherIds || []).filter(id => id !== currentUser.id) }));
     } else {
-      const { error } = await supabase.from('task_watchers').insert({ task_id: taskId, user_id: currentUser.id });
+      const { error } = await taskRepo.addWatcher(taskId, currentUser.id);
       if (error) { toast.error('Erro ao observar tarefa.'); return; }
       setTasks(prev => prev.map(t => t.id !== taskId ? t : { ...t, watcherIds: [...(t.watcherIds || []), currentUser.id] }));
       toast.success('Você está observando esta tarefa.');
@@ -955,59 +868,20 @@ export default function App() {
 
   const saveTaskActivity = useCallback(async (taskId: string, type: string, oldValue?: string, newValue?: string) => {
     if (!currentUser || currentUser.id === 'loading') return null;
-    const { data, error } = await supabase
-      .from('task_activities')
-      .insert({
-        task_id: taskId,
-        user_id: currentUser.id,
-        type: type,
-        old_value: oldValue,
-        new_value: newValue
-      })
-      .select()
-      .single();
-
-    if (data && !error) {
-      const activity: TaskActivity = {
-        id: data.id,
-        taskId: data.task_id,
-        userId: data.user_id,
-        type: data.type,
-        oldValue: data.old_value,
-        newValue: data.new_value,
-        createdAt: data.created_at
-      };
-      setTasks(prev => prev.map(t => {
-        if (t.id === taskId) {
-          return {
-            ...t,
-            activities: [activity, ...(t.activities || [])]
-          };
-        }
-        return t;
-      }));
+    const { activity, error } = await taskRepo.insertActivity(taskId, currentUser.id, type, oldValue, newValue);
+    if (activity) {
+      setTasks(prev => prev.map(t => t.id === taskId
+        ? { ...t, activities: [activity, ...(t.activities || [])] }
+        : t));
       return activity;
     }
+    if (error) console.error('Erro ao registrar atividade:', error);
     return null;
   }, [currentUser]);
 
   const saveExtensionLog = useCallback(async (taskId: string, log: ExtensionLog) => {
     if (!currentUser) return;
-    const { data, error } = await supabase
-      .from('task_extension_logs')
-      .insert({
-        task_id: taskId,
-        old_date: log.oldDate,
-        new_date: log.newDate,
-        reason: log.reason,
-        updated_by: currentUser.id
-      })
-      .select()
-      .single();
-
-    if (data && !error) {
-      // update local state too if not already updated by caller
-    }
+    await taskRepo.insertExtensionLog(taskId, log, currentUser.id);
   }, [currentUser]);
 
   const loadUserProfile = useCallback(async (userId: string) => {
