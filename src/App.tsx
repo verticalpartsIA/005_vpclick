@@ -26,8 +26,9 @@ import { MyTasksView, recordRecentTaskId } from './components/views/MyTasksView'
 import { RecentTasksView } from './components/views/RecentTasksView';
 import { RemindersView } from './components/views/RemindersView';
 import { Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart as ReBarChart, PieChart, Pie, Cell } from 'recharts';
-import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './lib/supabase';
+import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
+import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason } from './lib/taskService';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
@@ -1692,26 +1693,6 @@ export default function App() {
     }
   }, []);
 
-  const isDoneLikeStatus = (status: string) => {
-    const s = status.toLowerCase();
-    return ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pronto', 'aprovado'].some(kw => s.includes(kw));
-  };
-
-  // Motivo de bloqueio de fechamento (dependência pendente ou comentário
-  // atribuído não resolvido), ou null se a tarefa pode ser fechada. Chamado a
-  // partir de TODO caminho que grava status diretamente (edição avulsa, drag
-  // no Kanban, edição em massa) — não só handleUpdateTask, senão os outros
-  // dois driblam o mesmo invariante.
-  const getTaskCloseBlockReason = async (taskId: string): Promise<string | null> => {
-    const [bloqueada, temComentarioPendente] = await Promise.all([
-      isTaskBlocked(taskId),
-      hasUnresolvedAssignedComments(taskId),
-    ]);
-    if (bloqueada) return 'Esta tarefa está bloqueada por outra que ainda não foi concluída.';
-    if (temComentarioPendente) return 'Esta tarefa tem comentários atribuídos ainda não resolvidos.';
-    return null;
-  };
-
   const handleUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
@@ -2656,17 +2637,8 @@ export default function App() {
 
   const handleCreateTask = async (newTaskPartial: Partial<Task>) => {
     try {
-      // Pegar o status inicial da lista se não fornecido
-      let defaultStatus = 'A fazer';
-      if (newTaskPartial.listId) {
-        const list = lists.find(l => l.id === newTaskPartial.listId);
-        if (list) {
-          const group = statusGroups.find(g => g.id === list.statusGroupId);
-          if (group && group.options.length > 0) {
-            defaultStatus = group.options[0].label;
-          }
-        }
-      }
+      // Status inicial a partir do grupo de status da lista (regra de domínio).
+      const defaultStatus = resolveDefaultStatus(newTaskPartial.listId, lists, statusGroups);
 
       if (!newTaskPartial.listId) {
         toast.error('Selecione uma lista antes de criar a tarefa.');
@@ -2713,9 +2685,7 @@ export default function App() {
   // Base compartilhada por "criar tarefa a partir de X" (item de ação de
   // reunião, lembrete) — só muda qual tabela recebe o vínculo task_id depois.
   const createTaskFromTitle = useCallback(async (title: string, listId: string): Promise<Task | null> => {
-    const list = lists.find(l => l.id === listId);
-    const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
-    const defaultStatus = group && group.options.length > 0 ? group.options[0].label : 'A fazer';
+    const defaultStatus = resolveDefaultStatus(listId, lists, statusGroups);
 
     const res = await taskRepo.insertTask({
       title,
