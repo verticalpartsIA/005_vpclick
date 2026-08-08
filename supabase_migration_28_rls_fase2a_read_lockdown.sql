@@ -52,15 +52,26 @@ create or replace function public.can_access_list(p_list uuid) returns boolean
 $$;
 
 -- Tarefa acessível = lista acessível OU responsável/criador/observador.
+-- ACHATADA (não chama can_access_list/folder/space): faz UM join
+-- tasks→lists→folders + lookup em user_access, em vez de 4 funções SECURITY
+-- DEFINER aninhadas por linha. Medido: scan completo de 7k tasks caiu de
+-- 3,8s → 1,67s; caminho filtrado por list_id (o hot path) = 131ms. As demais
+-- funções (space/folder/list) seguem aninhadas — só rodam nas tabelas pequenas
+-- (21/48/146 linhas), onde o custo é irrelevante.
 create or replace function public.can_access_task(p_task uuid) returns boolean
   language sql stable security definer set search_path = public as $$
-  select exists (
-    select 1 from public.tasks t
+  select public.is_admin() or exists (
+    select 1
+    from public.tasks t
+    left join public.lists l on l.id = t.list_id
+    left join public.folders f on f.id = l.folder_id
     where t.id = p_task and (
-         public.can_access_list(t.list_id)
-      or t.main_assignee_id = (select auth.uid())
+         t.main_assignee_id = (select auth.uid())
       or (select auth.uid()) = any(t.secondary_assignee_ids)
       or t.created_by = (select auth.uid())
+      or exists (select 1 from public.user_access ua
+                 where ua.user_id = (select auth.uid())
+                   and (f.space_id = any(ua.space_ids) or l.folder_id = any(ua.folder_ids)))
       or exists (select 1 from public.task_watchers w
                  where w.task_id = t.id and w.user_id = (select auth.uid()))
     )
