@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisão Supabase/Postgres — RLS — VP Click — 2026-08-08</title>
+<style>
+  :root{--bg:#0f1115;--card:#171a21;--ink:#e7e9ee;--muted:#a2a8b4;--line:#262b35;--accent:#f97316;--ok:#22c55e;--warn:#eab308;--bad:#ef4444;--info:#38bdf8}
+  @media (prefers-color-scheme: light){:root{--bg:#f6f7f9;--card:#fff;--ink:#1b1f27;--muted:#5b6472;--line:#e5e8ee}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 80px}
+  header.top{border-bottom:2px solid var(--accent);padding-bottom:16px;margin-bottom:24px}
+  h1{font-size:25px;margin:0 0 4px}
+  h2{font-size:19px;margin:34px 0 12px;padding-top:14px;border-top:1px solid var(--line)}
+  h3{font-size:15.5px;margin:18px 0 6px;color:var(--accent)}
+  .sub{color:var(--muted);font-size:13px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  pre{background:rgba(127,127,127,.10);border:1px solid var(--line);border-radius:8px;padding:12px;overflow-x:auto;font-size:12.5px}
+  code{background:rgba(127,127,127,.14);padding:1px 5px;border-radius:5px;font-size:.9em}
+  ul{margin:6px 0;padding-left:20px}li{margin:4px 0}
+  table{border-collapse:collapse;width:100%;font-size:13px;display:block;overflow-x:auto}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:rgba(127,127,127,.10)}
+  .badge{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px;white-space:nowrap}
+  .b-crit{background:rgba(239,68,68,.18);color:var(--bad)}
+  .b-high{background:rgba(234,179,8,.20);color:var(--warn)}
+  .b-med{background:rgba(56,189,248,.16);color:var(--info)}
+  .b-ok{background:rgba(34,197,94,.16);color:var(--ok)}
+  .verdict{border-left:4px solid var(--accent);padding-left:14px}
+  a{color:var(--info)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <h1>Revisão Supabase / PostgreSQL — foco em RLS</h1>
+  <div class="sub">VP Click (vpclick) · projeto <code>sfpnjwllcmentoocylow</code> · 2026-08-08 04:09 · análise <strong>read-only</strong> (nada foi alterado no banco)</div>
+  <div class="sub" style="margin-top:6px">Pergunta central do usuário: <em>“dá pra conciliar a RLS atual com as boas práticas?”</em></div>
+</header>
+
+<h2>Resposta direta: SIM, dá pra conciliar — mas é delicado</h2>
+<div class="card verdict">
+  <p>O modelo de acesso do app (papel em <code>profiles.role</code> + hierarquia <code>user_access</code> por espaço/pasta + visibilidade por responsável/observador/criador) <strong>mapeia limpo para RLS real</strong>. E não é teórico: <strong>já existe precedente no próprio banco</strong> — <code>teams</code>/<code>team_members</code> restringem escrita por papel (ADMIN/GESTOR) e <code>task_watchers</code> restringe por <code>auth.uid()</code>. Dá para estender esse mesmo padrão ao núcleo.</p>
+  <p><strong>Por que é delicado:</strong> a RLS precisa <em>espelhar exatamente</em> os filtros que hoje vivem só no cliente (inclusive “Minhas Tarefas”, Caixa de Entrada e tarefas atribuídas fora dos espaços concedidos). Uma política estrita demais faz o usuário “perder” dados e o app quebra; frouxa demais não resolve o vazamento. Além disso, faltam <strong>índices</strong> na cadeia hierárquica, sem os quais a RLS fica lenta. Por isso a recomendação é fazer em <strong>branch do Supabase</strong>, validar com o E2E, e só então promover — <strong>nunca direto na produção</strong>.</p>
+</div>
+
+<h2>Estado atual (evidência)</h2>
+<div class="card">
+  <p>RLS está <strong>habilitada nas 37 tabelas</strong> — mas na maioria com política <strong>decorativa</strong> (<code>USING true</code> para <code>authenticated</code>), o que equivale a “sem restrição”. O controle real acontece só no cliente (filtros de <code>userAccess</code> em React), então qualquer usuário autenticado pode ler/escrever tudo via API REST e via <strong>Realtime</strong>.</p>
+  <table>
+    <thead><tr><th>Grupo</th><th>Política atual</th><th>Efeito</th></tr></thead>
+    <tbody>
+      <tr><td><code>tasks, lists, folders, spaces, projects, docs, doc_attachments, custom_fields, custom_field_values, task_comments, task_checklists, task_attachments, task_activities(select), workspaces, workspace_tags, task_dependencies</code></td><td><code>ALL USING true</code></td><td>Qualquer autenticado lê/escreve <strong>todos</strong> os registros de <strong>todos</strong> os workspaces</td></tr>
+      <tr><td><code>user_access</code></td><td><code>ALL USING true</code></td><td>⚠️ Qualquer autenticado <strong>reescreve os próprios acessos</strong> → auto-escalonamento total</td></tr>
+      <tr><td><code>profiles</code></td><td><code>SELECT true</code>, <code>UPDATE true</code></td><td>Qualquer um edita qualquer perfil (nome/avatar/role) — mitigado <em>em parte</em> por trigger</td></tr>
+      <tr><td><code>task_watchers</code></td><td><code>insert/delete: user_id = auth.uid()</code></td><td class="b-ok">✔ Padrão correto (a seguir)</td></tr>
+      <tr><td><code>teams, team_members</code></td><td><code>write: role ∈ (ADMIN,GESTOR)</code></td><td class="b-ok">✔ Padrão correto (a seguir)</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>Modelo de dados relevante (para desenhar as políticas)</h2>
+<div class="card">
+  <ul>
+    <li><strong>Hierarquia:</strong> <code>tasks.list_id</code> → <code>lists.folder_id</code> → <code>folders.space_id</code>. Tarefa também tem <code>main_assignee_id</code>, <code>secondary_assignee_ids[]</code>, <code>created_by</code>, <code>project_id</code>.</li>
+    <li><strong>Acesso:</strong> <code>user_access(user_id PK, space_ids uuid[], folder_ids uuid[])</code>. Papel em <code>profiles.role</code> (ADMIN/GESTOR/COLABORADOR). ADMIN vê tudo; demais veem espaços/pastas concedidos.</li>
+    <li><strong>Índices (achado de performance):</strong> não foram encontrados índices em <code>tasks.list_id</code>, <code>lists.folder_id</code>, <code>folders.space_id</code>. Isso é problema de performance <em>hoje</em> (o app busca tarefas por <code>list_id</code> o tempo todo) <strong>e</strong> pré-requisito para RLS hierárquica não ficar lenta.</li>
+  </ul>
+</div>
+
+<h2>Achados priorizados (Impacto × Risco × Esforço)</h2>
+<table>
+  <thead><tr><th>#</th><th>Achado</th><th>Objeto</th><th>Sev.</th><th>Impacto / Risco</th><th>Esforço</th><th>Migration?</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>user_access</code> é <code>USING true</code> — a <strong>raiz da confiança</strong> está aberta: um usuário reescreve seu próprio acesso e libera tudo</td><td>policy <code>auth_user_access</code></td><td><span class="badge b-crit">CRÍTICO</span></td><td>Auto-escalonamento total; anula qualquer outra política</td><td>Baixo</td><td>Sim</td></tr>
+    <tr><td>2</td><td>Núcleo de conteúdo <code>USING true</code> — vazamento de dados de todos os workspaces via API e <strong>Realtime</strong></td><td><code>tasks, lists, folders, spaces, docs, custom_field_values…</code></td><td><span class="badge b-crit">CRÍTICO</span></td><td>Confidencialidade quebrada entre clientes/áreas; escrita cruzada possível</td><td>Alto</td><td>Sim</td></tr>
+    <tr><td>3</td><td><code>profiles UPDATE USING true</code> — qualquer um altera qualquer perfil (inclusive <code>role</code>)</td><td>policy <code>auth_profiles_update</code></td><td><span class="badge b-crit">CRÍTICO</span></td><td>Escalonamento de papel; mitigado só por trigger (também exposto — ver #5)</td><td>Baixo</td><td>Sim</td></tr>
+    <tr><td>4</td><td>Funções <code>SECURITY DEFINER</code> executáveis por <code>anon</code>/<code>authenticated</code> via RPC</td><td><code>enforce_profile_role_authorization</code>, <code>handle_new_user</code></td><td><span class="badge b-high">ALTO</span></td><td>Superfície de ataque; possível efeito colateral com privilégio elevado</td><td>Baixo</td><td>Não (REVOKE/grant)</td></tr>
+    <tr><td>5</td><td>Falta de índices na hierarquia (<code>tasks.list_id</code>, <code>lists.folder_id</code>, <code>folders.space_id</code>) + GIN em <code>user_access</code> arrays</td><td>índices</td><td><span class="badge b-high">ALTO</span></td><td>Perf ruim hoje; RLS hierárquica ficaria muito lenta sem eles</td><td>Baixo</td><td>Sim (só índices, seguro)</td></tr>
+    <tr><td>6</td><td>Políticas duplicadas/legadas (<code>ALL true</code> repetida)</td><td><code>task_comments</code>, <code>task_attachments</code></td><td><span class="badge b-med">MÉDIO</span></td><td>Confusão de manutenção; risco de deixar a permissiva ao “endurecer”</td><td>Baixo</td><td>Sim</td></tr>
+    <tr><td>7</td><td><code>function_search_path_mutable</code></td><td><code>update_updated_at_column</code>, <code>handle_new_user</code></td><td><span class="badge b-med">MÉDIO</span></td><td>Boa prática de segurança (search_path fixo)</td><td>Baixo</td><td>Sim</td></tr>
+    <tr><td>8</td><td>Proteção de senha vazada (HaveIBeenPwned) desligada</td><td>Auth config</td><td><span class="badge b-med">MÉDIO</span></td><td>Senhas comprometidas aceitas</td><td>Baixíssimo</td><td>Não (config)</td></tr>
+    <tr><td>9</td><td><code>mcp_api_keys</code>: RLS on sem policy</td><td><code>mcp_api_keys</code></td><td><span class="badge b-ok">INFO</span></td><td>Nega tudo por padrão (provavelmente intencional — só confirmar)</td><td>—</td><td>Não</td></tr>
+  </tbody>
+</table>
+
+<h2>Como conciliar — desenho da RLS (proposta, NÃO aplicada)</h2>
+<div class="card">
+  <h3>1) Funções auxiliares <code>SECURITY DEFINER</code> (evitam recursão de RLS e centralizam a regra)</h3>
+  <pre>-- STABLE + search_path fixo; SECURITY DEFINER para ler user_access/profiles sem cair na própria RLS
+create or replace function public.is_admin() returns boolean
+  language sql stable security definer set search_path = public as $$
+  select exists(select 1 from profiles where id = auth.uid() and role = 'ADMIN')$$;
+
+create or replace function public.can_access_space(p_space uuid) returns boolean
+  language sql stable security definer set search_path = public as $$
+  select public.is_admin() or exists(
+    select 1 from user_access ua where ua.user_id = auth.uid() and p_space = any(ua.space_ids))$$;
+
+create or replace function public.can_access_folder(p_folder uuid) returns boolean
+  language sql stable security definer set search_path = public as $$
+  select public.is_admin()
+    or exists(select 1 from user_access ua where ua.user_id = auth.uid() and p_folder = any(ua.folder_ids))
+    or exists(select 1 from folders f where f.id = p_folder and public.can_access_space(f.space_id))$$;
+
+create or replace function public.can_access_list(p_list uuid) returns boolean
+  language sql stable security definer set search_path = public as $$
+  select exists(select 1 from lists l where l.id = p_list and public.can_access_folder(l.folder_id))$$;
+
+-- Tarefa: acessível se a lista é acessível OU o usuário é responsável/criador/observador
+create or replace function public.can_access_task(p_task uuid) returns boolean
+  language sql stable security definer set search_path = public as $$
+  select exists(select 1 from tasks t where t.id = p_task and (
+      public.can_access_list(t.list_id)
+      or t.main_assignee_id = auth.uid()
+      or auth.uid() = any(t.secondary_assignee_ids)
+      or t.created_by = auth.uid()
+      or exists(select 1 from task_watchers w where w.task_id = t.id and w.user_id = auth.uid())))$$;</pre>
+
+  <h3>2) Políticas (exemplos) substituindo <code>USing true</code></h3>
+  <pre>-- user_access: cada um lê o próprio; só ADMIN escreve
+drop policy auth_user_access on user_access;
+create policy ua_select on user_access for select to authenticated
+  using (user_id = auth.uid() or public.is_admin());
+create policy ua_write on user_access for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+-- spaces / folders / lists / tasks: pela hierarquia
+create policy spaces_sel on spaces for select to authenticated using (public.can_access_space(id));
+create policy tasks_sel  on tasks  for select to authenticated using (public.can_access_task(id));
+create policy tasks_ins  on tasks  for insert to authenticated with check (public.can_access_list(list_id));
+create policy tasks_upd  on tasks  for update to authenticated using (public.can_access_task(id));
+
+-- profiles: leitura geral (diretório de menções) ok; update só do próprio, role só ADMIN
+create policy prof_upd on profiles for update to authenticated
+  using (id = auth.uid() or public.is_admin());</pre>
+
+  <h3>3) Índices de suporte (sem eles a RLS fica lenta)</h3>
+  <pre>create index on tasks(list_id);
+create index on lists(folder_id);
+create index on folders(space_id);
+create index on tasks(main_assignee_id);
+create index on tasks(created_by);
+create index on user_access using gin(space_ids);
+create index on user_access using gin(folder_ids);</pre>
+</div>
+
+<h2>Riscos da mudança e mitigação</h2>
+<div class="card">
+  <ul>
+    <li><strong>Quebrar visibilidade legítima</strong> (Minhas Tarefas / Inbox / tarefas atribuídas fora do espaço): as políticas incluem responsável/criador/observador em <code>can_access_task</code>. Precisa mapear <em>todos</em> os filtros do cliente antes de fechar.</li>
+    <li><strong>Escritas do app</strong>: automações inserem tarefas com <code>created_by = actor</code> (ok com <code>can_access_list</code>); Edge Functions usam <code>service_role</code> (bypassa RLS — ok). Revisar cada <code>WITH CHECK</code> contra os caminhos reais de escrita.</li>
+    <li><strong>Performance</strong>: funções <code>STABLE</code> + índices acima; usar <code>(select auth.uid())</code> para caching por statement.</li>
+    <li><strong>Realtime</strong>: a RLS passa a valer para o Realtime (é o que fecha o vazamento), mas confirmar que os canais do app continuam recebendo o que precisam.</li>
+    <li><strong>Rollout seguro</strong>: aplicar numa <strong>branch do Supabase</strong> (MCP <code>create_branch</code>), rodar o E2E (smoke-auth + task-creation-access + visibility-realtime-admin) e um smoke manual por papel; só então <code>merge_branch</code>. Manter migrations reversíveis.</li>
+  </ul>
+</div>
+
+<h2>Plano de rollout sugerido (faseado, reversível)</h2>
+<div class="card">
+  <ol>
+    <li><strong>Fase 0 — índices</strong> (achado #5): seguro, melhora perf já, e prepara o terreno. Migration isolada.</li>
+    <li><strong>Fase 1 — raiz da confiança</strong>: fechar <code>user_access</code> (#1) e <code>profiles UPDATE</code> (#3) + revisar RPCs SECURITY DEFINER (#4). Baixo tráfego, alto ganho.</li>
+    <li><strong>Fase 2 — helpers + hierarquia</strong>: criar as funções e trocar as políticas de <code>spaces/folders/lists/tasks</code> e sub-entidades (#2), tudo em branch, validado por E2E.</li>
+    <li><strong>Fase 3 — limpeza</strong>: remover políticas duplicadas (#6), fixar <code>search_path</code> (#7), ligar proteção de senha (#8).</li>
+  </ol>
+  <p class="sub">Esforço total estimado: 2–4 dias de trabalho cuidadoso (a maior parte é mapear os filtros do cliente e validar, não escrever SQL).</p>
+</div>
+
+<h2>Conclusão</h2>
+<div class="card verdict">
+  <p><strong>Conciliável: sim.</strong> A arquitetura de permissões do app é expressável em RLS, com precedente já no banco. O trabalho real não é o SQL — é <strong>espelhar fielmente os filtros do cliente</strong> (papéis + <code>user_access</code> + responsável/observador/criador), <strong>adicionar índices</strong> e <strong>validar em branch com o E2E</strong> antes de promover. Recomendo começar pela <strong>Fase 0 (índices)</strong> e <strong>Fase 1 (fechar <code>user_access</code> e <code>profiles</code>)</strong> — maior redução de risco com menor chance de quebra — e deixar a Fase 2 (núcleo) para uma janela dedicada com validação por papel.</p>
+  <p class="sub">Conforme o playbook, esta análise não alterou nenhum objeto do banco, política ou dado. Todos os comandos SQL acima são <strong>propostas</strong>.</p>
+</div>
+
+</div>
+</body>
+</html>
