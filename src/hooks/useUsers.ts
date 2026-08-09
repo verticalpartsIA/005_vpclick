@@ -126,17 +126,19 @@ export function useUsers(params: {
   };
 
   const handleAdminDeleteUser = async (userId: string) => {
-    if (window.confirm("Excluir este usuário permanentemente?")) {
-      // auth.admin.deleteUser exige a service_role key — vive na Edge Function
-      // admin-user-management, que só executa se o chamador for ADMIN.
+    // Soft-delete: hard-delete falha por FKs NO ACTION (usuário referenciado em
+    // tarefas/comentários/atividades). A Edge Function desativa o perfil
+    // (is_active=false, filtrado em loadAllUsers) e bane o login. Reversível.
+    if (window.confirm("Desativar este usuário? O login será bloqueado e ele sairá das listas e menções, mas o histórico (tarefas, comentários) é preservado.")) {
       const { data, error } = await supabase.functions.invoke('admin-user-management', {
         body: { action: 'delete', userId },
       });
       if (!error && !data?.error) {
         setAdminUsers(prev => prev.filter(u => u.id !== userId));
+        toast.success('Usuário desativado.');
       } else {
-        console.error('Erro ao excluir usuário:', data?.error || error);
-        toast.error('Erro ao excluir usuário: ' + (data?.error || error?.message));
+        console.error('Erro ao desativar usuário:', data?.error || error);
+        toast.error('Erro ao desativar usuário: ' + (data?.error || error?.message));
       }
     }
   };
