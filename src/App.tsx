@@ -8656,7 +8656,7 @@ function TaskDetailModal(props: any) {
                   <section>
                     <div className="flex items-center justify-between mb-6">
                       <h3 className="text-sm font-bold text-gray-900">Campos personalizados</h3>
-                      {!isReadOnly && onManageFields && (
+                      {!isReadOnly && onManageFields && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
                         <button
                           type="button"
                           onClick={() => onManageFields(task.listId)}
