@@ -2269,32 +2269,33 @@ export default function App() {
 
   // Creation Handlers
   const handleCreateSpace = async (name: string, color: string, icon: string = 'Layout') => {
-    const { data, error } = await supabase
+    // id gerado no cliente: com a RLS de leitura (Fase 2a), um espaço recém-criado
+    // ainda não é acessível ao criador não-admin, então `.select()`/RETURNING
+    // falharia. Inserimos sem RETURNING; o acesso é concedido no banco pelo trigger
+    // grant_space_creator_access e refletido no estado local abaixo.
+    const newId = crypto.randomUUID();
+    const { error } = await supabase
       .from('spaces')
-      .insert({
-        name,
-        workspace_id: workspace.id,
-        color,
-        icon
-      })
-      .select()
-      .single();
+      .insert({ id: newId, name, workspace_id: workspace.id, color, icon });
 
-    if (data && !error) {
+    if (!error) {
       const newSpace: Space = {
-        id: data.id,
-        name: data.name,
-        workspaceId: data.workspace_id,
-        color: data.color,
-        icon: data.icon,
-        createdAt: data.created_at
+        id: newId,
+        name,
+        workspaceId: workspace.id,
+        color,
+        icon,
+        createdAt: new Date().toISOString(),
       };
       setSpaces([...spaces, newSpace]);
 
       if (currentUser.role !== UserRole.ADMIN) {
-        const currentAccess = userAccess[currentUser.id] || { spaceIds: [], folderIds: [] };
-        const newSpaceIds = [...currentAccess.spaceIds, newSpace.id];
-        await handleAdminUpdateAccess(currentUser.id, newSpaceIds, currentAccess.folderIds);
+        // O trigger já gravou o acesso no banco (a Fase 1 bloqueia escrita direta
+        // de user_access por não-admin); aqui só refletimos no estado do cliente.
+        setUserAccess((prev) => {
+          const cur = prev[currentUser.id] || { spaceIds: [], folderIds: [] };
+          return { ...prev, [currentUser.id]: { ...cur, spaceIds: [...cur.spaceIds, newId] } };
+        });
       }
 
       toast.success('Espaço criado com sucesso!');
@@ -2349,12 +2350,15 @@ export default function App() {
       }
 
       if (currentUser.role !== UserRole.ADMIN) {
-        const currentAccess = userAccess[currentUser.id] || { spaceIds: [], folderIds: [] };
-        const newSpaceIds = currentAccess.spaceIds.includes(targetSpaceId)
-          ? currentAccess.spaceIds
-          : [...currentAccess.spaceIds, targetSpaceId];
-        const newFolderIds = [...currentAccess.folderIds, newFolder.id];
-        await handleAdminUpdateAccess(currentUser.id, newSpaceIds, newFolderIds);
+        // A pasta é acessível via o espaço (que o criador já acessa), então NÃO
+        // precisamos gravar user_access (a Fase 1 bloqueia isso p/ não-admin e
+        // daria um toast de erro espúrio). Só refletimos no estado do cliente
+        // para a UI ficar consistente.
+        setUserAccess((prev) => {
+          const cur = prev[currentUser.id] || { spaceIds: [], folderIds: [] };
+          const spaceIds = cur.spaceIds.includes(targetSpaceId) ? cur.spaceIds : [...cur.spaceIds, targetSpaceId];
+          return { ...prev, [currentUser.id]: { spaceIds, folderIds: [...cur.folderIds, newFolder.id] } };
+        });
       }
 
       toast.success('Pasta criada com sucesso!');
