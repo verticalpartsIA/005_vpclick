@@ -5030,7 +5030,8 @@ function Sidebar({
                             {space.name}
                           </span>
 
-                          {/* Space hover actions */}
+                          {/* Space hover actions — só ADMIN/GESTOR (casa com a RLS is_manager) */}
+                          {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity absolute right-2 bg-sidebar/90 rounded px-0.5">
                             <button onClick={(e) => { e.stopPropagation(); onOpenCreateFolder(space.id); }} className="p-1 text-sidebar-foreground/40 hover:text-primary rounded" title="Criar pasta"><Icons.Plus /></button>
                             <button onClick={(e) => { e.stopPropagation(); onRenameSpace(space.id, space.name); }} className="p-1 text-sidebar-foreground/40 hover:text-blue-500 rounded" title="Renomear">
@@ -5040,6 +5041,7 @@ function Sidebar({
                               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                             </button>
                           </div>
+                          )}
                         </div>
 
                         {isExpanded && (
@@ -5157,13 +5159,17 @@ function Sidebar({
                                           <DropdownMenuSub>
                                             <DropdownMenuSubTrigger className="text-xs">Criar novo</DropdownMenuSubTrigger>
                                             <DropdownMenuSubContent>
-                                              <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onCreateList?.(folder.id); }}><ListPlus className="mr-2 h-3.5 w-3.5" />Criar lista</DropdownMenuItem>
+                                              {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
+                                                <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onCreateList?.(folder.id); }}><ListPlus className="mr-2 h-3.5 w-3.5" />Criar lista</DropdownMenuItem>
+                                              )}
                                               <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onCreateDoc(folder.id); }}><FileText className="mr-2 h-3.5 w-3.5" />Novo documento</DropdownMenuItem>
                                             </DropdownMenuSubContent>
                                           </DropdownMenuSub>
+                                          {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (<>
                                           <DropdownMenuSeparator />
                                           <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameFolder(folder.id, folder.name); }}>Renomear pasta</DropdownMenuItem>
                                           <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onDeleteFolder(folder.id); }}>Excluir pasta</DropdownMenuItem>
+                                          </>)}
                                         </DropdownMenuContent>
                                       </DropdownMenu>
                                     </div>
@@ -5219,6 +5225,7 @@ function Sidebar({
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onToggleFavorite?.('list', list.id, list.name); }}>
                                                     {favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? '★ Remover dos favoritos' : '☆ Adicionar aos favoritos'}
                                                   </DropdownMenuItem>
+                                                  {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (<>
                                                   <DropdownMenuSeparator />
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
                                                   <DropdownMenuSub>
@@ -5236,6 +5243,7 @@ function Sidebar({
                                                   </DropdownMenuSub>
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onDuplicateList?.(list.id, list.name); }}>Duplicar projeto</DropdownMenuItem>
                                                   <DropdownMenuItem className="text-xs text-red-600 focus:text-red-600" onClick={(e) => { e.stopPropagation(); onDeleteList(list.id); }}>Excluir lista</DropdownMenuItem>
+                                                  </>)}
                                                 </DropdownMenuContent>
                                               </DropdownMenu>
                                             </div>
@@ -5258,35 +5266,41 @@ function Sidebar({
                                         />
                                       ))}
 
-                                      <button
-                                        onClick={(e) => { e.stopPropagation(); onCreateList?.(folder.id); }}
-                                        className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-2 py-1 rounded hover:bg-sidebar-accent/50 transition-colors"
-                                      >
-                                        <Icons.Plus /> Nova Lista
-                                      </button>
+                                      {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); onCreateList?.(folder.id); }}
+                                          className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-2 py-1 rounded hover:bg-sidebar-accent/50 transition-colors"
+                                        >
+                                          <Icons.Plus /> Nova Lista
+                                        </button>
+                                      )}
                                     </div>
                                   )}
                                 </div>
                               );
                             })}
-                            <button
-                              onClick={(e) => { e.stopPropagation(); onOpenCreateFolder(space.id); }}
-                              className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-2 py-1 rounded hover:bg-sidebar-accent/50 transition-colors"
-                            >
-                              <Icons.Plus /> Nova Pasta
-                            </button>
+                            {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); onOpenCreateFolder(space.id); }}
+                                className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-2 py-1 rounded hover:bg-sidebar-accent/50 transition-colors"
+                              >
+                                <Icons.Plus /> Nova Pasta
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
                     );
                   })}
 
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onOpenCreateSpace(); }}
-                    className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-4 py-1.5 rounded hover:bg-sidebar-accent/50 transition-colors mt-1"
-                  >
-                    <Icons.Plus /> Novo Espaço
-                  </button>
+                  {(userRole === UserRole.ADMIN || userRole === UserRole.GESTOR) && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); onOpenCreateSpace(); }}
+                      className="w-full text-left text-[11px] text-sidebar-foreground/40 hover:text-primary flex items-center gap-1.5 px-4 py-1.5 rounded hover:bg-sidebar-accent/50 transition-colors mt-1"
+                    >
+                      <Icons.Plus /> Novo Espaço
+                    </button>
+                  )}
                 </div>
               )}
             </div>
