@@ -2268,105 +2268,89 @@ export default function App() {
   }, []);
 
   // Creation Handlers
-  const handleCreateSpace = async (name: string, color: string, icon: string = 'Layout') => {
-    // id gerado no cliente: com a RLS de leitura (Fase 2a), um espaço recém-criado
-    // ainda não é acessível ao criador não-admin, então `.select()`/RETURNING
-    // falharia. Inserimos sem RETURNING; o acesso é concedido no banco pelo trigger
-    // grant_space_creator_access e refletido no estado local abaixo.
-    const newId = crypto.randomUUID();
-    const { error } = await supabase
-      .from('spaces')
-      .insert({ id: newId, name, workspace_id: workspace.id, color, icon });
+  // Gera um UUID no cliente (com fallback caso crypto.randomUUID não exista).
+  // Necessário porque, com a RLS (Fase 2a/2b), um space/folder/list recém-criado
+  // por um NÃO-ADMIN ainda não é acessível a ele no MESMO statement (can_access_*
+  // é STABLE e não enxerga a linha nova), então `.insert().select()` (RETURNING)
+  // falha com 42501. Inserindo com id do cliente e SEM `.select()`, evitamos o
+  // RETURNING; a linha fica acessível nas leituras seguintes.
+  const newUuid = (): string => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+    });
+  };
 
-    if (!error) {
+  const handleCreateSpace = async (name: string, color: string, icon: string = 'Layout') => {
+    try {
+      const newId = newUuid();
+      const { error } = await supabase
+        .from('spaces')
+        .insert({ id: newId, name, workspace_id: workspace.id, color, icon });
+      if (error) throw error;
+
       const newSpace: Space = {
-        id: newId,
-        name,
-        workspaceId: workspace.id,
-        color,
-        icon,
-        createdAt: new Date().toISOString(),
+        id: newId, name, workspaceId: workspace.id, color, icon, createdAt: new Date().toISOString(),
       };
       setSpaces([...spaces, newSpace]);
-
       if (currentUser.role !== UserRole.ADMIN) {
-        // O trigger já gravou o acesso no banco (a Fase 1 bloqueia escrita direta
-        // de user_access por não-admin); aqui só refletimos no estado do cliente.
+        // O trigger grant_space_creator_access já gravou o acesso no banco;
+        // aqui só refletimos no estado do cliente.
         setUserAccess((prev) => {
           const cur = prev[currentUser.id] || { spaceIds: [], folderIds: [] };
           return { ...prev, [currentUser.id]: { ...cur, spaceIds: [...cur.spaceIds, newId] } };
         });
       }
-
       toast.success('Espaço criado com sucesso!');
       setIsSpaceModalOpen(false);
-    } else {
-      console.error('Erro ao criar espaço:', error);
-      toast.error('Erro ao criar espaço: ' + error?.message);
+    } catch (err: any) {
+      console.error('Erro ao criar espaço:', err);
+      toast.error('Erro ao criar espaço: ' + (err?.message || 'tente novamente'));
     }
   };
 
   const handleCreateFolder = async (name: string) => {
     if (!targetSpaceId) return;
+    try {
+      // ids no cliente + sem `.select()` (ver newUuid): o RETURNING falharia para
+      // não-admin. A pasta/lista ficam acessíveis via o espaço nas leituras seguintes.
+      const folderId = newUuid();
+      const { error: folderError } = await supabase
+        .from('folders')
+        .insert({ id: folderId, name, space_id: targetSpaceId });
+      if (folderError) throw folderError;
+      const newFolder: Folder = { id: folderId, name, spaceId: targetSpaceId };
 
-    // 1. Criar Folder
-    const { data: folderData, error: folderError } = await supabase
-      .from('folders')
-      .insert({ name, space_id: targetSpaceId })
-      .select()
-      .single();
-
-    if (folderData && !folderError) {
-      const newFolder: Folder = {
-        id: folderData.id,
-        name: folderData.name,
-        spaceId: folderData.space_id
-      };
-
-      // 2. Criar lista padrão 'Geral' com o primeiro grupo de status (Padrão)
+      // Lista padrão 'Geral' com o primeiro grupo de status (Padrão)
       const defaultStatusGroupId = statusGroups.find(g => g.name === 'Padrão')?.id || statusGroups[0]?.id;
-
-      const { data: listData, error: listError } = await supabase
+      const listId = newUuid();
+      const { error: listError } = await supabase
         .from('lists')
-        .insert({
-          name: 'Geral',
-          folder_id: folderData.id,
-          status_group_id: defaultStatusGroupId
-        })
-        .select()
-        .single();
+        .insert({ id: listId, name: 'Geral', folder_id: folderId, status_group_id: defaultStatusGroupId });
 
-      if (listData && !listError) {
-        const defaultList: List = {
-          id: listData.id,
-          name: listData.name,
-          folderId: listData.folder_id,
-          statusGroupId: listData.status_group_id
-        };
-        setFolders([...folders, newFolder]);
-        setLists([...lists, defaultList]);
+      setFolders([...folders, newFolder]);
+      if (!listError) {
+        setLists([...lists, { id: listId, name: 'Geral', folderId, statusGroupId: defaultStatusGroupId }]);
       } else {
-        setFolders([...folders, newFolder]);
+        console.error('Pasta criada, mas a lista padrão falhou:', listError);
       }
 
       if (currentUser.role !== UserRole.ADMIN) {
-        // A pasta é acessível via o espaço (que o criador já acessa), então NÃO
-        // precisamos gravar user_access (a Fase 1 bloqueia isso p/ não-admin e
-        // daria um toast de erro espúrio). Só refletimos no estado do cliente
-        // para a UI ficar consistente.
+        // Pasta acessível via o espaço; só reflete no estado do cliente.
         setUserAccess((prev) => {
           const cur = prev[currentUser.id] || { spaceIds: [], folderIds: [] };
           const spaceIds = cur.spaceIds.includes(targetSpaceId) ? cur.spaceIds : [...cur.spaceIds, targetSpaceId];
-          return { ...prev, [currentUser.id]: { spaceIds, folderIds: [...cur.folderIds, newFolder.id] } };
+          return { ...prev, [currentUser.id]: { spaceIds, folderIds: [...cur.folderIds, folderId] } };
         });
       }
 
       toast.success('Pasta criada com sucesso!');
       setIsFolderModalOpen(false);
       setTargetSpaceId(null);
-    } else {
-      console.error('Erro ao criar pasta:', folderError);
-      toast.error('Erro ao criar pasta: ' + folderError?.message);
+    } catch (err: any) {
+      console.error('Erro ao criar pasta:', err);
+      toast.error('Erro ao criar pasta: ' + (err?.message || 'tente novamente'));
     }
   };
 
@@ -2381,26 +2365,23 @@ export default function App() {
   const handleConfirmCreateList = async (folderId: string, name: string, statusGroupId: string): Promise<void> => {
     const folder = folders.find((f) => f.id === folderId);
 
-    const { data, error } = await supabase
+    // id no cliente + sem `.select()` (ver newUuid): o RETURNING falharia p/ não-admin.
+    const listId = newUuid();
+    const { error } = await supabase
       .from('lists')
-      .insert({
-        name: name.trim(),
-        folder_id: folderId,
-        status_group_id: statusGroupId
-      })
-      .select()
-      .single();
+      .insert({ id: listId, name: name.trim(), folder_id: folderId, status_group_id: statusGroupId });
 
-    if (error || !data) {
-      toast.error('Erro ao criar lista: ' + (error?.message || 'tente novamente'));
+    if (error) {
+      console.error('Erro ao criar lista:', error);
+      toast.error('Erro ao criar lista: ' + (error.message || 'tente novamente'));
       return;
     }
 
     const newList: List = {
-      id: data.id,
-      name: data.name,
-      folderId: data.folder_id,
-      statusGroupId: data.status_group_id
+      id: listId,
+      name: name.trim(),
+      folderId,
+      statusGroupId,
     };
 
     setLists((prev) => [...prev, newList]);
