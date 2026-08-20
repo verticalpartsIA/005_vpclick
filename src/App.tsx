@@ -1188,6 +1188,7 @@ export default function App() {
   // Diretório de usuários do workspace + operações de admin (ver useUsers).
   const {
     adminUsers,
+    lastSignInMap,
     handleAdminUpdateRole,
     handleAdminUpdateAccess,
     handleAdminDeleteUser,
@@ -3212,6 +3213,7 @@ export default function App() {
                 spaces={spaces}
                 folders={folders}
                 users={adminUsers}
+                lastSignInMap={lastSignInMap}
                 access={userAccess}
                 onAdminUpdateRole={handleAdminUpdateRole}
                 onAdminUpdateAccess={handleAdminUpdateAccess}
