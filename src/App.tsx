@@ -1197,7 +1197,7 @@ export default function App() {
   } = useUsers({ session, currentUser, setCurrentUser, setUserAccess });
 
   // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
-  const { dashboardTasks, dashboardLists, isDashboardLoading } = useDashboard(session, activeView);
+  const { dashboardTasks, dashboardLists, isDashboardLoading, loadDashboardTasks } = useDashboard(session, activeView);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -1549,6 +1549,10 @@ export default function App() {
   useEffect(() => { loadTasksRef.current = loadTasks; }, [loadTasks]);
   const refreshTaskCountIndexRef = useRef(refreshTaskCountIndex);
   useEffect(() => { refreshTaskCountIndexRef.current = refreshTaskCountIndex; }, [refreshTaskCountIndex]);
+  const loadDashboardTasksRef = useRef(loadDashboardTasks);
+  useEffect(() => { loadDashboardTasksRef.current = loadDashboardTasks; }, [loadDashboardTasks]);
+  const activeViewRef = useRef(activeView);
+  useEffect(() => { activeViewRef.current = activeView; }, [activeView]);
 
   // ── Busca server-side de tarefas por título (bug #9 do #81) ──────────────
   // O array `tasks` é limitado à janela carregada: o PostgREST devolve no
@@ -1583,7 +1587,11 @@ export default function App() {
   // Realtime de tarefas e comentários: reflete alterações feitas por outros
   // usuários/abas sem precisar recarregar a página. As tabelas precisam estar na
   // publicação `supabase_realtime` (migration 11). Recarrega o escopo atual com
-  // debounce para não disparar múltiplas vezes em rajadas de eventos.
+  // debounce para não disparar múltiplas vezes em rajadas de eventos. Se a aba
+  // aberta for o Dashboard, também recarrega os dados agregados dele — senão o
+  // "dados em tempo real" do rodapé seria só o instantâneo de quando a aba foi
+  // aberta, sem refletir mudanças feitas por outros usuários enquanto ela fica
+  // visível.
   useEffect(() => {
     if (!session?.user?.id) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1592,6 +1600,7 @@ export default function App() {
       timer = setTimeout(() => {
         loadTasksRef.current?.();
         refreshTaskCountIndexRef.current?.();
+        if (activeViewRef.current === 'Dashboard') loadDashboardTasksRef.current?.();
       }, 1200);
     };
     const channel = supabase
@@ -3301,6 +3310,7 @@ export default function App() {
                   lists={lists}
                   allLists={dashboardLists.length > 0 ? dashboardLists : lists}
                   isLoading={isDashboardLoading && dashboardTasks.length === 0}
+                  isAdmin={currentUser.role === UserRole.ADMIN}
                 />
               )
             )}
@@ -6908,7 +6918,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDupli
   );
 }
 
-function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLists, isLoading }: any) {
+function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLists, isLoading, isAdmin }: any) {
   // Loading state: mostra skeleton enquanto carrega dados globais pela primeira vez
   if (isLoading) {
     return (
@@ -7001,11 +7011,16 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
     { name: '🚫 Cancelado',    color: '#ef4444', test: (s: string) => s.includes('cancel') || s.includes('reprova') },
   ];
   const statusData = useMemo(() => {
-    return STATUS_GROUPS_DASH.map(g => ({
+    const groups = STATUS_GROUPS_DASH.map(g => ({
       name: g.name,
       value: filteredTasks.filter((t: Task) => g.test((t.status || '').toLowerCase())).length,
       color: g.color,
-    })).filter(d => d.value > 0);
+    }));
+    // Status que não batem em nenhum grupo (ex.: "Aberto", "Não Iniciado") ainda
+    // contam no Total do KPI — sem esse catch-all a pizza somava menos que o total.
+    const semGrupo = filteredTasks.length - groups.reduce((sum, g) => sum + g.value, 0);
+    if (semGrupo > 0) groups.push({ name: '📌 Outros', value: semGrupo, color: '#94a3b8' });
+    return groups.filter(d => d.value > 0);
   }, [filteredTasks]);
 
   // --- User performance ---
@@ -7041,16 +7056,20 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
     { key: 'BAIXA',          label: '🔵 Baixa',          color: '#3b82f6' },
     { key: 'SEM PRIORIDADE', label: '⚪ Sem prioridade', color: '#9ca3af' },
   ];
+  // Remove acentos antes de comparar: o banco tem grafias inconsistentes para a
+  // mesma prioridade (ex.: "Média" e "Media" sem acento), que sem isso caíam
+  // incorretamente em "Sem prioridade".
+  const normalizePriorityKey = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
   const priorityData = useMemo(() => {
     const counts: Record<string, number> = {};
-    PRIORITY_CFG.forEach(c => { counts[c.key] = 0; });
+    PRIORITY_CFG.forEach(c => { counts[normalizePriorityKey(c.key)] = 0; });
     filteredTasks.forEach((t: Task) => {
-      const p = (t.priority || 'SEM PRIORIDADE').toUpperCase();
+      const p = normalizePriorityKey(t.priority || 'SEM PRIORIDADE');
       if (counts[p] !== undefined) counts[p]++;
-      else counts['SEM PRIORIDADE']++;
+      else counts[normalizePriorityKey('SEM PRIORIDADE')]++;
     });
     return PRIORITY_CFG
-      .map(c => ({ name: c.label, color: c.color, count: counts[c.key] }))
+      .map(c => ({ name: c.label, color: c.color, count: counts[normalizePriorityKey(c.key)] }))
       .filter(d => d.count > 0);
   }, [filteredTasks]);
 
@@ -7061,7 +7080,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
   const emDia = healthBuckets.find(b => b.emoji === '😄')?.count || 0;
   const criticas = healthBuckets.find(b => b.emoji === '😰')?.count || 0;
   const aguardando = healthBuckets.find(b => b.emoji === '⏳')?.count || 0;
-  const prorrogadas = tasks.filter((t: Task) => (t.extensionCount || 0) > 0).length;
+  const prorrogadas = filteredTasks.filter((t: Task) => (t.extensionCount || 0) > 0).length;
   const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
 
   // --- Resumo por lista (todos os projetos) — usa allLists (dados globais) ---
@@ -7119,7 +7138,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
       {/* ── Row 1: KPI Cards ── */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
         {[
-          { emoji: '📋', title: 'Total', value: total, sub: 'tarefas no workspace', bg: 'bg-blue-50', text: 'text-blue-700' },
+          { emoji: '📋', title: 'Total', value: total, sub: isAdmin ? 'tarefas no workspace' : 'tarefas visíveis para você', bg: 'bg-blue-50', text: 'text-blue-700' },
           { emoji: '🎉', title: 'Concluídas', value: concluidas, sub: `${taxaConclusao}% do total`, bg: 'bg-green-50', text: 'text-green-700' },
           { emoji: '😡', title: 'Atrasadas', value: atrasadas, sub: 'passaram do prazo', bg: 'bg-red-50', text: 'text-red-700' },
           { emoji: '😄', title: 'Em Dia', value: emDia, sub: 'dentro do prazo', bg: 'bg-sky-50', text: 'text-sky-700' },
@@ -7356,7 +7375,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
 
       {/* Fonte dos dados */}
       <p className="text-center text-[10px] text-gray-300 pb-2">
-        Dashboard global · {total} tarefas · dados em tempo real do Supabase
+        {isAdmin ? 'Dashboard global' : 'Seu dashboard'} · {total} tarefas · dados em tempo real do Supabase
       </p>
     </div>
   );
