@@ -27,6 +27,10 @@ export function useUsers(params: {
 }) {
   const { session, currentUser, setCurrentUser, setUserAccess } = params;
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
+  // id -> last_sign_in_at (ISO) para o alerta de contas inativas no Painel
+  // Admin. Só existe em auth.users (não exposto via PostgREST); vem da RPC
+  // get_users_last_sign_in, que só retorna dados para quem já é ADMIN.
+  const [lastSignInMap, setLastSignInMap] = useState<Record<string, string | null>>({});
 
   const loadAllUsers = useCallback(async () => {
     const { data } = await supabase
@@ -58,6 +62,20 @@ export function useUsers(params: {
   useEffect(() => {
     if (session) loadAllUsers();
   }, [session, loadAllUsers]);
+
+  // Último login por usuário — só para ADMIN (a RPC devolve vazio para os
+  // demais papéis). Alimenta o alerta de contas inativas no Painel Admin.
+  useEffect(() => {
+    if (!session || currentUser.role !== UserRole.ADMIN) return;
+    supabase.rpc('get_users_last_sign_in').then(({ data, error }) => {
+      if (error) { console.error('Erro ao carregar último login dos usuários:', error); return; }
+      const map: Record<string, string | null> = {};
+      (data || []).forEach((row: { id: string; last_sign_in_at: string | null }) => {
+        map[row.id] = row.last_sign_in_at;
+      });
+      setLastSignInMap(map);
+    });
+  }, [session, currentUser.role]);
 
   // Realtime: mantém a lista fresca quando um perfil é criado/ativado depois do
   // login — sem isso, usuários provisionados após a sessão só apareciam nas
@@ -229,6 +247,7 @@ export function useUsers(params: {
 
   return {
     adminUsers,
+    lastSignInMap,
     handleAdminUpdateRole,
     handleAdminUpdateAccess,
     handleAdminDeleteUser,

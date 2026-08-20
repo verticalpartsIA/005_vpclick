@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Users,
   RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 
 import { Folder, Space, User, UserRole } from "@/types";
@@ -26,10 +27,13 @@ const createUserSchema = z.object({
   role: z.nativeEnum(UserRole),
 });
 
+const STALE_LOGIN_DAYS = 90;
+
 type AdminPanelProps = {
   spaces: Space[];
   folders: Folder[];
   users: User[];
+  lastSignInMap: Record<string, string | null>;
   access: UserAccess;
   onAdminUpdateRole: (userId: string, role: UserRole) => Promise<void>;
   onAdminUpdateAccess: (userId: string, spaceIds: string[], folderIds: string[]) => Promise<void>;
@@ -95,6 +99,7 @@ export default function AdminPanel({
   spaces,
   folders,
   users,
+  lastSignInMap,
   access,
   onAdminUpdateRole,
   onAdminUpdateAccess,
@@ -135,6 +140,28 @@ export default function AdminPanel({
   }, [users, search]);
 
   const toggle = (id: string) => setExpandedId((prev) => (prev === id ? null : id));
+
+  // ── Alerta de contas inativas ───────────────────────────────
+  // lastSignInMap só chega preenchido para quem é ADMIN (a RPC devolve vazio
+  // para os demais); enquanto vazio, tratamos como "ainda não carregou" e não
+  // mostramos o alerta, pra não piscar falso-positivo.
+  const now = useMemo(() => Date.now(), []);
+  const daysSinceLastSignIn = (userId: string): number | null => {
+    const lastSignIn = lastSignInMap[userId];
+    if (!lastSignIn) return null; // nunca logou (ou dado ainda não carregado)
+    return Math.floor((now - new Date(lastSignIn).getTime()) / 86_400_000);
+  };
+  const staleUsers = useMemo(() => {
+    if (Object.keys(lastSignInMap).length === 0) return [];
+    return users
+      .map((u) => {
+        const lastSignIn = lastSignInMap[u.id];
+        const neverSignedIn = lastSignIn === null;
+        const days = lastSignIn ? Math.floor((now - new Date(lastSignIn).getTime()) / 86_400_000) : null;
+        return { user: u, days, neverSignedIn };
+      })
+      .filter((s) => s.neverSignedIn || (s.days !== null && s.days >= STALE_LOGIN_DAYS));
+  }, [users, lastSignInMap, now]);
 
   // ── Handlers ──────────────────────────────────────────────
   const handleCreateUser = async () => {
@@ -222,6 +249,37 @@ export default function AdminPanel({
           Voltar
         </button>
       </header>
+
+      {/* Alerta de contas ativas sem login há muito tempo (ex-funcionário
+          nunca desativado, conta nunca usada, etc.) */}
+      {staleUsers.length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-bold text-amber-800">
+                {staleUsers.length} conta{staleUsers.length !== 1 ? "s" : ""} ativa{staleUsers.length !== 1 ? "s" : ""} sem login há mais de {STALE_LOGIN_DAYS} dias
+              </p>
+              <p className="text-xs text-amber-700 mt-0.5">
+                Confira se ainda deveriam estar ativas (ex-funcionário não desativado, conta nunca usada, etc.). Contas legitimamente pouco usadas podem ser ignoradas.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {staleUsers.map(({ user: u, days, neverSignedIn }) => (
+                  <span
+                    key={u.id}
+                    className="inline-flex items-center gap-1 rounded-full bg-white border border-amber-200 px-2.5 py-1 text-xs font-semibold text-amber-800"
+                  >
+                    {u.name}
+                    <span className="text-amber-500 font-normal">
+                      {neverSignedIn ? "· nunca logou" : `· ${days}d`}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         {/* ── Col 1: Criar usuário ───────────────────────────── */}
@@ -350,6 +408,9 @@ export default function AdminPanel({
               const userAccess = access[u.id] || { spaceIds: [], folderIds: [] };
               const accessCount = userAccess.spaceIds.length;
               const isAdmin = u.role === UserRole.ADMIN;
+              const days = daysSinceLastSignIn(u.id);
+              const neverSignedIn = lastSignInMap[u.id] === null;
+              const isStale = neverSignedIn || (days !== null && days >= STALE_LOGIN_DAYS);
 
               return (
                 <div key={u.id} className="group">
@@ -376,6 +437,17 @@ export default function AdminPanel({
                       <p className="text-sm font-semibold text-gray-900 truncate">{u.name}</p>
                       <p className="text-xs text-gray-500 truncate">{u.email}</p>
                     </div>
+
+                    {/* Sem login há muito tempo */}
+                    {isStale && (
+                      <span
+                        title={`Ativo, mas ${neverSignedIn ? "nunca fez login" : `sem login há ${days} dias`}`}
+                        className="shrink-0 hidden sm:inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700"
+                      >
+                        <AlertTriangle className="w-2.5 h-2.5" />
+                        {neverSignedIn ? "nunca logou" : `${days}d sem login`}
+                      </span>
+                    )}
 
                     {/* Badge papel */}
                     <span
