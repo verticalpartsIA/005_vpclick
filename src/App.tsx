@@ -7001,11 +7001,16 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
     { name: '🚫 Cancelado',    color: '#ef4444', test: (s: string) => s.includes('cancel') || s.includes('reprova') },
   ];
   const statusData = useMemo(() => {
-    return STATUS_GROUPS_DASH.map(g => ({
+    const groups = STATUS_GROUPS_DASH.map(g => ({
       name: g.name,
       value: filteredTasks.filter((t: Task) => g.test((t.status || '').toLowerCase())).length,
       color: g.color,
-    })).filter(d => d.value > 0);
+    }));
+    // Status que não batem em nenhum grupo (ex.: "Aberto", "Não Iniciado") ainda
+    // contam no Total do KPI — sem esse catch-all a pizza somava menos que o total.
+    const semGrupo = filteredTasks.length - groups.reduce((sum, g) => sum + g.value, 0);
+    if (semGrupo > 0) groups.push({ name: '📌 Outros', value: semGrupo, color: '#94a3b8' });
+    return groups.filter(d => d.value > 0);
   }, [filteredTasks]);
 
   // --- User performance ---
@@ -7041,16 +7046,20 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
     { key: 'BAIXA',          label: '🔵 Baixa',          color: '#3b82f6' },
     { key: 'SEM PRIORIDADE', label: '⚪ Sem prioridade', color: '#9ca3af' },
   ];
+  // Remove acentos antes de comparar: o banco tem grafias inconsistentes para a
+  // mesma prioridade (ex.: "Média" e "Media" sem acento), que sem isso caíam
+  // incorretamente em "Sem prioridade".
+  const normalizePriorityKey = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
   const priorityData = useMemo(() => {
     const counts: Record<string, number> = {};
-    PRIORITY_CFG.forEach(c => { counts[c.key] = 0; });
+    PRIORITY_CFG.forEach(c => { counts[normalizePriorityKey(c.key)] = 0; });
     filteredTasks.forEach((t: Task) => {
-      const p = (t.priority || 'SEM PRIORIDADE').toUpperCase();
+      const p = normalizePriorityKey(t.priority || 'SEM PRIORIDADE');
       if (counts[p] !== undefined) counts[p]++;
-      else counts['SEM PRIORIDADE']++;
+      else counts[normalizePriorityKey('SEM PRIORIDADE')]++;
     });
     return PRIORITY_CFG
-      .map(c => ({ name: c.label, color: c.color, count: counts[c.key] }))
+      .map(c => ({ name: c.label, color: c.color, count: counts[normalizePriorityKey(c.key)] }))
       .filter(d => d.count > 0);
   }, [filteredTasks]);
 
