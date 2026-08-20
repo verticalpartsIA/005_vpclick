@@ -35,5 +35,5 @@ export function useDashboard(session: Session | null, activeView: string) {
     }
   }, [activeView, loadDashboardTasks]);
 
-  return { dashboardTasks, dashboardLists, isDashboardLoading };
+  return { dashboardTasks, dashboardLists, isDashboardLoading, loadDashboardTasks };
 }
