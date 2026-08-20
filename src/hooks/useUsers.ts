@@ -65,6 +65,9 @@ export function useUsers(params: {
 
   // Último login por usuário — só para ADMIN (a RPC devolve vazio para os
   // demais papéis). Alimenta o alerta de contas inativas no Painel Admin.
+  // Rerroda quando adminUsers.length muda (usuário criado pelo admin ou
+  // provisionado via realtime) — senão a conta nova fica sem entrada no mapa
+  // até um reload, tratada como "sem dado" em vez de "nunca logou".
   useEffect(() => {
     if (!session || currentUser.role !== UserRole.ADMIN) return;
     supabase.rpc('get_users_last_sign_in').then(({ data, error }) => {
@@ -75,7 +78,7 @@ export function useUsers(params: {
       });
       setLastSignInMap(map);
     });
-  }, [session, currentUser.role]);
+  }, [session, currentUser.role, adminUsers.length]);
 
   // Realtime: mantém a lista fresca quando um perfil é criado/ativado depois do
   // login — sem isso, usuários provisionados após a sessão só apareciam nas
