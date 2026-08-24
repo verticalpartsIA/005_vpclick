@@ -7,6 +7,7 @@ interface MyTasksViewProps {
   currentUser: User;
   users: User[];
   tasks: Task[];
+  isLoading?: boolean;
   onOpenTask: (taskId: string) => void;
 }
 
@@ -100,7 +101,7 @@ function Card({ title, action, children }: { title: string; action?: React.React
  * tarefas criadas por mim e atribuídas a outra pessoa (não temos "lembretes"
  * como entidade separada, só tarefa).
  */
-export function MyTasksView({ currentUser, users, tasks, onOpenTask }: MyTasksViewProps) {
+export function MyTasksView({ currentUser, users, tasks, isLoading = false, onOpenTask }: MyTasksViewProps) {
   const [tab, setTab] = useState<'todo' | 'done' | 'delegated'>('todo');
   const [recentIds, setRecentIds] = useState<string[]>([]);
 
@@ -147,7 +148,9 @@ export function MyTasksView({ currentUser, users, tasks, onOpenTask }: MyTasksVi
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-4">
           <Card title="Recentes">
-            {recentTasks.length === 0 ? (
+            {isLoading ? (
+              <p className="text-xs text-gray-400 py-2">Carregando tarefas...</p>
+            ) : recentTasks.length === 0 ? (
               <p className="text-xs text-gray-400 py-2">Nenhuma tarefa aberta recentemente.</p>
             ) : (
               <div className="space-y-0.5 max-h-64 overflow-y-auto custom-scrollbar">
@@ -182,7 +185,9 @@ export function MyTasksView({ currentUser, users, tasks, onOpenTask }: MyTasksVi
                 ] as const).map(([label, items]) => (
                   <div key={label}>
                     <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide px-2 mb-1">{label} <span className="text-gray-300">{items.length}</span></p>
-                    {items.length === 0 ? (
+                    {isLoading ? (
+                      <p className="text-xs text-gray-300 px-2 pb-1">Carregando...</p>
+                    ) : items.length === 0 ? (
                       <p className="text-xs text-gray-300 px-2 pb-1">Nada por aqui.</p>
                     ) : items.map((t) => (
                       <TaskRow
@@ -198,10 +203,11 @@ export function MyTasksView({ currentUser, users, tasks, onOpenTask }: MyTasksVi
               </div>
             ) : (
               <div className="space-y-0.5 max-h-96 overflow-y-auto custom-scrollbar">
-                {tabItems && tabItems.length === 0 && (
+                {isLoading && <p className="text-xs text-gray-400 py-2">Carregando tarefas...</p>}
+                {!isLoading && tabItems && tabItems.length === 0 && (
                   <p className="text-xs text-gray-400 py-2">{tab === 'done' ? 'Nenhuma tarefa concluída ainda.' : 'Você ainda não delegou nenhuma tarefa.'}</p>
                 )}
-                {tabItems && tabItems.map((t) => (
+                {!isLoading && tabItems && tabItems.map((t) => (
                   <TaskRow
                     key={t.id}
                     task={t}
@@ -239,7 +245,9 @@ export function MyTasksView({ currentUser, users, tasks, onOpenTask }: MyTasksVi
           </Card>
 
           <Card title="Atribuídas a mim" action={<span className="text-[11px] font-semibold text-gray-400">{assignedToMeTable.length} pendente{assignedToMeTable.length === 1 ? '' : 's'}</span>}>
-            {assignedToMeTable.length === 0 ? (
+            {isLoading ? (
+              <p className="text-xs text-gray-400 py-2">Carregando tarefas...</p>
+            ) : assignedToMeTable.length === 0 ? (
               <p className="text-xs text-gray-400 py-2">Nenhuma tarefa pendente atribuída a você. 🎉</p>
             ) : (
               <div className="max-h-96 overflow-y-auto custom-scrollbar">

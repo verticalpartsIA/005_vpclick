@@ -140,6 +140,18 @@ export function fetchTaskRowsByListIds(listIds: string[] | null): Promise<TaskRo
   );
 }
 
+export function fetchMyTaskRows(userId: string): Promise<TaskRow[]> {
+  return fetchAllPages<TaskRow>(
+    (from, to) => supabase
+      .from('tasks')
+      .select('*')
+      .or(`main_assignee_id.eq.${userId},secondary_assignee_ids.cs.{${userId}},created_by.eq.${userId}`)
+      .order('due_date', { ascending: true, nullsFirst: false })
+      .range(from, to),
+    'fetchMyTaskRows',
+  );
+}
+
 // Índice leve (list_id + status) de TODAS as tarefas visíveis — alimenta os
 // contadores exatos por lista, independentes do escopo carregado.
 // `listIds` (as listas acessíveis) filtra a busca por list_id: usa o índice

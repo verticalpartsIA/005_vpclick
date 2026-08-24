@@ -1097,6 +1097,8 @@ export default function App() {
   const [lists, setLists] = useState<List[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [myTasks, setMyTasks] = useState<Task[]>([]);
+  const [isMyTasksLoading, setIsMyTasksLoading] = useState(false);
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [fieldValues, setFieldValues] = useState<CustomFieldValue[]>([]);
   const [docs, setDocs] = useState<Doc[]>([]);
@@ -1521,6 +1523,30 @@ export default function App() {
     if (!session) return;
 
     const requestId = ++loadTasksRequestIdRef.current;
+    const isGlobalDashboard = activeView === 'Dashboard' && activeScope.type === 'global' && !activeListId;
+    if (isGlobalDashboard) {
+      return;
+    }
+
+    if (activeView === 'MyTasks') {
+      setIsMyTasksLoading(true);
+      try {
+        const rows = await taskRepo.fetchMyTaskRows(currentUser.id);
+        const mappedTasks = rows.map(taskRepo.mapRowToTaskShell);
+
+        if (requestId < loadTasksCommittedIdRef.current) return;
+        loadTasksCommittedIdRef.current = requestId;
+        setMyTasks(mappedTasks);
+        setTasks(prev => {
+          const merged = new Map(prev.map(t => [t.id, t]));
+          for (const t of mappedTasks) merged.set(t.id, { ...(merged.get(t.id) || {}), ...t });
+          return Array.from(merged.values());
+        });
+      } finally {
+        setIsMyTasksLoading(false);
+      }
+      return;
+    }
 
     // Resolve o escopo ativo (lista/pasta/espaço) para o conjunto de listas a
     // buscar. `null` = todas as tarefas visíveis (RLS restringe no servidor).
@@ -1541,7 +1567,7 @@ export default function App() {
     if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
     loadTasksCommittedIdRef.current = requestId;
     setTasks(rows.map(taskRepo.mapRowToTaskShell));
-  }, [session, activeListId, activeScope, lists, folders]);
+  }, [session, activeListId, activeScope, activeView, currentUser.id, lists, folders]);
 
   useEffect(() => {
     loadTasks();
@@ -1615,11 +1641,26 @@ export default function App() {
     return () => { if (timer) clearTimeout(timer); supabase.removeChannel(channel); };
   }, [session?.user?.id]);
 
+  const belongsToMyTasks = useCallback((task: Task) => (
+    task.mainAssigneeId === currentUser.id ||
+    (task.secondaryAssigneeIds || []).includes(currentUser.id) ||
+    task.createdBy === currentUser.id
+  ), [currentUser.id]);
+
   const updateTask = useCallback(async (updatedTask: Task): Promise<boolean> => {
     try {
       const res = await taskRepo.updateTaskFields(updatedTask);
       if (res.ok) {
         setTasks(prev => prev.map(t => t.id === updatedTask.id ? { ...t, ...updatedTask } : t));
+        setMyTasks(prev => {
+          const nextTask = { ...(prev.find(t => t.id === updatedTask.id) || {}), ...updatedTask } as Task;
+          if (belongsToMyTasks(nextTask)) {
+            return prev.some(t => t.id === updatedTask.id)
+              ? prev.map(t => t.id === updatedTask.id ? nextTask : t)
+              : [nextTask, ...prev];
+          }
+          return prev.filter(t => t.id !== updatedTask.id);
+        });
         return true;
       }
       console.error('Erro ao atualizar tarefa:', res.message);
@@ -1630,7 +1671,7 @@ export default function App() {
       toast.error('Erro inesperado ao salvar tarefa.');
       return false;
     }
-  }, []);
+  }, [belongsToMyTasks]);
 
   const handleUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
     const task = tasks.find(t => t.id === taskId);
@@ -1663,6 +1704,7 @@ export default function App() {
     const { error } = await taskRepo.bulkUpdateStatus(targetIds, status);
     if (!error) {
       setTasks(prev => prev.map(t => targetIds.includes(t.id) ? { ...t, status } : t));
+      setMyTasks(prev => prev.map(t => targetIds.includes(t.id) ? { ...t, status } : t));
       toast.success(`${targetIds.length} tarefa(s) atualizadas para "${status}"`);
     } else {
       toast.error('Erro ao alterar status: ' + error);
@@ -1673,6 +1715,7 @@ export default function App() {
     const { error } = await taskRepo.bulkUpdatePriority(ids, priority);
     if (!error) {
       setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, priority } : t));
+      setMyTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, priority } : t));
       toast.success(`${ids.length} tarefa(s) com prioridade alterada para "${priority}"`);
     } else {
       toast.error('Erro ao alterar prioridade: ' + error);
@@ -1686,6 +1729,7 @@ export default function App() {
         const { error } = await taskRepo.bulkDelete(ids);
         if (!error) {
           setTasks(prev => prev.filter(t => !ids.includes(t.id)));
+          setMyTasks(prev => prev.filter(t => !ids.includes(t.id)));
           toast.success(`${ids.length} tarefa(s) removidas.`);
         } else {
           toast.error('Erro ao deletar tarefas: ' + error);
@@ -1698,6 +1742,7 @@ export default function App() {
     const { error } = await taskRepo.bulkMove(ids, listId);
     if (!error) {
       setTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, listId } : t));
+      setMyTasks(prev => prev.map(t => ids.includes(t.id) ? { ...t, listId } : t));
       toast.success(`${ids.length} tarefa(s) movidas.`);
     } else {
       toast.error('Erro ao mover tarefas: ' + error);
@@ -1712,6 +1757,7 @@ export default function App() {
         const res = await taskRepo.deleteTask(taskId);
         if (res.ok) {
           setTasks(prev => prev.filter(t => t.id !== taskId));
+          setMyTasks(prev => prev.filter(t => t.id !== taskId));
           if (selectedTaskId === taskId) setSelectedTaskId(null);
           toast.success('Tarefa excluída.');
         } else { toast.error('Erro ao excluir tarefa: ' + res.message); }
@@ -2438,6 +2484,9 @@ export default function App() {
 
       if ('task' in res) {
         setTasks(prev => [res.task, ...prev]);
+        if (belongsToMyTasks(res.task)) {
+          setMyTasks(prev => [res.task, ...prev.filter(t => t.id !== res.task.id)]);
+        }
         setIsTaskModalOpen(false);
         setPrefilledTaskData(null);
         toast.success('Tarefa criada com sucesso!');
@@ -3376,7 +3425,10 @@ export default function App() {
               <MyTasksView
                 currentUser={currentUser}
                 users={adminUsers}
-                tasks={tasks}
+                tasks={(myTasks.length > 0 || isMyTasksLoading)
+                  ? myTasks.map(t => tasks.find(existing => existing.id === t.id) || t)
+                  : filteredTasks}
+                isLoading={isMyTasksLoading && myTasks.length === 0}
                 onOpenTask={setSelectedTaskId}
               />
             )}
