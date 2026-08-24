@@ -33,6 +33,21 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
+function normalizeRoleText(value: unknown): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .trim()
+    .toLowerCase();
+}
+
+function mapCentralLevelToRole(level: unknown): 'ADMIN' | 'GESTOR' | 'COLABORADOR' {
+  const normalized = normalizeRoleText(level);
+  if (normalized.includes('admin')) return 'ADMIN';
+  if (normalized.includes('lider') || normalized.includes('gestor')) return 'GESTOR';
+  return 'COLABORADOR';
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
 
@@ -71,11 +86,7 @@ Deno.serve(async (req) => {
       || 'Usuário';
     const centralAvatar = centralProfile?.avatar_url || centralUser.user_metadata?.avatar || null;
     const centralLevel = centralProfile?.level || centralUser.user_metadata?.level;
-    const mappedRole = centralLevel === 'Administrador'
-      ? 'ADMIN'
-      : (centralLevel === 'Lider' || centralLevel === 'Gestor')
-        ? 'GESTOR'
-        : 'COLABORADOR';
+    const mappedRole = mapCentralLevelToRole(centralLevel);
 
     const admin = createClient(
       Deno.env.get('SUPABASE_URL')!,
@@ -120,9 +131,9 @@ Deno.serve(async (req) => {
       if (profileError) console.error('sso-exchange: erro ao criar perfil herdado:', profileError);
     } else {
       targetUserId = users[0].id;
-      // Identidade (nome/avatar) segue sincronizada com a porta de entrada;
-      // papel e acessos continuam sendo configurados dentro do VP Click.
-      const identity: Record<string, string> = { name: centralName };
+      // Identidade e papel seguem sincronizados com a porta de entrada
+      // (vpsistema). As alçadas por espaço/pasta continuam no VP Click.
+      const identity: Record<string, string> = { name: centralName, role: mappedRole };
       if (centralAvatar) identity.avatar = centralAvatar;
       const { error: syncError } = await admin.from('profiles').update(identity).eq('id', targetUserId);
       if (syncError) console.error('sso-exchange: erro ao sincronizar identidade:', syncError);

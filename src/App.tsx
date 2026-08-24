@@ -905,8 +905,11 @@ export default function App() {
             role: (isGeovane ? UserRole.ADMIN : (user.user_metadata?.role as UserRole)) || UserRole.COLABORADOR,
           };
 
-          // Criar perfil no banco para evitar violações de FK em outras tabelas
-          await supabase.from('profiles').insert([userData]).select();
+          // Criar perfil no banco para evitar violações de FK em outras tabelas.
+          // Sem RETURNING: em ambiente com RLS, o insert pode passar e a leitura
+          // da linha recém-criada falhar, prendendo o usuário em recarregamentos.
+          const { error: profileInsertError } = await supabase.from('profiles').insert([userData]);
+          if (profileInsertError) throw profileInsertError;
 
           setCurrentUser(userData);
         }
@@ -4466,6 +4469,7 @@ function Sidebar({
   const isNonLightTheme = themePreset !== "claro";
   const logoSrc = isNonLightTheme ? compactLogoWhite : compactLogo;
   const logoStyle = isNonLightTheme ? undefined : ({ filter: 'brightness(0)' } as React.CSSProperties);
+  const canManageStructure = userRole === UserRole.ADMIN || userRole === UserRole.GESTOR;
 
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
@@ -4881,6 +4885,7 @@ function Sidebar({
                       hiddenSpaceIds={hiddenSpaceIds}
                       onToggleHidden={toggleHiddenSpace}
                       onCreateSpace={onOpenCreateSpace}
+                      canCreateSpace={canManageStructure}
                       onNavigateToSpace={(id: string, name: string) => { onNavigate('space', id, name); onViewChange('Dashboard'); }}
                       onClose={() => setShowAllSpacesModal(false)}
                     />
@@ -4960,13 +4965,15 @@ function Sidebar({
                   <svg className={`w-3 h-3 transition-transform shrink-0 ${secEspacosOpen || isSidebarSearching ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
                   Espaços
                 </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); onOpenCreateSpace(); }}
-                  className="opacity-0 group-hover:opacity-100 text-sidebar-foreground/40 hover:text-primary transition-all p-1 rounded hover:bg-sidebar-accent"
-                  title="Criar Espaço"
-                >
-                  <Icons.Plus />
-                </button>
+                {canManageStructure && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onOpenCreateSpace(); }}
+                    className="opacity-0 group-hover:opacity-100 text-sidebar-foreground/40 hover:text-primary transition-all p-1 rounded hover:bg-sidebar-accent"
+                    title="Criar Espaço"
+                  >
+                    <Icons.Plus />
+                  </button>
+                )}
               </div>
 
               {(secEspacosOpen || isSidebarSearching) && (
@@ -5356,11 +5363,12 @@ function ViewTab({ active, onClick, label }: any) {
  * sem precisar navegar pela árvore. Ocultar aqui só esconde da árvore lateral
  * (preferência de cliente, vp_hidden_spaces) — não afeta ninguém mais.
  */
-function AllSpacesModal({ spaces, hiddenSpaceIds, onToggleHidden, onCreateSpace, onNavigateToSpace, onClose }: {
+function AllSpacesModal({ spaces, hiddenSpaceIds, onToggleHidden, onCreateSpace, canCreateSpace, onNavigateToSpace, onClose }: {
   spaces: Space[];
   hiddenSpaceIds: string[];
   onToggleHidden: (id: string) => void;
   onCreateSpace: () => void;
+  canCreateSpace: boolean;
   onNavigateToSpace: (id: string, name: string) => void;
   onClose: () => void;
 }) {
@@ -5451,14 +5459,16 @@ function AllSpacesModal({ spaces, hiddenSpaceIds, onToggleHidden, onCreateSpace,
           )}
         </div>
 
-        <div className="border-t p-3">
-          <button
-            onClick={() => { onCreateSpace(); onClose(); }}
-            className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-600 hover:text-[var(--primary-color)] py-2 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            <Icons.Plus className="w-4 h-4" /> Novo Espaço
-          </button>
-        </div>
+        {canCreateSpace && (
+          <div className="border-t p-3">
+            <button
+              onClick={() => { onCreateSpace(); onClose(); }}
+              className="w-full flex items-center justify-center gap-1.5 text-sm font-semibold text-gray-600 hover:text-[var(--primary-color)] py-2 rounded-lg hover:bg-gray-50 transition-colors"
+            >
+              <Icons.Plus className="w-4 h-4" /> Novo Espaço
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

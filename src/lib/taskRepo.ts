@@ -245,6 +245,7 @@ export async function fetchTaskDetails(taskId: string): Promise<Partial<Task>> {
 // erro do PostgREST ao chamador.
 
 export interface NewTaskInput {
+  id?: string;
   title: string;
   description?: string;
   status: string;
@@ -259,11 +260,24 @@ export interface NewTaskInput {
   createdBy: string;
 }
 
+function newUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
+  });
+}
+
 // Insere uma tarefa e devolve o Task recém-criado (sub-entidades vazias).
+// Com RLS ativa, o INSERT pode passar e o RETURNING falhar no SELECT da linha
+// recém-criada. Por isso geramos o id no cliente e gravamos sem `.select()`.
 export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | { error: string }> {
-  const { data, error } = await supabase
+  const id = input.id || newUuid();
+  const createdAt = new Date().toISOString();
+  const { error } = await supabase
     .from('tasks')
     .insert({
+      id,
       title: input.title,
       description: input.description ?? '',
       status: input.status,
@@ -276,11 +290,34 @@ export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | 
       project_id: input.projectId ?? null,
       parent_id: input.parentId ?? null,
       created_by: input.createdBy,
-    })
-    .select()
-    .single();
-  if (error || !data) return { error: error?.message ?? 'Falha ao criar tarefa.' };
-  return { task: mapRowToTaskShell(data as TaskRow) };
+    });
+  if (error) return { error: error.message ?? 'Falha ao criar tarefa.' };
+  return {
+    task: {
+      id,
+      title: input.title,
+      description: input.description ?? '',
+      status: input.status,
+      priority: input.priority,
+      mainAssigneeId: input.mainAssigneeId,
+      secondaryAssigneeIds: input.secondaryAssigneeIds ?? [],
+      startDate: input.startDate,
+      dueDate: input.dueDate,
+      extensionCount: 0,
+      extensionHistory: [],
+      checklists: [],
+      comments: [],
+      attachments: [],
+      activities: [],
+      listId: input.listId || '',
+      projectId: input.projectId ?? null,
+      parentId: input.parentId ?? undefined,
+      createdAt,
+      createdBy: input.createdBy,
+      tags: [],
+      watcherIds: [],
+    },
+  };
 }
 
 // Atualiza os campos de nível-tarefa (não mexe em sub-entidades).
