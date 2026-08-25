@@ -49,7 +49,7 @@ interface ExtensionLogRow { id: string; task_id: string; old_date: string | null
 interface ChecklistRow { id: string; task_id: string; text: string; completed: boolean; }
 interface ActivityRow { id: string; task_id: string; user_id: string; type: string; old_value: string | null; new_value: string | null; created_at: string; }
 interface WatcherRow { task_id: string; user_id: string; }
-interface CountRow { list_id: string | null; status: string }
+interface CountRow { id: string; list_id: string | null; status: string }
 
 // Resposta genérica do PostgREST usada nas assinaturas dos builders paginados.
 type PostgrestResult<T> = { data: T[] | null; error: unknown };
@@ -134,7 +134,10 @@ export function fetchTaskRowsByListIds(listIds: string[] | null): Promise<TaskRo
   return fetchAllPages<TaskRow>(
     (from, to) => {
       const q = supabase.from('tasks').select('*');
-      return (listIds ? q.in('list_id', listIds) : q).range(from, to);
+      return (listIds ? q.in('list_id', listIds) : q)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to);
     },
     'fetchTaskRowsByListIds',
   );
@@ -147,6 +150,8 @@ export function fetchMyTaskRows(userId: string): Promise<TaskRow[]> {
       .select('*')
       .or(`main_assignee_id.eq.${userId},secondary_assignee_ids.cs.{${userId}},created_by.eq.${userId}`)
       .order('due_date', { ascending: true, nullsFirst: false })
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
       .range(from, to),
     'fetchMyTaskRows',
   );
@@ -163,8 +168,12 @@ export async function fetchTaskCountIndex(listIds: string[] | null = null): Prom
   if (listIds && listIds.length === 0) return [];
   const rows = await fetchAllPages<CountRow>(
     (from, to) => {
-      const q = supabase.from('tasks').select('list_id, status');
-      return (listIds ? q.in('list_id', listIds) : q).range(from, to);
+      const q = supabase.from('tasks').select('id, list_id, status');
+      return (listIds ? q.in('list_id', listIds) : q)
+        .order('list_id', { ascending: true, nullsFirst: true })
+        .order('status', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to);
     },
     'fetchTaskCountIndex',
   );
@@ -556,6 +565,8 @@ export async function fetchDashboardData(): Promise<{ tasks: Task[]; lists: { id
     (from, to) => supabase
       .from('tasks')
       .select('id, title, status, priority, main_assignee_id, start_date, due_date, extension_count, list_id, created_at')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
       .range(from, to),
     'fetchDashboardData',
   );
