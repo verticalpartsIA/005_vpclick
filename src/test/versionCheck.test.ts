@@ -34,7 +34,7 @@ describe("startVersionCheck", () => {
 
     expect(toastMessage).toHaveBeenCalledTimes(1);
     expect(toastMessage.mock.calls[0][0]).toContain("21/07/2026");
-    expect(toastMessage.mock.calls[0][0]).toContain("12:30");
+    expect(toastMessage.mock.calls[0][0]).toContain("09:30");
 
     // Um novo ciclo não deve duplicar o aviso.
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000);

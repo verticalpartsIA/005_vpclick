@@ -9,6 +9,7 @@ import { toast } from 'sonner';
 // digitando).
 const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos
 const FIRST_CHECK_DELAY_MS = 15 * 1000; // dá um tempo antes da primeira checagem
+const DISPLAY_TIME_ZONE = 'America/Sao_Paulo';
 
 // Guarda no localStorage (compartilhado entre abas da mesma origem, e
 // sobrevive a um remount acidental do componente) qual buildTime já foi
@@ -42,8 +43,8 @@ interface VersionInfo {
 function formatUpdateMessage(buildTime: string): string {
   const d = new Date(buildTime);
   if (isNaN(d.getTime())) return 'Este site foi atualizado.';
-  const date = d.toLocaleDateString('pt-BR');
-  const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const date = d.toLocaleDateString('pt-BR', { timeZone: DISPLAY_TIME_ZONE });
+  const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: DISPLAY_TIME_ZONE });
   return `Este site foi atualizado em ${date} às ${time}h`;
 }
 
@@ -53,8 +54,8 @@ function formatUpdateMessage(buildTime: string): string {
 export function formatBuildTimeShort(buildTime: string): string | null {
   const d = new Date(buildTime);
   if (isNaN(d.getTime())) return null;
-  const date = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' });
-  const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const date = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit', timeZone: DISPLAY_TIME_ZONE });
+  const time = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: DISPLAY_TIME_ZONE });
   return `${date} ${time}h`;
 }
 
