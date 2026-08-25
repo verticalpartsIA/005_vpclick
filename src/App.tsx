@@ -3804,7 +3804,7 @@ function linkifyHtml(html: string): string {
       if (i % 2 === 1) return part; // já é um <a>, preserva
       // Nos trechos de texto, linkifica URLs soltas
       return part.replace(
-        /(?<![=\/"'`])(https?:\/\/[^\s<>"'`\]]+)/g,
+        /(?<![=/"'`])(https?:\/\/[^\s<>"'`\]]+)/g,
         (url) => {
           const clean = url.replace(/[.,;:!?)\]]+$/, '');
           const trail = url.slice(clean.length);
@@ -4089,7 +4089,7 @@ function DocView({ doc, allDocs = [], onUpdate, onSelectDoc, onCreateSubpage, cu
     if (!file) return;
 
     setIsUploading(true);
-    const safeName = file.name.replace(/[^\w.\-]/g, '_');
+    const safeName = file.name.replace(/[^\w.-]/g, '_');
     const path = `headers/${doc.id}_${Date.now()}_${safeName}`;
     const url = await uploadFile(file, path);
     setIsUploading(false);
@@ -4105,7 +4105,7 @@ function DocView({ doc, allDocs = [], onUpdate, onSelectDoc, onCreateSubpage, cu
     if (!file) return;
 
     setIsUploading(true);
-    const safeName = file.name.replace(/[^\w.\-]/g, '_');
+    const safeName = file.name.replace(/[^\w.-]/g, '_');
     const path = `attachments/${doc.id}/${Date.now()}_${safeName}`;
     const url = await uploadFile(file, path);
     setIsUploading(false);
@@ -5869,7 +5869,11 @@ function ListView({
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
   const toggleSelection = (id: string) => setSelectedTaskIds(prev => {
     const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
     return next;
   });
   const clearSelection = () => setSelectedTaskIds(new Set());
@@ -6171,9 +6175,11 @@ function ListView({
                             onChange={() => {
                               const allIds = tasks.map((t: Task) => t.id);
                               const allSelected = allIds.every((id: string) => selectedTaskIds.has(id));
-                              allSelected
-                                ? clearSelection()
-                                : setSelectedTaskIds(new Set(allIds));
+                              if (allSelected) {
+                                clearSelection();
+                              } else {
+                                setSelectedTaskIds(new Set(allIds));
+                              }
                             }}
                           />
                         </th>
@@ -6992,25 +6998,6 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDupli
 }
 
 function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLists, isLoading, isAdmin }: any) {
-  // Loading state: mostra skeleton enquanto carrega dados globais pela primeira vez
-  if (isLoading) {
-    return (
-      <div className="flex flex-col gap-6 animate-pulse">
-        <div className="h-8 bg-gray-100 rounded-lg w-48 ml-auto" />
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="h-28 bg-gray-100 rounded-xl" />
-          ))}
-        </div>
-        <div className="h-40 bg-gray-100 rounded-xl" />
-        <div className="grid grid-cols-3 gap-6">
-          <div className="h-72 bg-gray-100 rounded-xl col-span-2" />
-          <div className="h-72 bg-gray-100 rounded-xl" />
-        </div>
-      </div>
-    );
-  }
-
   // Resolve CSS custom property so Recharts SVG fill works correctly
   const primaryChartColor = useMemo(() => {
     const val = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim();
@@ -7192,6 +7179,25 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, 8);
   }, [tasks]);
+
+  // Loading state: mostra skeleton enquanto carrega dados globais pela primeira vez
+  if (isLoading) {
+    return (
+      <div className="flex flex-col gap-6 animate-pulse">
+        <div className="h-8 bg-gray-100 rounded-lg w-48 ml-auto" />
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-28 bg-gray-100 rounded-xl" />
+          ))}
+        </div>
+        <div className="h-40 bg-gray-100 rounded-xl" />
+        <div className="grid grid-cols-3 gap-6">
+          <div className="h-72 bg-gray-100 rounded-xl col-span-2" />
+          <div className="h-72 bg-gray-100 rounded-xl" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6" onClick={(e) => e.stopPropagation()}>
@@ -8070,7 +8076,7 @@ function TaskDetailModal(props: any) {
     const newMainName = users.find((u: any) => u.id === userId)?.name;
 
     // Move current main to secondary if not already there, and remove new main from secondary
-    let nextSecondaryIds = (task.secondaryAssigneeIds || []).filter(id => id !== userId);
+    const nextSecondaryIds = (task.secondaryAssigneeIds || []).filter(id => id !== userId);
     if (!nextSecondaryIds.includes(task.mainAssigneeId)) {
       nextSecondaryIds.push(task.mainAssigneeId);
     }
@@ -8148,7 +8154,7 @@ function TaskDetailModal(props: any) {
     for (const file of files) {
       if (uploadFile && saveAttachment) {
         try {
-          const safeName = file.name.replace(/[^\w.\-]/g, '_');
+          const safeName = file.name.replace(/[^\w.-]/g, '_');
           const path = `tasks/${task.id}/${Date.now()}_${safeName}`;
           const url = await uploadFile(file, path, 'task-files');
           if (url) {
@@ -10148,7 +10154,7 @@ function CustomFieldInput({ field, value, onChange, formulaContext }: any) {
           />
         </div>
       );
-    case CustomFieldType.DROPDOWN:
+    case CustomFieldType.DROPDOWN: {
       const currentOpt = field.config?.options?.find((o: CustomFieldOption) => o.id === value);
       const IconComp = currentOpt?.icon ? (Icons as any)[currentOpt.icon] : null;
 
@@ -10203,6 +10209,7 @@ function CustomFieldInput({ field, value, onChange, formulaContext }: any) {
           </div>
         </div>
       );
+    }
     case CustomFieldType.CHECKBOX:
       return (
         <div className="flex items-center gap-3 mt-4 p-3 bg-gray-50 rounded-lg border border-transparent hover:border-gray-200 transition-colors">
