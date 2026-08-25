@@ -1885,12 +1885,12 @@ export default function App() {
         const toastId = toast.loading('Duplicando projeto...');
         try {
           // 1. Cria a nova lista na mesma pasta, com o mesmo grupo de status
-          const { data: newListData, error: listError } = await supabase
+          const newListId = newUuid();
+          const newListName = newName.trim();
+          const { error: listError } = await supabase
             .from('lists')
-            .insert({ name: newName.trim(), folder_id: sourceList.folderId, status_group_id: sourceList.statusGroupId })
-            .select()
-            .single();
-          if (listError || !newListData) throw listError || new Error('A nova lista não foi retornada.');
+            .insert({ id: newListId, name: newListName, folder_id: sourceList.folderId, status_group_id: sourceList.statusGroupId });
+          if (listError) throw listError;
 
           // 2. Busca todas as tarefas da lista direto do banco (estado local pode estar filtrado)
           const { data: sourceTasks, error: tasksError } = await supabase
@@ -1911,7 +1911,7 @@ export default function App() {
             secondary_assignee_ids: t.secondary_assignee_ids || [],
             start_date: t.start_date,
             due_date: t.due_date,
-            list_id: newListData.id,
+            list_id: newListId,
             project_id: t.project_id || null,
             parent_id: parentId,
             extension_count: 0,
@@ -1920,21 +1920,27 @@ export default function App() {
             created_by: currentUser.id,
           });
 
-          // 3. Insere tarefas principais em lote (ordem do retorno = ordem do insert)
+          // 3. Insere tarefas principais em lote com IDs do cliente, sem RETURNING sob RLS.
           if (parents.length > 0) {
-            const { data: createdParents, error: parentsError } = await supabase
-              .from('tasks').insert(parents.map((t: any) => cloneRow(t, null))).select('id');
-            if (parentsError || !createdParents) throw parentsError || new Error('Falha ao duplicar tarefas.');
-            parents.forEach((t: any, i: number) => idMap.set(t.id, createdParents[i].id));
+            const parentRows = parents.map((t: any) => {
+              const id = newUuid();
+              idMap.set(t.id, id);
+              return { id, ...cloneRow(t, null) };
+            });
+            const { error: parentsError } = await supabase.from('tasks').insert(parentRows);
+            if (parentsError) throw parentsError;
           }
 
           // 4. Insere subtarefas apontando para os novos pais
           const validChildren = children.filter((t: any) => idMap.has(t.parent_id));
           if (validChildren.length > 0) {
-            const { data: createdChildren, error: childrenError } = await supabase
-              .from('tasks').insert(validChildren.map((t: any) => cloneRow(t, idMap.get(t.parent_id)!))).select('id');
-            if (childrenError || !createdChildren) throw childrenError || new Error('Falha ao duplicar subtarefas.');
-            validChildren.forEach((t: any, i: number) => idMap.set(t.id, createdChildren[i].id));
+            const childRows = validChildren.map((t: any) => {
+              const id = newUuid();
+              idMap.set(t.id, id);
+              return { id, ...cloneRow(t, idMap.get(t.parent_id)!) };
+            });
+            const { error: childrenError } = await supabase.from('tasks').insert(childRows);
+            if (childrenError) throw childrenError;
           }
 
           const oldTaskIds = Array.from(idMap.keys());
@@ -1959,10 +1965,10 @@ export default function App() {
           }
 
           const newList: List = {
-            id: newListData.id,
-            name: newListData.name,
-            folderId: newListData.folder_id,
-            statusGroupId: newListData.status_group_id
+            id: newListId,
+            name: newListName,
+            folderId: sourceList.folderId,
+            statusGroupId: sourceList.statusGroupId
           };
           setLists(prev => [...prev, newList]);
           setActiveListId(newList.id);

@@ -508,9 +508,12 @@ export interface TaskCloneInput {
 }
 
 export async function insertTaskClone(input: TaskCloneInput): Promise<{ task: Task } | { error: string }> {
-  const { data, error } = await supabase
+  const id = newUuid();
+  const createdAt = new Date().toISOString();
+  const { error } = await supabase
     .from('tasks')
     .insert({
+      id,
       title: input.title,
       description: input.description,
       status: input.status,
@@ -525,11 +528,34 @@ export async function insertTaskClone(input: TaskCloneInput): Promise<{ task: Ta
       extension_count: 0,
       tags: input.tags,
       created_by: input.createdBy,
-    })
-    .select()
-    .single();
-  if (error || !data) return { error: error?.message ?? 'A tarefa duplicada não foi retornada pelo banco.' };
-  return { task: mapRowToTaskShell(data as TaskRow) };
+    });
+  if (error) return { error: error.message ?? 'Falha ao duplicar tarefa.' };
+  return {
+    task: {
+      id,
+      title: input.title,
+      description: input.description,
+      status: input.status,
+      priority: input.priority,
+      mainAssigneeId: input.mainAssigneeId,
+      secondaryAssigneeIds: input.secondaryAssigneeIds,
+      startDate: input.startDate,
+      dueDate: input.dueDate,
+      extensionCount: 0,
+      extensionHistory: [],
+      checklists: [],
+      comments: [],
+      attachments: [],
+      activities: [],
+      listId: input.listId,
+      projectId: input.projectId,
+      parentId: input.parentId ?? undefined,
+      createdAt,
+      createdBy: input.createdBy,
+      tags: input.tags,
+      watcherIds: [],
+    },
+  };
 }
 
 // Copia os checklists de uma tarefa para outra. Devolve os itens já mapeados
