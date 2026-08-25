@@ -2755,7 +2755,11 @@ export default function App() {
     }
 
     if (searchQuery) {
-      result = result.filter(t => t.title.toLowerCase().includes(searchQuery.toLowerCase()));
+      const q = searchQuery.toLowerCase();
+      result = result.filter(t =>
+        t.title.toLowerCase().includes(q) ||
+        (t.description || '').toLowerCase().includes(q)
+      );
     }
 
     // Filter "Minhas Tarefas" view for ALL users

@@ -180,10 +180,20 @@ export async function fetchTaskCountIndex(listIds: string[] | null = null): Prom
   return rows.map((r) => ({ listId: r.list_id, status: r.status }));
 }
 
-// Busca server-side por título. Escapa curingas do LIKE (% _ \) para tratar o
-// termo como texto literal.
+// Busca server-side por título/descrição. A RPC faz a busca perto do banco,
+// aplica `can_access_task` explicitamente e evita varrer a lista carregada no
+// navegador. O fallback preserva o comportamento durante a janela de deploy em
+// que o front novo pode chegar antes da migration.
 export async function searchTaskRowsByTitle(term: string, limit = 200): Promise<TaskRow[]> {
   const pattern = `%${term.replace(/[\\%_]/g, '\\$&')}%`;
+  const { data: rpcData, error: rpcError } = await supabase.rpc('search_tasks', {
+    p_term: term,
+    p_limit: limit,
+  });
+
+  if (!rpcError) return (rpcData || []) as TaskRow[];
+  console.warn('taskRepo.searchTaskRowsByTitle: fallback sem RPC:', rpcError);
+
   const { data, error } = await supabase
     .from('tasks')
     .select('*')
