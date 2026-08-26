@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { Task, TaskPriority } from '../types';
+import { CustomFieldValue, Task, TaskPriority } from '../types';
 
 const PAGE_SIZE = 1000;
 // Um único .in('task_id', [milhares de UUIDs]) gera uma URL de dezenas de
@@ -68,6 +68,7 @@ interface ChecklistRow { id: string; task_id: string; text: string; completed: b
 interface ActivityRow { id: string; task_id: string; user_id: string; type: string; old_value: string | null; new_value: string | null; created_at: string; }
 interface WatcherRow { task_id: string; user_id: string; }
 interface CountRow { id: string; list_id: string | null; status: string }
+interface CustomFieldValueRow { field_id: string; entity_id: string; value: unknown }
 
 // Resposta genérica do PostgREST usada nas assinaturas dos builders paginados.
 type PostgrestResult<T> = { data: T[] | null; error: unknown };
@@ -211,6 +212,32 @@ export async function fetchTaskCountIndex(listIds: string[] | null = null): Prom
     'fetchTaskCountIndex',
   );
   return rows.map((r) => ({ listId: r.list_id, status: r.status }));
+}
+
+export async function fetchCustomFieldValuesByEntityIds(entityIds: string[]): Promise<CustomFieldValue[]> {
+  const uniqueIds = Array.from(new Set(entityIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return [];
+
+  const rows: CustomFieldValueRow[] = [];
+  for (let i = 0; i < uniqueIds.length; i += SUBENTITY_CHUNK) {
+    const slice = uniqueIds.slice(i, i + SUBENTITY_CHUNK);
+    const { data, error } = await supabase
+      .from('custom_field_values')
+      .select('field_id, entity_id, value')
+      .in('entity_id', slice);
+
+    if (error) {
+      console.error('taskRepo.fetchCustomFieldValuesByEntityIds: erro ao carregar lote:', error);
+      continue;
+    }
+    if (data) rows.push(...(data as CustomFieldValueRow[]));
+  }
+
+  return rows.map((v) => ({
+    fieldId: v.field_id,
+    entityId: v.entity_id,
+    value: v.value,
+  }));
 }
 
 // Busca server-side por título/descrição. A RPC faz a busca perto do banco,

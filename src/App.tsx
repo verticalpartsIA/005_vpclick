@@ -1271,16 +1271,6 @@ export default function App() {
         })));
       }
 
-      // Carregar Custom Field Values
-      const { data: valuesData } = await supabase.from('custom_field_values').select('*');
-      if (valuesData) {
-        setFieldValues(valuesData.map((v: any) => ({
-          fieldId: v.field_id,
-          entityId: v.entity_id,
-          value: v.value
-        })));
-      }
-
       // Carregar Documentos
       const { data: docsData } = await supabase.from('docs').select('*');
       const { data: attachmentsData } = await supabase.from('doc_attachments').select('*');
@@ -2824,6 +2814,30 @@ export default function App() {
 
     return result;
   }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig, showClosedInMyTasks]);
+
+  const fieldValueEntityIdsKey = useMemo(() => {
+    const ids = new Set<string>();
+    if (activeView === 'List' || activeView === 'Table') {
+      filteredTasks.forEach((task) => ids.add(task.id));
+    }
+    if (selectedTaskId) ids.add(selectedTaskId);
+    return Array.from(ids).sort().join(',');
+  }, [activeView, filteredTasks, selectedTaskId]);
+
+  useEffect(() => {
+    if (!session) return;
+    const entityIds = fieldValueEntityIdsKey ? fieldValueEntityIdsKey.split(',') : [];
+    if (entityIds.length === 0) {
+      setFieldValues([]);
+      return;
+    }
+
+    let cancelled = false;
+    taskRepo.fetchCustomFieldValuesByEntityIds(entityIds).then((values) => {
+      if (!cancelled) setFieldValues(values);
+    });
+    return () => { cancelled = true; };
+  }, [session, fieldValueEntityIdsKey]);
 
   // O modal "Gerenciar Campos Personalizados" precisa saber qual lista está
   // ativa pra ler/gravar quais campos estão ocultos — usa a mesma resolução
