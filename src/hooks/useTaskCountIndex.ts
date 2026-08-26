@@ -15,7 +15,7 @@ const isCountedAsDone = (status: string) => {
 // sidebar e o progresso da SpaceOverview não zeram para listas não carregadas.
 // `refreshTaskCountIndex` é exposto para o realtime do App religar a contagem.
 export function useTaskCountIndex(session: Session | null, listIds: string[] | null) {
-  const [taskCountIndex, setTaskCountIndex] = useState<{ listId: string | null; status: string }[]>([]);
+  const [taskCountIndex, setTaskCountIndex] = useState<taskRepo.TaskCountSummary[]>([]);
 
   // Chave estável por conteúdo: evita recarregar a cada render (o chamador passa
   // lists.map(...), que muda de identidade mas não de conteúdo). `null` = sem
@@ -39,7 +39,7 @@ export function useTaskCountIndex(session: Session | null, listIds: string[] | n
     const map = new Map<string, number>();
     for (const t of taskCountIndex) {
       if (!t.listId) continue;
-      if (!isCountedAsDone(t.status)) map.set(t.listId, (map.get(t.listId) || 0) + 1);
+      if (!isCountedAsDone(t.status)) map.set(t.listId, (map.get(t.listId) || 0) + t.count);
     }
     return map;
   }, [taskCountIndex]);
@@ -50,7 +50,10 @@ export function useTaskCountIndex(session: Session | null, listIds: string[] | n
     for (const t of taskCountIndex) {
       if (!t.listId) continue;
       const cur = map.get(t.listId) || { done: 0, total: 0 };
-      map.set(t.listId, { done: cur.done + (isCountedAsDone(t.status) ? 1 : 0), total: cur.total + 1 });
+      map.set(t.listId, {
+        done: cur.done + (isCountedAsDone(t.status) ? t.count : 0),
+        total: cur.total + t.count,
+      });
     }
     return map;
   }, [taskCountIndex]);

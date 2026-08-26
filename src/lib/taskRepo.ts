@@ -68,6 +68,8 @@ interface ChecklistRow { id: string; task_id: string; text: string; completed: b
 interface ActivityRow { id: string; task_id: string; user_id: string; type: string; old_value: string | null; new_value: string | null; created_at: string; }
 interface WatcherRow { task_id: string; user_id: string; }
 interface CountRow { id: string; list_id: string | null; status: string }
+export interface TaskCountSummary { listId: string | null; status: string; count: number }
+interface TaskCountSummaryRow { list_id: string | null; status: string; total_count: number | string }
 interface CustomFieldValueRow { field_id: string; entity_id: string; value: unknown }
 
 // Resposta genérica do PostgREST usada nas assinaturas dos builders paginados.
@@ -198,7 +200,7 @@ export function fetchMyTaskRows(userId: string): Promise<TaskRow[]> {
 // can_access_task por linha (que sem filtro custa ~1,7s p/ não-admins). Como os
 // badges só existem para listas acessíveis, filtrar por elas é equivalente e
 // muito mais rápido. `null` = sem filtro (a RLS restringe; caminho antigo).
-export async function fetchTaskCountIndex(listIds: string[] | null = null): Promise<{ listId: string | null; status: string }[]> {
+async function fetchTaskCountIndexFallback(listIds: string[] | null = null): Promise<TaskCountSummary[]> {
   if (listIds && listIds.length === 0) return [];
   const rows = await fetchAllPages<CountRow>(
     (from, to) => {
@@ -211,7 +213,36 @@ export async function fetchTaskCountIndex(listIds: string[] | null = null): Prom
     },
     'fetchTaskCountIndex',
   );
-  return rows.map((r) => ({ listId: r.list_id, status: r.status }));
+  const map = new Map<string, TaskCountSummary>();
+  for (const row of rows) {
+    const key = `${row.list_id ?? ''}::${row.status}`;
+    const current = map.get(key) ?? { listId: row.list_id, status: row.status, count: 0 };
+    current.count += 1;
+    map.set(key, current);
+  }
+  return Array.from(map.values());
+}
+
+// Contadores agregados no banco: reduz o tráfego da sidebar de milhares de
+// linhas para poucas linhas por lista/status. O fallback evita janela quebrada
+// caso o front novo seja publicado antes da migration/RPC estar aplicada.
+export async function fetchTaskCountIndex(listIds: string[] | null = null): Promise<TaskCountSummary[]> {
+  if (listIds && listIds.length === 0) return [];
+
+  const { data, error } = await supabase.rpc('get_task_counts_by_list', {
+    p_list_ids: listIds,
+  });
+
+  if (!error) {
+    return ((data || []) as TaskCountSummaryRow[]).map((row) => ({
+      listId: row.list_id,
+      status: row.status,
+      count: Number(row.total_count) || 0,
+    }));
+  }
+
+  console.warn('taskRepo.fetchTaskCountIndex: fallback sem RPC:', error);
+  return fetchTaskCountIndexFallback(listIds);
 }
 
 export async function fetchCustomFieldValuesByEntityIds(entityIds: string[]): Promise<CustomFieldValue[]> {
