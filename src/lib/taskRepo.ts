@@ -19,6 +19,24 @@ const PAGE_SIZE = 1000;
 // milhares de caracteres e o servidor responde 400. Quebramos em lotes de 150
 // IDs (URL segura) e concatenamos os resultados.
 const SUBENTITY_CHUNK = 150;
+const TASK_ROW_SELECT = [
+  'id',
+  'title',
+  'description',
+  'status',
+  'priority',
+  'main_assignee_id',
+  'secondary_assignee_ids',
+  'start_date',
+  'due_date',
+  'extension_count',
+  'list_id',
+  'project_id',
+  'parent_id',
+  'created_at',
+  'created_by',
+  'tags',
+].join(',');
 
 // ── Formato cru das linhas do banco (snake_case) ────────────────────────────
 export interface TaskRow {
@@ -133,7 +151,7 @@ async function fetchAllPages<T>(
 export function fetchTaskRowsByListIds(listIds: string[] | null): Promise<TaskRow[]> {
   return fetchAllPages<TaskRow>(
     (from, to) => {
-      const q = supabase.from('tasks').select('*');
+      const q = supabase.from('tasks').select(TASK_ROW_SELECT);
       return (listIds ? q.in('list_id', listIds) : q)
         .order('created_at', { ascending: false })
         .order('id', { ascending: true })
@@ -149,7 +167,7 @@ export function fetchTaskRowsByListId(listId: string): Promise<TaskRow[]> {
   return fetchAllPages<TaskRow>(
     (from, to) => supabase
       .from('tasks')
-      .select('*')
+      .select(TASK_ROW_SELECT)
       .eq('list_id', listId)
       .order('created_at', { ascending: false })
       .order('id', { ascending: true })
@@ -162,7 +180,7 @@ export function fetchMyTaskRows(userId: string): Promise<TaskRow[]> {
   return fetchAllPages<TaskRow>(
     (from, to) => supabase
       .from('tasks')
-      .select('*')
+      .select(TASK_ROW_SELECT)
       .or(`main_assignee_id.eq.${userId},secondary_assignee_ids.cs.{${userId}},created_by.eq.${userId}`)
       .order('due_date', { ascending: true, nullsFirst: false })
       .order('created_at', { ascending: false })
@@ -211,7 +229,7 @@ export async function searchTaskRowsByTitle(term: string, limit = 200): Promise<
 
   const { data, error } = await supabase
     .from('tasks')
-    .select('*')
+    .select(TASK_ROW_SELECT)
     .ilike('title', pattern)
     .limit(limit);
   if (error) { console.error('taskRepo.searchTaskRowsByTitle: erro na busca:', error); return []; }
