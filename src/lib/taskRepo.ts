@@ -143,6 +143,21 @@ export function fetchTaskRowsByListIds(listIds: string[] | null): Promise<TaskRo
   );
 }
 
+// Caminho quente da sidebar: quando o usuário abre UMA lista, deixa a consulta
+// explícita em list_id = X para o Postgres usar o índice mais direto possível.
+export function fetchTaskRowsByListId(listId: string): Promise<TaskRow[]> {
+  return fetchAllPages<TaskRow>(
+    (from, to) => supabase
+      .from('tasks')
+      .select('*')
+      .eq('list_id', listId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to),
+    'fetchTaskRowsByListId',
+  );
+}
+
 export function fetchMyTaskRows(userId: string): Promise<TaskRow[]> {
   return fetchAllPages<TaskRow>(
     (from, to) => supabase

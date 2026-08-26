@@ -1101,6 +1101,7 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [myTasks, setMyTasks] = useState<Task[]>([]);
+  const [isTasksLoading, setIsTasksLoading] = useState(false);
   const [isMyTasksLoading, setIsMyTasksLoading] = useState(false);
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
   const [fieldValues, setFieldValues] = useState<CustomFieldValue[]>([]);
@@ -1528,10 +1529,12 @@ export default function App() {
     const requestId = ++loadTasksRequestIdRef.current;
     const isGlobalDashboard = activeView === 'Dashboard' && activeScope.type === 'global' && !activeListId;
     if (isGlobalDashboard) {
+      setIsTasksLoading(false);
       return;
     }
 
     if (activeView === 'MyTasks') {
+      setIsTasksLoading(false);
       setIsMyTasksLoading(true);
       try {
         const rows = await taskRepo.fetchMyTaskRows(currentUser.id);
@@ -1552,11 +1555,10 @@ export default function App() {
     }
 
     // Resolve o escopo ativo (lista/pasta/espaço) para o conjunto de listas a
-    // buscar. `null` = todas as tarefas visíveis (RLS restringe no servidor).
+    // buscar. Lista aberta usa um caminho dedicado (`list_id = X`), para não
+    // pagar o custo das leituras amplas quando o usuário só quer aquele quadro.
     let listIds: string[] | null = null;
-    if (activeListId) {
-      listIds = [activeListId];
-    } else if (activeScope.type === 'folder' && activeScope.id) {
+    if (!activeListId && activeScope.type === 'folder' && activeScope.id) {
       listIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
     } else if (activeScope.type === 'space' && activeScope.id) {
       const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
@@ -1565,11 +1567,20 @@ export default function App() {
 
     // Sub-entidades NÃO são hidratadas aqui (carregadas sob demanda ao abrir a
     // tarefa) — mantém o load barato mesmo com dezenas de milhares de tarefas.
-    const rows = await taskRepo.fetchTaskRowsByListIds(listIds);
+    setIsTasksLoading(true);
+    try {
+      const rows = activeListId
+        ? await taskRepo.fetchTaskRowsByListId(activeListId)
+        : await taskRepo.fetchTaskRowsByListIds(listIds);
 
-    if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
-    loadTasksCommittedIdRef.current = requestId;
-    setTasks(rows.map(taskRepo.mapRowToTaskShell));
+      if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
+      loadTasksCommittedIdRef.current = requestId;
+      setTasks(rows.map(taskRepo.mapRowToTaskShell));
+    } finally {
+      if (requestId === loadTasksRequestIdRef.current) {
+        setIsTasksLoading(false);
+      }
+    }
   }, [session, activeListId, activeScope, activeView, currentUser.id, lists, folders]);
 
   useEffect(() => {
@@ -3333,6 +3344,7 @@ export default function App() {
                 onBulkPriorityChange={handleBulkPriorityChange}
                 onBulkDelete={handleBulkDelete}
                 onBulkMove={handleBulkMove}
+                isLoading={isTasksLoading}
               />
             )}
             {activeView === 'Kanban' && (
@@ -5868,6 +5880,7 @@ function ListView({
   onBulkPriorityChange,
   onBulkDelete,
   onBulkMove,
+  isLoading = false,
 }: any) {
   // --- Bulk Selection State (T701) ---
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
@@ -6136,7 +6149,9 @@ function ListView({
       </div>
 
       {tasks.length === 0 ? (
-        <div className="px-4 py-12 text-center text-gray-400 italic">Nenhuma tarefa encontrada neste contexto.</div>
+        <div className="px-4 py-12 text-center text-gray-400 italic">
+          {isLoading ? 'Carregando tarefas deste contexto...' : 'Nenhuma tarefa encontrada neste contexto.'}
+        </div>
       ) : (
         <div className="flex-1 overflow-auto">
           {grouped.map(({ status, tasks: statusTasks }) => {
