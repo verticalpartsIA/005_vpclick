@@ -1559,13 +1559,23 @@ export default function App() {
     // tarefa) — mantém o load barato mesmo com dezenas de milhares de tarefas.
     setIsTasksLoading(true);
     try {
-      const rows = activeListId
-        ? await taskRepo.fetchTaskRowsByListId(activeListId)
-        : await taskRepo.fetchTaskRowsByListIds(listIds);
+      const firstRows = activeListId
+        ? await taskRepo.fetchInitialTaskRowsByListId(activeListId)
+        : await taskRepo.fetchInitialTaskRowsByListIds(listIds);
 
       if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
       loadTasksCommittedIdRef.current = requestId;
-      setTasks(rows.map(taskRepo.mapRowToTaskShell));
+      setTasks(firstRows.map(taskRepo.mapRowToTaskShell));
+      setIsTasksLoading(false);
+
+      if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) return;
+
+      const remainingRows = activeListId
+        ? await taskRepo.fetchRemainingTaskRowsByListId(activeListId)
+        : await taskRepo.fetchRemainingTaskRowsByListIds(listIds);
+
+      if (requestId !== loadTasksRequestIdRef.current) return;
+      setTasks([...firstRows, ...remainingRows].map(taskRepo.mapRowToTaskShell));
     } finally {
       if (requestId === loadTasksRequestIdRef.current) {
         setIsTasksLoading(false);

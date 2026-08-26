@@ -15,6 +15,7 @@ import { supabase } from './supabase';
 import { CustomFieldValue, Task, TaskPriority } from '../types';
 
 const PAGE_SIZE = 1000;
+export const INITIAL_TASK_PAGE_SIZE = 100;
 // Um único .in('task_id', [milhares de UUIDs]) gera uma URL de dezenas de
 // milhares de caracteres e o servidor responde 400. Quebramos em lotes de 150
 // IDs (URL segura) e concatenamos os resultados.
@@ -135,9 +136,10 @@ export function mapRowToTaskShell(d: TaskRow): Task {
 async function fetchAllPages<T>(
   build: (from: number, to: number) => PromiseLike<PostgrestResult<T>>,
   label: string,
+  startFrom = 0,
 ): Promise<T[]> {
   let all: T[] = [];
-  let from = 0;
+  let from = startFrom;
   while (true) {
     const { data: page, error } = await build(from, from + PAGE_SIZE - 1);
     if (error) { console.error(`taskRepo.${label}: erro ao paginar:`, error); break; }
@@ -147,6 +149,46 @@ async function fetchAllPages<T>(
     from += PAGE_SIZE;
   }
   return all;
+}
+
+async function fetchTaskRowsRange(
+  listIds: string[] | null,
+  from: number,
+  to: number,
+  label: string,
+): Promise<TaskRow[]> {
+  const q = supabase.from('tasks').select(TASK_ROW_SELECT);
+  const { data, error } = await (listIds ? q.in('list_id', listIds) : q)
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: true })
+    .range(from, to);
+
+  if (error) {
+    console.error(`taskRepo.${label}: erro ao carregar página:`, error);
+    return [];
+  }
+  return (data || []) as TaskRow[];
+}
+
+async function fetchTaskRowsBySingleListRange(
+  listId: string,
+  from: number,
+  to: number,
+  label: string,
+): Promise<TaskRow[]> {
+  const { data, error } = await supabase
+    .from('tasks')
+    .select(TASK_ROW_SELECT)
+    .eq('list_id', listId)
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: true })
+    .range(from, to);
+
+  if (error) {
+    console.error(`taskRepo.${label}: erro ao carregar página:`, error);
+    return [];
+  }
+  return (data || []) as TaskRow[];
 }
 
 // Linhas cruas de `tasks` no escopo. `listIds === null` = todas as visíveis
@@ -164,6 +206,24 @@ export function fetchTaskRowsByListIds(listIds: string[] | null): Promise<TaskRo
   );
 }
 
+export function fetchInitialTaskRowsByListIds(listIds: string[] | null): Promise<TaskRow[]> {
+  return fetchTaskRowsRange(listIds, 0, INITIAL_TASK_PAGE_SIZE - 1, 'fetchInitialTaskRowsByListIds');
+}
+
+export function fetchRemainingTaskRowsByListIds(listIds: string[] | null): Promise<TaskRow[]> {
+  return fetchAllPages<TaskRow>(
+    (from, to) => {
+      const q = supabase.from('tasks').select(TASK_ROW_SELECT);
+      return (listIds ? q.in('list_id', listIds) : q)
+        .order('created_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to);
+    },
+    'fetchRemainingTaskRowsByListIds',
+    INITIAL_TASK_PAGE_SIZE,
+  );
+}
+
 // Caminho quente da sidebar: quando o usuário abre UMA lista, deixa a consulta
 // explícita em list_id = X para o Postgres usar o índice mais direto possível.
 export function fetchTaskRowsByListId(listId: string): Promise<TaskRow[]> {
@@ -176,6 +236,24 @@ export function fetchTaskRowsByListId(listId: string): Promise<TaskRow[]> {
       .order('id', { ascending: true })
       .range(from, to),
     'fetchTaskRowsByListId',
+  );
+}
+
+export function fetchInitialTaskRowsByListId(listId: string): Promise<TaskRow[]> {
+  return fetchTaskRowsBySingleListRange(listId, 0, INITIAL_TASK_PAGE_SIZE - 1, 'fetchInitialTaskRowsByListId');
+}
+
+export function fetchRemainingTaskRowsByListId(listId: string): Promise<TaskRow[]> {
+  return fetchAllPages<TaskRow>(
+    (from, to) => supabase
+      .from('tasks')
+      .select(TASK_ROW_SELECT)
+      .eq('list_id', listId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to),
+    'fetchRemainingTaskRowsByListId',
+    INITIAL_TASK_PAGE_SIZE,
   );
 }
 
