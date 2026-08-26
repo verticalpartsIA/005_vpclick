@@ -587,6 +587,19 @@ const FALLBACK_USER: User = {
 // continua visível/gerenciável no Painel Admin.
 const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
 
+function preserveLoadedTaskDetails(nextTask: Task, previousTask?: Task): Task {
+  if (!previousTask) return nextTask;
+  return {
+    ...nextTask,
+    extensionHistory: previousTask.extensionHistory || nextTask.extensionHistory || [],
+    checklists: previousTask.checklists || nextTask.checklists || [],
+    comments: previousTask.comments || nextTask.comments || [],
+    attachments: previousTask.attachments || nextTask.attachments || [],
+    activities: previousTask.activities || nextTask.activities || [],
+    watcherIds: previousTask.watcherIds || nextTask.watcherIds || [],
+  };
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User>(FALLBACK_USER);
   const [workspace] = useState<Workspace>(INITIAL_WORKSPACE);
@@ -1535,7 +1548,7 @@ export default function App() {
         setMyTasks(mappedTasks);
         setTasks(prev => {
           const merged = new Map(prev.map(t => [t.id, t]));
-          for (const t of mappedTasks) merged.set(t.id, { ...(merged.get(t.id) || {}), ...t });
+          for (const t of mappedTasks) merged.set(t.id, preserveLoadedTaskDetails(t, merged.get(t.id)));
           return Array.from(merged.values());
         });
       } finally {
@@ -1565,7 +1578,9 @@ export default function App() {
 
       if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
       loadTasksCommittedIdRef.current = requestId;
-      setTasks(firstRows.map(taskRepo.mapRowToTaskShell));
+      setTasks(prev => firstRows
+        .map(taskRepo.mapRowToTaskShell)
+        .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
       setIsTasksLoading(false);
 
       if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) return;
@@ -1575,7 +1590,9 @@ export default function App() {
         : await taskRepo.fetchRemainingTaskRowsByListIds(listIds);
 
       if (requestId !== loadTasksRequestIdRef.current) return;
-      setTasks([...firstRows, ...remainingRows].map(taskRepo.mapRowToTaskShell));
+      setTasks(prev => [...firstRows, ...remainingRows]
+        .map(taskRepo.mapRowToTaskShell)
+        .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
     } finally {
       if (requestId === loadTasksRequestIdRef.current) {
         setIsTasksLoading(false);
@@ -1597,6 +1614,8 @@ export default function App() {
   useEffect(() => { loadDashboardTasksRef.current = loadDashboardTasks; }, [loadDashboardTasks]);
   const activeViewRef = useRef(activeView);
   useEffect(() => { activeViewRef.current = activeView; }, [activeView]);
+  const selectedTaskIdRef = useRef(selectedTaskId);
+  useEffect(() => { selectedTaskIdRef.current = selectedTaskId; }, [selectedTaskId]);
 
   // ── Busca server-side de tarefas por título (bug #9 do #81) ──────────────
   // O array `tasks` é limitado à janela carregada: o PostgREST devolve no
@@ -1647,10 +1666,17 @@ export default function App() {
         if (activeViewRef.current === 'Dashboard') loadDashboardTasksRef.current?.();
       }, 1200);
     };
+    const refreshOpenTaskAttachments = async (payload: any) => {
+      const taskId = payload?.new?.task_id || payload?.old?.task_id;
+      if (!taskId || taskId !== selectedTaskIdRef.current) return;
+      const subs = await taskRepo.fetchTaskDetails(taskId);
+      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...subs } : t));
+    };
     const channel = supabase
       .channel('tasks-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, scheduleReload)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'task_comments' }, scheduleReload)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_attachments' }, refreshOpenTaskAttachments)
       .subscribe();
     return () => { if (timer) clearTimeout(timer); supabase.removeChannel(channel); };
   }, [session?.user?.id]);

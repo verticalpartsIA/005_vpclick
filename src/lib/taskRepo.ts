@@ -559,13 +559,30 @@ export async function insertAttachment(
   taskId: string,
   att: { name?: string; url?: string; type?: string; size?: number },
 ): Promise<{ attachment: ReturnType<typeof mapAttachment> | null; error: string | null }> {
-  const { data, error } = await supabase
+  const uploadedAt = new Date().toISOString();
+  const attachmentRow: AttachmentRow = {
+    id: newUuid(),
+    task_id: taskId,
+    name: att.name || 'Anexo',
+    url: att.url || '',
+    type: att.type || 'application/octet-stream',
+    size: att.size ?? 0,
+    uploaded_at: uploadedAt,
+  };
+
+  const { error } = await supabase
     .from('task_attachments')
-    .insert({ task_id: taskId, name: att.name, url: att.url, type: att.type, size: att.size })
-    .select()
-    .single();
-  if (error || !data) return { attachment: null, error: error?.message ?? 'registro não criado' };
-  return { attachment: mapAttachment(data as AttachmentRow), error: null };
+    .insert({
+      id: attachmentRow.id,
+      task_id: attachmentRow.task_id,
+      name: attachmentRow.name,
+      url: attachmentRow.url,
+      type: attachmentRow.type,
+      size: attachmentRow.size,
+      uploaded_at: attachmentRow.uploaded_at,
+    });
+  if (error) return { attachment: null, error: error.message ?? 'registro não criado' };
+  return { attachment: mapAttachment(attachmentRow), error: null };
 }
 
 // Exclui a linha do anexo e o arquivo físico do Storage. `notFound` distingue
