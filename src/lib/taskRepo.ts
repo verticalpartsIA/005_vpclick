@@ -608,13 +608,33 @@ export async function insertComment(
   text: string,
   parentCommentId?: string,
 ): Promise<{ comment: ReturnType<typeof mapComment> | null; error: string | null }> {
-  const { data, error } = await supabase
+  const createdAt = new Date().toISOString();
+  const commentRow: CommentRow = {
+    id: newUuid(),
+    task_id: taskId,
+    user_id: userId,
+    text,
+    created_at: createdAt,
+    updated_at: null,
+    parent_comment_id: parentCommentId || null,
+    assigned_to: null,
+    assigned_by: null,
+    resolved_at: null,
+    resolved_by: null,
+  };
+
+  const { error } = await supabase
     .from('task_comments')
-    .insert({ task_id: taskId, user_id: userId, text, parent_comment_id: parentCommentId || null })
-    .select()
-    .single();
-  if (error || !data) return { comment: null, error: error?.message ?? 'registro não criado' };
-  return { comment: mapComment(data as CommentRow), error: null };
+    .insert({
+      id: commentRow.id,
+      task_id: commentRow.task_id,
+      user_id: commentRow.user_id,
+      text: commentRow.text,
+      created_at: commentRow.created_at,
+      parent_comment_id: commentRow.parent_comment_id,
+    });
+  if (error) return { comment: null, error: error.message ?? 'registro não criado' };
+  return { comment: mapComment(commentRow), error: null };
 }
 
 export async function updateCommentText(commentId: string, newText: string, updatedAt: string): Promise<{ error: string | null }> {
