@@ -207,6 +207,11 @@ export interface Task {
   createdAt?: string;
   createdBy?: string;
   dependencies?: TaskDependency[];
+  // Marco (Codex_Gantt_08): sem duração própria, renderizado no Gantt como
+  // marcador pontual na `dueDate` em vez de barra com intervalo. Continua
+  // sendo uma tarefa normal pra todo o resto do sistema (RLS, dependências,
+  // busca) — ver supabase_migration_36_task_milestones.sql.
+  isMilestone?: boolean;
   tags?: string[];
   watcherIds?: string[];
 }

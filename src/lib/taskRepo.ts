@@ -37,6 +37,7 @@ const TASK_ROW_SELECT = [
   'created_at',
   'created_by',
   'tags',
+  'is_milestone',
 ].join(',');
 
 // ── Formato cru das linhas do banco (snake_case) ────────────────────────────
@@ -57,6 +58,7 @@ export interface TaskRow {
   created_at: string;
   created_by: string | null;
   tags: string[] | null;
+  is_milestone: boolean | null;
 }
 interface AttachmentRow { id: string; task_id: string; name: string; url: string; type: string; size: number; uploaded_at: string; }
 interface CommentRow {
@@ -115,6 +117,7 @@ const mapTaskCore = (d: TaskRow) => ({
   createdAt: d.created_at,
   createdBy: d.created_by || undefined,
   tags: d.tags || [],
+  isMilestone: d.is_milestone ?? false,
 });
 
 // Task "shell": campos preenchidos, sub-entidades vazias. Usado nas listagens,
@@ -543,6 +546,7 @@ export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok:
       project_id: task.projectId,
       parent_id: task.parentId ?? null,
       extension_count: task.extensionCount,
+      is_milestone: task.isMilestone ?? false,
     })
     .eq('id', task.id);
   if (error) return { ok: false, message: error.message };

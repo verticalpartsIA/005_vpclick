@@ -105,7 +105,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   // nem abrir o modal completo (que continua disponível via clique na barra).
   const [quickEditTaskId, setQuickEditTaskId] = useState<string | null>(null);
   const [quickDraft, setQuickDraft] = useState<{
-    title: string; priority: TaskPriority; mainAssigneeId: string; status: string; startDate: string; dueDate: string;
+    title: string; priority: TaskPriority; mainAssigneeId: string; status: string; startDate: string; dueDate: string; isMilestone: boolean;
   } | null>(null);
   const [savingQuickEdit, setSavingQuickEdit] = useState(false);
   // Alternativa sem drag pra criar dependência (Codex_Gantt_03), embutida no
@@ -614,6 +614,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
       status: task.status,
       startDate: task.startDate || '',
       dueDate: task.dueDate || '',
+      isMilestone: task.isMilestone ?? false,
     });
   };
 
@@ -627,7 +628,13 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     if (!quickDraft || !quickEditTaskId || savingQuickEdit || !onUpdateTask) return;
     const title = quickDraft.title.trim();
     if (!title) return;
-    if (quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate) return;
+    if (!quickDraft.isMilestone && quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate) return;
+
+    // Marco (Codex_Gantt_08) não tem intervalo — só um ponto no tempo
+    // (due_date). Alinhamos startDate=dueDate pra o cálculo de duração do
+    // Gantt (differenceInDays+1) dar exatamente 1 dia sem precisar de um
+    // caso especial na renderização da barra/arrasto.
+    const startDate = quickDraft.isMilestone ? quickDraft.dueDate : quickDraft.startDate;
 
     setSavingQuickEdit(true);
     const ok = await onUpdateTask(quickEditTaskId, {
@@ -635,8 +642,9 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
       priority: quickDraft.priority,
       mainAssigneeId: quickDraft.mainAssigneeId || undefined,
       status: quickDraft.status,
-      startDate: quickDraft.startDate || undefined,
+      startDate: startDate || undefined,
       dueDate: quickDraft.dueDate || undefined,
+      isMilestone: quickDraft.isMilestone,
     });
     setSavingQuickEdit(false);
     // `onUpdateTask` (App.tsx) já mostra o toast de erro em caso de falha —
@@ -930,24 +938,55 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                       <div
                         ref={(el) => { barRefs.current[task.id] = el; }}
                         data-gantt-task-id={task.id}
-                        title={blockedTaskIds.has(task.id) ? 'Bloqueada por dependência pendente' : undefined}
-                        className={`absolute h-6 rounded-md shadow-sm flex items-center px-2 text-[10px] text-white font-medium transition-[filter] hover:brightness-110
+                        title={
+                          task.isMilestone
+                            ? `${task.title} · ${format(bar.start, 'dd/MM/yyyy', { locale: ptBR })}`
+                            : (blockedTaskIds.has(task.id) ? 'Bloqueada por dependência pendente' : undefined)
+                        }
+                        className={`absolute h-6 flex items-center transition-[filter] hover:brightness-110
                           ${onUpdateTask ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}
-                          ${task.priority === 'Urgente' ? 'bg-destructive' : 'bg-primary'}
-                          ${criticalPath.available && criticalPath.taskIds.has(task.id) ? 'ring-2 ring-red-500 ring-offset-1' : ''}
-                          ${blockedTaskIds.has(task.id) ? 'opacity-80 [background-image:repeating-linear-gradient(135deg,rgba(0,0,0,0.15)_0_6px,transparent_6px_12px)]' : ''}
+                          ${task.isMilestone
+                            ? ''
+                            : `px-2 text-[10px] text-white font-medium rounded-md shadow-sm
+                               ${task.priority === 'Urgente' ? 'bg-destructive' : 'bg-primary'}
+                               ${blockedTaskIds.has(task.id) ? 'opacity-80 [background-image:repeating-linear-gradient(135deg,rgba(0,0,0,0.15)_0_6px,transparent_6px_12px)]' : ''}`
+                          }
+                          ${criticalPath.available && criticalPath.taskIds.has(task.id) ? (task.isMilestone ? '' : 'ring-2 ring-red-500 ring-offset-1') : ''}
                         `}
                         style={{ left: bar.left, width: bar.width }}
                         onMouseDown={(e) => startDrag(e, task, 'move')}
                         onClick={() => handleBarClick(task.id)}
                       >
-                         {blockedTaskIds.has(task.id) && <AlertTriangle className="w-2.5 h-2.5 shrink-0 mr-0.5" />}
-                         <span className="truncate pointer-events-none">{task.title}</span>
+                         {task.isMilestone ? (
+                           <>
+                             {/* Marco (Codex_Gantt_08): marcador pontual (losango)
+                                 na data — não é uma barra com intervalo, então o
+                                 título fica ao lado, fora da caixa de 1 dia. */}
+                             <div
+                               className={`absolute left-1/2 top-1/2 w-3.5 h-3.5 -translate-x-1/2 -translate-y-1/2 rotate-45 shadow-sm
+                                 ${task.priority === 'Urgente' ? 'bg-destructive' : 'bg-primary'}
+                                 ${criticalPath.available && criticalPath.taskIds.has(task.id) ? 'ring-2 ring-red-500' : ''}
+                               `}
+                             />
+                             {blockedTaskIds.has(task.id) && (
+                               <AlertTriangle className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-[220%] w-3 h-3 text-amber-500" />
+                             )}
+                             <span className="absolute left-full ml-2 whitespace-nowrap text-[10px] font-medium text-foreground pointer-events-none">
+                               {task.title}
+                             </span>
+                           </>
+                         ) : (
+                           <>
+                             {blockedTaskIds.has(task.id) && <AlertTriangle className="w-2.5 h-2.5 shrink-0 mr-0.5" />}
+                             <span className="truncate pointer-events-none">{task.title}</span>
+                           </>
+                         )}
 
                          {/* Handles de redimensionar (início/fim) — só aparecem com
                              permissão de editar (onUpdateTask presente) e no hover,
-                             pra manter a barra limpa no resto do tempo. */}
-                         {onUpdateTask && (
+                             pra manter a barra limpa no resto do tempo. Marco não
+                             tem duração pra redimensionar. */}
+                         {onUpdateTask && !task.isMilestone && (
                            <>
                              <div
                                role="presentation"
@@ -1039,21 +1078,33 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                                      <option value="">Sem responsável</option>
                                      {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
                                    </select>
-                                   <div className="grid grid-cols-2 gap-2">
+                                   <label className="flex items-center gap-2 text-xs cursor-pointer">
                                      <input
-                                       type="date"
-                                       value={quickDraft.startDate}
-                                       onChange={(e) => setQuickDraft({ ...quickDraft, startDate: e.target.value })}
-                                       className="h-8 text-xs border rounded-md px-2"
+                                       type="checkbox"
+                                       checked={quickDraft.isMilestone}
+                                       onChange={(e) => setQuickDraft({ ...quickDraft, isMilestone: e.target.checked })}
                                      />
+                                     Marco (sem duração, só uma data)
+                                   </label>
+                                   <div className="grid grid-cols-2 gap-2">
+                                     {!quickDraft.isMilestone && (
+                                       <input
+                                         type="date"
+                                         value={quickDraft.startDate}
+                                         onChange={(e) => setQuickDraft({ ...quickDraft, startDate: e.target.value })}
+                                         className="h-8 text-xs border rounded-md px-2"
+                                         title="Início"
+                                       />
+                                     )}
                                      <input
                                        type="date"
                                        value={quickDraft.dueDate}
                                        onChange={(e) => setQuickDraft({ ...quickDraft, dueDate: e.target.value })}
-                                       className="h-8 text-xs border rounded-md px-2"
+                                       className={`h-8 text-xs border rounded-md px-2 ${quickDraft.isMilestone ? 'col-span-2' : ''}`}
+                                       title={quickDraft.isMilestone ? 'Data do marco' : 'Fim'}
                                      />
                                    </div>
-                                   {quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate && (
+                                   {!quickDraft.isMilestone && quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate && (
                                      <p className="text-[11px] text-destructive">Início não pode ser depois do fim.</p>
                                    )}
 
