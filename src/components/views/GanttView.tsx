@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { toast } from 'sonner';
 import { Task, User, List, TaskPriority, TaskDependency } from '../../types';
-import { fetchTaskDependenciesForTasks, addTaskDependency, shiftTaskDates } from '../../lib/supabase';
+import { supabase, fetchTaskDependenciesForTasks, addTaskDependency, shiftTaskDates } from '../../lib/supabase';
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -144,7 +144,9 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   useEffect(() => {
     if (!taskIdsKey) { setDependenciesByTask({}); return; }
     let cancelled = false;
-    fetchTaskDependenciesForTasks(taskIdsKey.split(','))
+    const visibleIds = taskIdsKey.split(',');
+
+    const reloadDependencies = () => fetchTaskDependenciesForTasks(visibleIds)
       .then(deps => {
         if (cancelled) return;
         const byTask: Record<string, TaskDependency[]> = {};
@@ -152,7 +154,30 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
         setDependenciesByTask(byTask);
       })
       .catch(() => { if (!cancelled) toast.error('Não foi possível carregar as dependências do Gantt.'); });
-    return () => { cancelled = true; };
+
+    reloadDependencies();
+
+    // Realtime (Codex_Gantt_11): dependências criadas/removidas por drag,
+    // quick edit e lote já atualizam `dependenciesByTask` local direto (sem
+    // esperar isso aqui) — este canal é só pra pegar mudanças feitas em
+    // OUTRA aba/sessão enquanto este Gantt está aberto, que sem isso só
+    // apareceriam no próximo recarregamento de `tasks`. Sem filtro de linha
+    // (mesmo padrão do canal `tasks-realtime` em App.tsx) porque o filtro de
+    // igualdade do Realtime não cobre "task_id in (...)"; a checagem de
+    // relevância é feita aqui mesmo, comparando com as tarefas visíveis.
+    const visibleIdSet = new Set(visibleIds);
+    const channel = supabase
+      .channel('gantt-task-dependencies-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'task_dependencies' }, (payload) => {
+        const row = (payload.new ?? payload.old) as { task_id?: string; depends_on_id?: string } | null;
+        if (!row) return;
+        if (visibleIdSet.has(row.task_id || '') || visibleIdSet.has(row.depends_on_id || '')) {
+          reloadDependencies();
+        }
+      })
+      .subscribe();
+
+    return () => { cancelled = true; supabase.removeChannel(channel); };
   }, [taskIdsKey]);
 
   const barRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -530,6 +555,79 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     }
   }, [onUpdateTask, tasks, findDependencyConflicts]);
 
+  // Sincronização visual das setas de dependência durante o arrasto
+  // (Codex_Gantt_11): mover/redimensionar já atualiza a barra via DOM direto
+  // (sem re-render, ver handleWindowMouseMove) por performance — sem isso as
+  // setas ficavam "presas" na posição antiga até soltar o mouse. As mesmas
+  // setas já são recalculadas de forma reativa (useMemo) a cada mudança real
+  // de estado (data, escala, agrupamento, filtro); isto aqui só cobre o
+  // instante intermediário do drag, que não passa por estado do React.
+  const dependencyEdges = useMemo(() => {
+    const edges: { key: string; sourceId: string; targetId: string }[] = [];
+    filteredTasks.forEach(task => {
+      (dependenciesByTask[task.id] || []).forEach(dep => {
+        edges.push({ key: `${dep.depends_on_id}-${task.id}`, sourceId: dep.depends_on_id, targetId: task.id });
+      });
+    });
+    return edges;
+  }, [filteredTasks, dependenciesByTask]);
+
+  const edgesByTaskId = useMemo(() => {
+    const map = new Map<string, { key: string; sourceId: string; targetId: string }[]>();
+    const push = (id: string, edge: { key: string; sourceId: string; targetId: string }) => {
+      const list = map.get(id);
+      if (list) list.push(edge); else map.set(id, [edge]);
+    };
+    dependencyEdges.forEach(edge => { push(edge.sourceId, edge); push(edge.targetId, edge); });
+    return map;
+  }, [dependencyEdges]);
+
+  const pathRefs = useRef<Record<string, SVGPathElement | null>>({});
+
+  // Posição "ao vivo" de uma barra: igual a `taskBars` (base), mas aplicando
+  // por cima o delta do drag em andamento, se a tarefa fizer parte dele —
+  // os mesmos cálculos (clamps inclusive) de handleWindowMouseMove abaixo,
+  // só que devolvidos em vez de escritos direto num elemento específico.
+  const getLiveBarRect = useCallback((taskId: string): { left: number; width: number } | null => {
+    const base = taskBars.find(b => b.id === taskId);
+    if (!base) return null;
+    let { left, width } = base;
+    const drag = dragStateRef.current;
+    const isDragging = drag && (drag.taskId === taskId || drag.groupOriginals?.[taskId]);
+    if (drag && isDragging) {
+      if (drag.mode === 'move') {
+        left = base.left + drag.currentDeltaDays * zoomLevel;
+      } else if (drag.mode === 'resize-right') {
+        const newEnd = addDays(drag.originalEnd, drag.currentDeltaDays);
+        const clampedEnd = newEnd < drag.originalStart ? drag.originalStart : newEnd;
+        width = Math.max(1, differenceInDays(clampedEnd, drag.originalStart) + 1) * zoomLevel;
+      } else if (drag.mode === 'resize-left') {
+        const newStart = addDays(drag.originalStart, drag.currentDeltaDays);
+        const clampedStart = newStart > drag.originalEnd ? drag.originalEnd : newStart;
+        width = Math.max(1, differenceInDays(drag.originalEnd, clampedStart) + 1) * zoomLevel;
+        left = base.left + differenceInDays(clampedStart, drag.originalStart) * zoomLevel;
+      }
+    }
+    return { left, width };
+  }, [taskBars, zoomLevel]);
+
+  const updateDependencyPath = useCallback((edge: { key: string; sourceId: string; targetId: string }) => {
+    const pathEl = pathRefs.current[edge.key];
+    if (!pathEl) return;
+    const sourceIdx = taskRowIndex.get(edge.sourceId);
+    const targetIdx = taskRowIndex.get(edge.targetId);
+    if (sourceIdx === undefined || targetIdx === undefined) return;
+    const sourceRect = getLiveBarRect(edge.sourceId);
+    const targetRect = getLiveBarRect(edge.targetId);
+    if (!sourceRect || !targetRect) return;
+    const x1 = sourceRect.left + sourceRect.width;
+    const y1 = sourceIdx * 40 + 20;
+    const x2 = targetRect.left;
+    const y2 = targetIdx * 40 + 20;
+    const midX = x1 + (x2 - x1) / 2;
+    pathEl.setAttribute('d', `M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`);
+  }, [taskRowIndex, getLiveBarRect]);
+
   const handleWindowMouseMove = useCallback((e: MouseEvent) => {
     const drag = dragStateRef.current;
     if (!drag) return;
@@ -563,7 +661,15 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
       el.style.width = `${newDuration * zoomLevel}px`;
       el.style.transform = `translateX(${differenceInDays(clampedStart, drag.originalStart) * zoomLevel}px)`;
     }
-  }, [zoomLevel]);
+
+    // Setas de dependência conectadas a qualquer tarefa que se moveu neste
+    // frame (a arrastada, ou todo o grupo em movimentação em lote) — sem
+    // isso ficariam apontando pra posição antiga até soltar o mouse.
+    const movedIds = drag.groupOriginals ? Object.keys(drag.groupOriginals) : [drag.taskId];
+    const edgesToUpdate = new Map<string, { key: string; sourceId: string; targetId: string }>();
+    movedIds.forEach(id => (edgesByTaskId.get(id) || []).forEach(edge => edgesToUpdate.set(edge.key, edge)));
+    edgesToUpdate.forEach(updateDependencyPath);
+  }, [zoomLevel, edgesByTaskId, updateDependencyPath]);
 
   const handleWindowMouseUp = useCallback(() => {
     const drag = dragStateRef.current;
@@ -1059,40 +1165,43 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                   <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444" />
                 </marker>
               </defs>
-              {filteredTasks.flatMap((task) => {
-                const dependencies = dependenciesByTask[task.id] || [];
-                const targetIdx = taskRowIndex.get(task.id);
-                if (targetIdx === undefined) return [];
-                return dependencies.map((dep) => {
-                  const sourceIdx = taskRowIndex.get(dep.depends_on_id);
-                  if (sourceIdx === undefined) return null;
+              {dependencyEdges.map((edge) => {
+                // `dependencyEdges` já filtra pelas tarefas visíveis
+                // (deriva de filteredTasks) — mas o predecessor pode ter
+                // ficado de fora do recorte atual (filtro/grupo recolhido)
+                // mesmo sendo dependência de uma tarefa visível, daí o
+                // `taskRowIndex`/`taskBars` ainda precisarem confirmar os
+                // dois lados antes de desenhar (Codex_Gantt_11: "não
+                // desenhar linhas incorretas" quando um lado some da tela).
+                const sourceIdx = taskRowIndex.get(edge.sourceId);
+                const targetIdx = taskRowIndex.get(edge.targetId);
+                if (sourceIdx === undefined || targetIdx === undefined) return null;
 
-                  const sourceBar = taskBars.find(b => b.id === dep.depends_on_id);
-                  const targetBar = taskBars.find(b => b.id === task.id);
+                const sourceBar = taskBars.find(b => b.id === edge.sourceId);
+                const targetBar = taskBars.find(b => b.id === edge.targetId);
+                if (!sourceBar || !targetBar) return null;
 
-                  if (!sourceBar || !targetBar) return null;
+                const x1 = sourceBar.left + sourceBar.width;
+                const y1 = (sourceIdx * 40) + 20; // 40 is row height, 20 is center
+                const x2 = targetBar.left;
+                const y2 = (targetIdx * 40) + 20;
 
-                  const x1 = sourceBar.left + sourceBar.width;
-                  const y1 = (sourceIdx * 40) + 20; // 40 is row height, 20 is center
-                  const x2 = targetBar.left;
-                  const y2 = (targetIdx * 40) + 20;
+                // Simple path: ┐ then ┘
+                const midX = x1 + (x2 - x1) / 2;
+                const isCritical = criticalPath.available && criticalPath.taskIds.has(edge.sourceId) && criticalPath.taskIds.has(edge.targetId);
 
-                  // Simple path: ┐ then ┘
-                  const midX = x1 + (x2 - x1) / 2;
-                  const isCritical = criticalPath.available && criticalPath.taskIds.has(dep.depends_on_id) && criticalPath.taskIds.has(task.id);
-
-                  return (
-                    <path
-                      key={`${dep.depends_on_id}-${task.id}`}
-                      d={`M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`}
-                      fill="none"
-                      stroke={isCritical ? '#ef4444' : '#94a3b8'}
-                      strokeWidth={isCritical ? 2 : 1.5}
-                      markerEnd={isCritical ? 'url(#arrowhead-critical)' : 'url(#arrowhead)'}
-                      className="transition-all duration-300"
-                    />
-                  );
-                });
+                return (
+                  <path
+                    key={edge.key}
+                    ref={(el) => { pathRefs.current[edge.key] = el; }}
+                    d={`M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`}
+                    fill="none"
+                    stroke={isCritical ? '#ef4444' : '#94a3b8'}
+                    strokeWidth={isCritical ? 2 : 1.5}
+                    markerEnd={isCritical ? 'url(#arrowhead-critical)' : 'url(#arrowhead)'}
+                    className="transition-all duration-300"
+                  />
+                );
               })}
               {/* Linha temporária enquanto o usuário arrasta de uma barra a
                   outra pra criar uma dependência (Codex_Gantt_03) — atualizada
