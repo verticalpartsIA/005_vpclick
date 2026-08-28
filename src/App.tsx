@@ -3568,12 +3568,27 @@ export default function App() {
             {activeView === 'Table' && (
               <TableView
                 tasks={filteredTasks}
+                allTasks={tasks}
                 customFields={customFields}
                 fieldValues={fieldValues}
                 users={adminUsers}
+                lists={lists}
+                folders={folders}
+                spaces={spaces}
+                activeListId={activeListId}
+                activeScope={activeScope}
+                currentUser={currentUser}
+                statusGroups={statusGroups}
                 onTaskClick={setSelectedTaskId}
                 onUpdateTask={handleUpdateTask}
                 onUpdateFieldValue={handleUpdateFieldValue}
+                onCreateTask={handleCreateTask}
+                onDeleteTask={handleDeleteTask}
+                onDuplicateTask={setTaskToDuplicate}
+                onBulkStatusChange={handleBulkStatusChange}
+                onBulkPriorityChange={handleBulkPriorityChange}
+                onBulkMove={handleBulkMove}
+                onBulkDelete={handleBulkDelete}
                 workspaceTags={workspaceTags}
               />
             )}
