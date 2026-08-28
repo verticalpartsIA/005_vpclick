@@ -527,6 +527,13 @@ export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | 
 }
 
 // Atualiza os campos de nível-tarefa (não mexe em sub-entidades).
+//
+// `main_assignee_id` (uuid) e `start_date`/`due_date` (date) são colunas
+// nullable no banco, mas `Task` tipa esses campos como `string` (convenção
+// já usada em outras telas pra representar "vazio" como `''`, ver
+// TableView/KanbanView) — sem o `|| null` aqui, uma tentativa de limpar um
+// desses campos mandaria `''` pro Postgres, que rejeita `''` como uuid/date
+// (erro silencioso do lado do cliente, valor antigo nunca muda no banco).
 export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok: false; message: string }> {
   const { error } = await supabase
     .from('tasks')
@@ -535,10 +542,10 @@ export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok:
       description: task.description,
       status: task.status,
       priority: task.priority,
-      main_assignee_id: task.mainAssigneeId,
+      main_assignee_id: task.mainAssigneeId || null,
       secondary_assignee_ids: task.secondaryAssigneeIds,
-      start_date: task.startDate,
-      due_date: task.dueDate,
+      start_date: task.startDate || null,
+      due_date: task.dueDate || null,
       list_id: task.listId,
       project_id: task.projectId,
       parent_id: task.parentId ?? null,

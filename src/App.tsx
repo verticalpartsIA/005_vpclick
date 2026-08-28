@@ -3706,6 +3706,8 @@ export default function App() {
                 onUpdateTask={handleUpdateTask}
                 users={adminUsers}
                 lists={lists}
+                currentUserId={currentUser.id}
+                statusGroups={statusGroups}
               />
             )}
             {activeView === 'Inbox' && (
