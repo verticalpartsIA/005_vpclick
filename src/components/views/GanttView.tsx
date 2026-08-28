@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { toast } from 'sonner';
 import { Task, User, List, TaskPriority, TaskDependency } from '../../types';
-import { fetchTaskDependenciesForTasks, addTaskDependency } from '../../lib/supabase';
+import { fetchTaskDependenciesForTasks, addTaskDependency, shiftTaskDates } from '../../lib/supabase';
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -82,6 +82,12 @@ interface DragState {
   originalStart: Date;
   originalEnd: Date;
   currentDeltaDays: number;
+  // Movimentação em lote (Codex_Gantt_10): presente só quando `mode ===
+  // 'move'` e a tarefa arrastada faz parte de uma seleção com mais de uma
+  // tarefa — todas as outras selecionadas (com barra visível) se movem
+  // junto pelo mesmo delta de dias. Redimensionar continua sendo só da
+  // barra individual (não faz sentido em lote).
+  groupOriginals?: Record<string, { start: Date; end: Date }>;
 }
 
 interface VisualRow {
@@ -100,6 +106,18 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [filters, setFilters] = useState<GanttFilters>(EMPTY_FILTERS);
   const [filtersOpen, setFiltersOpen] = useState(false);
+
+  // Seleção múltipla pra movimentação em lote (Codex_Gantt_10) — arrastar
+  // qualquer barra selecionada move o conjunto inteiro pelo mesmo delta de
+  // dias, preservando a duração individual de cada uma.
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
+  const toggleTaskSelection = (taskId: string) => {
+    setSelectedTaskIds(prev => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
+      return next;
+    });
+  };
 
   // Edição rápida (Codex_Gantt_09) — altera dados básicos sem sair do Gantt
   // nem abrir o modal completo (que continua disponível via clique na barra).
@@ -413,6 +431,105 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     }
   }, [onUpdateTask]);
 
+  // Conflito de dependência (Codex_Gantt_10): só alerta, não impede — um
+  // deslocamento em lote pode deixar uma tarefa começando antes do fim do seu
+  // predecessor (ou um predecessor terminando depois do início de um
+  // sucessor que não fazia parte do lote). Só considera a dependência DIRETA
+  // já carregada (mesmo escopo confiável de blockedTaskIds/criticalPath
+  // acima, não transitivo).
+  const findDependencyConflicts = useCallback((movedItems: { taskId: string; newStart: Date; newEnd: Date }[]): string[] => {
+    const movedById = new Map(movedItems.map(i => [i.taskId, i]));
+    const conflicts: string[] = [];
+    const titleOf = (id: string) => tasks.find(t => t.id === id)?.title || id;
+
+    movedItems.forEach(({ taskId, newStart }) => {
+      (dependenciesByTask[taskId] || []).forEach(dep => {
+        if (dep.type !== 'blocked_by') return;
+        const predMoved = movedById.get(dep.depends_on_id);
+        const predEnd = predMoved ? predMoved.newEnd : taskBars.find(b => b.id === dep.depends_on_id)?.end;
+        if (predEnd && newStart < predEnd) {
+          conflicts.push(`"${titleOf(taskId)}" começaria antes do fim de "${titleOf(dep.depends_on_id)}"`);
+        }
+      });
+    });
+
+    Object.entries(dependenciesByTask).forEach(([successorId, deps]) => {
+      if (movedById.has(successorId)) return; // já coberto acima (o par foi tratado como predecessor movido)
+      deps.forEach(dep => {
+        if (dep.type !== 'blocked_by') return;
+        const predMoved = movedById.get(dep.depends_on_id);
+        if (!predMoved) return;
+        const successorStart = taskBars.find(b => b.id === successorId)?.start;
+        if (successorStart && successorStart < predMoved.newEnd) {
+          conflicts.push(`"${titleOf(dep.depends_on_id)}" passaria a terminar depois do início de "${titleOf(successorId)}"`);
+        }
+      });
+    });
+
+    return conflicts;
+  }, [dependenciesByTask, taskBars, tasks]);
+
+  // Movimentação em lote (Codex_Gantt_10): tenta a operação batch/atômica no
+  // banco primeiro (uma única instrução SQL, RLS decide linha a linha) e só
+  // cai pro loop sequencial (via onUpdateTask, tarefa a tarefa) se a função
+  // ainda não tiver sido migrada — nunca ignora silenciosamente permissão nem
+  // burla RLS em nenhum dos dois caminhos.
+  const persistDatesForMany = useCallback(async (items: { taskId: string; newStart: Date; newEnd: Date }[], deltaDays: number) => {
+    if (items.length === 0) return;
+
+    const conflicts = findDependencyConflicts(items);
+    if (conflicts.length > 0) {
+      toast.error(`Deslocamento gerou ${conflicts.length} conflito(s) de dependência: ${conflicts.slice(0, 2).join('; ')}${conflicts.length > 2 ? '…' : ''}`);
+    }
+
+    const overridesEntries: Record<string, { startDate: string; dueDate: string }> = {};
+    items.forEach(({ taskId, newStart, newEnd }) => {
+      overridesEntries[taskId] = { startDate: formatLocalDate(newStart), dueDate: formatLocalDate(newEnd) };
+    });
+    // Otimista: aplica local antes de esperar a persistência, igual ao caso
+    // de uma tarefa só acima.
+    setDateOverrides(prev => ({ ...prev, ...overridesEntries }));
+
+    const requestedIds = items.map(i => i.taskId);
+    const rpcResult = await shiftTaskDates(requestedIds, deltaDays).catch(() => null);
+
+    let succeededIds: Set<string>;
+    if (rpcResult !== null) {
+      // Caminho batch: RLS já filtrou linha a linha — o que não veio no
+      // retorno é o que falhou (sem permissão ou id inexistente).
+      succeededIds = new Set(rpcResult);
+    } else if (onUpdateTask) {
+      // Fallback (função ainda não migrada pro banco): sequencial, mas ainda
+      // tarefa a tarefa via onUpdateTask (já respeita permissão/RLS).
+      const results = await Promise.all(items.map(async ({ taskId }) => {
+        const ok = await onUpdateTask(taskId, { startDate: overridesEntries[taskId].startDate, dueDate: overridesEntries[taskId].dueDate });
+        return { taskId, ok };
+      }));
+      succeededIds = new Set(results.filter(r => r.ok !== false).map(r => r.taskId));
+    } else {
+      succeededIds = new Set();
+    }
+
+    const failedIds = requestedIds.filter(id => !succeededIds.has(id));
+    if (failedIds.length > 0) {
+      // Sucesso parcial (ou falha total): desfaz o override só das que
+      // falharam — as bem-sucedidas continuam refletindo a posição nova.
+      setDateOverrides(prev => {
+        const next = { ...prev };
+        failedIds.forEach(id => delete next[id]);
+        return next;
+      });
+      const failedTitles = failedIds.slice(0, 3).map(id => tasks.find(t => t.id === id)?.title || id).join(', ');
+      toast.error(
+        failedIds.length === requestedIds.length
+          ? 'Não foi possível mover nenhuma das tarefas selecionadas (verifique permissão).'
+          : `${failedIds.length} de ${requestedIds.length} tarefa(s) não puderam ser movidas (sem permissão?): ${failedTitles}${failedIds.length > 3 ? '…' : ''}.`
+      );
+    } else {
+      toast.success(`${requestedIds.length} tarefa(s) movida(s) em lote.`);
+    }
+  }, [onUpdateTask, tasks, findDependencyConflicts]);
+
   const handleWindowMouseMove = useCallback((e: MouseEvent) => {
     const drag = dragStateRef.current;
     if (!drag) return;
@@ -425,7 +542,15 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     if (!el) return;
 
     if (drag.mode === 'move') {
-      el.style.transform = `translateX(${deltaDays * zoomLevel}px)`;
+      const dx = deltaDays * zoomLevel;
+      if (drag.groupOriginals) {
+        Object.keys(drag.groupOriginals).forEach(id => {
+          const groupEl = barRefs.current[id];
+          if (groupEl) groupEl.style.transform = `translateX(${dx}px)`;
+        });
+      } else {
+        el.style.transform = `translateX(${dx}px)`;
+      }
     } else if (drag.mode === 'resize-right') {
       const newEnd = addDays(drag.originalEnd, deltaDays);
       const clampedEnd = newEnd < drag.originalStart ? drag.originalStart : newEnd;
@@ -446,6 +571,24 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     window.removeEventListener('mouseup', handleWindowMouseUp);
     dragStateRef.current = null;
     if (!drag) return;
+
+    if (drag.mode === 'move' && drag.groupOriginals) {
+      // Movimentação em lote: reseta a transform de TODAS as barras do
+      // grupo (não só a que foi arrastada) e persiste o mesmo delta em cada
+      // uma, preservando a duração individual de cada tarefa.
+      Object.keys(drag.groupOriginals).forEach(id => {
+        const groupEl = barRefs.current[id];
+        if (groupEl) groupEl.style.transform = '';
+      });
+      if (drag.currentDeltaDays === 0) return; // clique simples, sem arrastar de verdade
+      const deltaDays = drag.currentDeltaDays;
+      const items = Object.entries(drag.groupOriginals).map(([taskId, { start, end }]) => {
+        justDraggedRef.current.add(taskId);
+        return { taskId, newStart: addDays(start, deltaDays), newEnd: addDays(end, deltaDays) };
+      });
+      persistDatesForMany(items, deltaDays);
+      return;
+    }
 
     const el = barRefs.current[drag.taskId];
     if (el) {
@@ -471,7 +614,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     }
 
     persistDates(drag.taskId, newStart, newEnd);
-  }, [handleWindowMouseMove, persistDates]);
+  }, [handleWindowMouseMove, persistDates, persistDatesForMany]);
 
   // Segurança: se o componente desmontar (trocou de view) no meio de um
   // arrasto, não deixa listeners de window vivos apontando pra um bar
@@ -583,6 +726,20 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     e.stopPropagation();
     const bar = taskBars.find(b => b.id === task.id);
     if (!bar) return;
+
+    // Movimentação em lote (Codex_Gantt_10): se a tarefa arrastada faz parte
+    // de uma seleção com mais de uma tarefa, todas as outras selecionadas
+    // (com barra visível) se movem junto pelo mesmo delta — só faz sentido
+    // pra "mover" (resize continua sendo só da barra individual).
+    let groupOriginals: Record<string, { start: Date; end: Date }> | undefined;
+    if (mode === 'move' && selectedTaskIds.has(task.id) && selectedTaskIds.size > 1) {
+      groupOriginals = {};
+      selectedTaskIds.forEach(id => {
+        const b = taskBars.find(x => x.id === id);
+        if (b) groupOriginals![id] = { start: b.start, end: b.end };
+      });
+    }
+
     dragStateRef.current = {
       taskId: task.id,
       mode,
@@ -590,6 +747,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
       originalStart: bar.start,
       originalEnd: bar.end,
       currentDeltaDays: 0,
+      groupOriginals,
     };
     window.addEventListener('mousemove', handleWindowMouseMove);
     window.addEventListener('mouseup', handleWindowMouseUp);
@@ -672,6 +830,22 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
           <span className="text-sm font-semibold capitalize">
             {format(viewStart, 'MMMM yyyy', { locale: ptBR })}
           </span>
+          {/* Seleção pra movimentação em lote (Codex_Gantt_10): quantidade
+              selecionada + ação clara pra limpar, sempre visível quando há
+              alguma tarefa marcada (independente de onde na tela). */}
+          {selectedTaskIds.size > 0 && (
+            <div className="flex items-center gap-1.5 bg-primary/10 text-primary text-xs font-medium rounded-full pl-3 pr-1 py-1">
+              {selectedTaskIds.size} selecionada{selectedTaskIds.size > 1 ? 's' : ''}
+              <button
+                type="button"
+                onClick={() => setSelectedTaskIds(new Set())}
+                className="h-5 w-5 flex items-center justify-center rounded-full hover:bg-primary/20"
+                title="Limpar seleção"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -814,9 +988,19 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                 <span className="text-muted-foreground font-normal shrink-0">({row.groupCount})</span>
               </div>
             ) : (
-              <div key={row.key} className="h-10 border-b flex items-center px-4 text-sm truncate hover:bg-muted/10 cursor-pointer transition-colors"
+              <div key={row.key} className="h-10 border-b flex items-center gap-2 px-4 text-sm hover:bg-muted/10 cursor-pointer transition-colors"
                 onClick={() => onTaskClick(row.task!.id)}>
-                {row.task!.title}
+                {onUpdateTask && (
+                  <input
+                    type="checkbox"
+                    className="shrink-0"
+                    checked={selectedTaskIds.has(row.task!.id)}
+                    title="Selecionar para movimentação em lote"
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={() => toggleTaskSelection(row.task!.id)}
+                  />
+                )}
+                <span className="truncate">{row.task!.title}</span>
               </div>
             ))}
           </div>

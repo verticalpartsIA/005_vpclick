@@ -116,6 +116,28 @@ export async function addTaskDependency(
   return data as TaskDependency;
 }
 
+// Desloca start_date/due_date de várias tarefas pelo mesmo delta numa única
+// operação atômica no banco (Codex_Gantt_10: "evitar loops frágeis no
+// cliente"). Devolve só os ids que realmente foram atualizados — a RLS de
+// `tasks` decide linha a linha (SECURITY INVOKER, padrão), então a diferença
+// entre `taskIds` (pedido) e o retorno já é o sinal de sucesso parcial (sem
+// permissão numa tarefa específica), sem precisar de uma segunda consulta.
+// `null` sinaliza pro chamador usar o fallback sequencial (função
+// `shift_task_dates` ainda não migrada pro banco — mesmo padrão de fallback
+// já usado por fetchTaskCountIndex/searchTaskRowsByTitle em taskRepo.ts).
+export async function shiftTaskDates(taskIds: string[], deltaDays: number): Promise<string[] | null> {
+  if (taskIds.length === 0) return [];
+  const { data, error } = await supabase.rpc('shift_task_dates', {
+    p_task_ids: taskIds,
+    p_delta_days: deltaDays,
+  });
+  if (error) {
+    console.warn('supabase.shiftTaskDates: RPC indisponível, GanttView vai cair pro fallback sequencial:', error);
+    return null;
+  }
+  return ((data ?? []) as { id: string }[]).map((row) => row.id);
+}
+
 export async function removeTaskDependency(dependencyId: string): Promise<void> {
   const { error } = await supabase
     .from('task_dependencies')
