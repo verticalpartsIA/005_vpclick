@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useNavigate, useLocation, useNavigationType, useSearchParams } from 'react-router-dom';
 import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy, ArrowUpDown, Search, Filter, RotateCcw, Check, X, Edit3, CalendarDays, UserCircle, Flag, MessageSquare, CheckSquare, GripVertical } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
@@ -101,6 +102,128 @@ interface NavigationScope {
   type: ScopeType;
   id: string | null;
   name: string;
+}
+
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks';
+
+// --- Navegação ↔ URL ---------------------------------------------------------
+// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
+// path próprio (`/gantt`, `/kanban`...); a lista/pasta/espaço ativo e o filtro
+// "Minhas Tarefas" (Atribuídas a mim) viajam como query params por cima desse
+// path — mesmo mecanismo que o `?taskId=` já usava, só que agora cobrindo view
+// e escopo também. Views "standalone" (Inbox, Reuniões etc.) e Doc não têm
+// conceito de escopo, então viram só um path fixo (Doc leva o id da página).
+const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard'];
+
+const VIEW_TO_SLUG: Record<ActiveView, string> = {
+  Dashboard: '', // path canônico é a raiz ("/")
+  List: 'list',
+  Kanban: 'kanban',
+  Calendar: 'calendar',
+  Gantt: 'gantt',
+  Table: 'table',
+  Admin: 'admin',
+  Doc: 'doc',
+  Inbox: 'inbox',
+  Replies: 'replies',
+  AssignedComments: 'assigned-comments',
+  Meetings: 'meetings',
+  MyTasks: 'my-tasks',
+  Reminders: 'reminders',
+  RecentTasks: 'recent-tasks',
+};
+
+const SLUG_TO_VIEW: Record<string, ActiveView> = Object.fromEntries(
+  Object.entries(VIEW_TO_SLUG).filter(([, slug]) => slug).map(([view, slug]) => [slug, view as ActiveView])
+);
+// Aceita "/dashboard" digitado manualmente, mesmo o path canônico sendo "/".
+SLUG_TO_VIEW.dashboard = 'Dashboard';
+
+interface ParsedNav {
+  view: ActiveView;
+  docId: string | null;
+  listId: string | null;
+  scopeType: ScopeType;
+  scopeId: string | null;
+  mine: boolean;
+  taskId: string | null;
+}
+
+// URL → estado de navegação. Usada tanto na carga inicial (deep link/refresh)
+// quanto quando o usuário navega pelo botão voltar/avançar do navegador.
+function parseNavPath(pathname: string, search: string): ParsedNav {
+  const segments = pathname.split('/').filter(Boolean);
+  const params = new URLSearchParams(search);
+  const taskId = params.get('taskId');
+  if (segments[0] === 'doc') {
+    return { view: 'Doc', docId: segments[1] || null, listId: null, scopeType: 'global', scopeId: null, mine: false, taskId };
+  }
+  const view = SLUG_TO_VIEW[segments[0] || ''] || 'Dashboard';
+  const listId = params.get('listId');
+  const scopeParam = params.get('scope');
+  const scopeId = params.get('scopeId');
+  const mine = params.get('mine') === '1';
+  const scopeType: ScopeType = (scopeParam === 'space' || scopeParam === 'folder') && scopeId ? scopeParam : 'global';
+  return {
+    view,
+    docId: null,
+    listId: WORKSPACE_VIEWS.includes(view) ? listId : null,
+    scopeType,
+    scopeId: scopeType === 'global' ? null : scopeId,
+    mine: WORKSPACE_VIEWS.includes(view) && mine,
+    taskId,
+  };
+}
+
+// Estado de navegação → URL. `currentSearch` carrega params que não são de
+// navegação por view/escopo (hoje só `tab`, da aba ativa dentro do modal de
+// detalhe da tarefa) e é preservado por cima.
+function computeNavPath(
+  state: { activeView: ActiveView; activeListId: string | null; activeScope: NavigationScope; activeDocId: string | null; selectedTaskId: string | null },
+  currentSearch: string,
+): string {
+  const params = new URLSearchParams(currentSearch);
+  params.delete('listId');
+  params.delete('scope');
+  params.delete('scopeId');
+  params.delete('mine');
+
+  if (state.selectedTaskId) {
+    params.set('taskId', state.selectedTaskId);
+  } else {
+    // Sem tarefa selecionada, `tab` (do modal fechado) também não faz sentido.
+    params.delete('taskId');
+    params.delete('tab');
+  }
+
+  // `meetingId` é lido/escrito pela própria MeetingsView (useSearchParams) —
+  // só é limpo aqui quando o usuário sai da view, pra não vazar pra outras
+  // rotas (ex: navegar pra /gantt não deveria carregar ?meetingId= a tiracolo).
+  if (state.activeView !== 'Meetings') {
+    params.delete('meetingId');
+  }
+
+  if (state.activeView === 'Doc') {
+    const search = params.toString();
+    return `/doc${state.activeDocId ? `/${state.activeDocId}` : ''}${search ? `?${search}` : ''}`;
+  }
+
+  const slug = VIEW_TO_SLUG[state.activeView] ?? '';
+  if (WORKSPACE_VIEWS.includes(state.activeView)) {
+    if (state.activeListId) {
+      params.set('listId', state.activeListId);
+    } else if (state.activeScope.type === 'space' && state.activeScope.id) {
+      params.set('scope', 'space');
+      params.set('scopeId', state.activeScope.id);
+    } else if (state.activeScope.type === 'folder' && state.activeScope.id) {
+      params.set('scope', 'folder');
+      params.set('scopeId', state.activeScope.id);
+    } else if (state.activeScope.name === 'Minhas Tarefas') {
+      params.set('mine', '1');
+    }
+  }
+  const search = params.toString();
+  return `${slug ? `/${slug}` : '/'}${search ? `?${search}` : ''}`;
 }
 
 type DuplicateTaskBooleanOption = Exclude<keyof DuplicateTaskOptions, 'title' | 'listId'>;
@@ -1149,12 +1272,21 @@ export default function App() {
     localStorage.setItem("vp_column_order", JSON.stringify(columnOrderByList));
   }, [columnOrderByList]);
 
+  // Navegação (view/escopo/lista) ↔ URL — ver parseNavPath/computeNavPath.
+  // `navigate`/`location`/`navigationType` alimentam os efeitos de sincronização
+  // logo após handleNavigate; `initialNav` só é lido pelos inicializadores
+  // preguiçosos de estado abaixo (roda uma vez, na primeira renderização).
+  const navigate = useNavigate();
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const initialNav = parseNavPath(window.location.pathname, window.location.search);
+
   // Lista ativa (selecionada na sidebar) — afeta filtro e configuração de colunas por lista
-  const [activeListId, setActiveListId] = useState<string | null>(null);
+  const [activeListId, setActiveListId] = useState<string | null>(() => initialNav.listId);
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks'>('Dashboard');
+  const [activeView, setActiveView] = useState<ActiveView>(() => initialNav.view);
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -1173,10 +1305,14 @@ export default function App() {
     document.addEventListener("keydown", down);
     return () => document.removeEventListener("keydown", down);
   }, []);
-  const [activeDocId, setActiveDocId] = useState<string | null>(null);
-  const [activeScope, setActiveScope] = useState<NavigationScope>({ type: 'global', id: null, name: 'Dashboard' });
+  const [activeDocId, setActiveDocId] = useState<string | null>(() => initialNav.docId);
+  const [activeScope, setActiveScope] = useState<NavigationScope>(() => ({
+    type: initialNav.scopeType,
+    id: initialNav.scopeId,
+    name: initialNav.mine ? 'Minhas Tarefas' : (initialNav.scopeType === 'global' ? 'Dashboard' : ''),
+  }));
 
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(() => initialNav.taskId);
   const [openMeetingId, setOpenMeetingId] = useState<string | null>(null);
   const handleOpenMeeting = (meetingId: string) => {
     setOpenMeetingId(meetingId);
@@ -1452,16 +1588,11 @@ export default function App() {
   const countListIds = useMemo(() => lists.map((l) => l.id), [lists]);
   const { listTaskCounts, listProgressMap, refreshTaskCountIndex } = useTaskCountIndex(session, countListIds);
 
-  // Detect taskId in URL on load — abre a tarefa direto (deep link), sem
-  // travar em somente-leitura: quem recebe o link já está autenticado no
-  // app com seu próprio papel/permissão, não é um visitante externo.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const taskId = params.get('taskId');
-    if (taskId) {
-      setSelectedTaskId(taskId);
-    }
-  }, []);
+  // `?taskId=` na carga inicial (deep link) já é lido pelo inicializador de
+  // selectedTaskId acima (initialNav.taskId) — sem travar em somente-leitura:
+  // quem recebe o link já está autenticado no app com seu próprio papel, não
+  // é um visitante externo. Navegações POSTERIORES (voltar/avançar do
+  // navegador) são tratadas pelo efeito de entrada logo após handleNavigate.
 
   const selectedTask = useMemo(() => tasks.find(t => t.id === selectedTaskId), [tasks, selectedTaskId]);
 
@@ -1506,6 +1637,10 @@ export default function App() {
   // uma mais antiga que ainda está terminando.
   const loadTasksRequestIdRef = useRef(0);
   const loadTasksCommittedIdRef = useRef(0);
+  // Uma segunda tentativa automática por falha (não por request): erros de
+  // rede/RLS logo após o login costumam ser transitórios e sumiam sem deixar
+  // rastro (array vazio ficava travado até um F5 manual).
+  const loadTasksRetriedRef = useRef(false);
 
   // Lazy-load das sub-entidades ao abrir uma tarefa. As listagens carregam as
   // tarefas SEM comentários/checklists/anexos/atividades/logs/watchers (para
@@ -1545,12 +1680,24 @@ export default function App() {
 
         if (requestId < loadTasksCommittedIdRef.current) return;
         loadTasksCommittedIdRef.current = requestId;
+        loadTasksRetriedRef.current = false;
         setMyTasks(mappedTasks);
         setTasks(prev => {
           const merged = new Map(prev.map(t => [t.id, t]));
           for (const t of mappedTasks) merged.set(t.id, preserveLoadedTaskDetails(t, merged.get(t.id)));
           return Array.from(merged.values());
         });
+      } catch (err) {
+        console.error('Erro ao carregar Minhas Tarefas:', err);
+        if (requestId === loadTasksRequestIdRef.current && !loadTasksRetriedRef.current) {
+          loadTasksRetriedRef.current = true;
+          // Via loadTasksRef (não loadTasks() direto): se o escopo mudou durante
+          // a espera do retry, essa closure ficaria presa no escopo antigo.
+          setTimeout(() => { loadTasksRef.current?.(); }, 1500);
+        } else {
+          loadTasksRetriedRef.current = false;
+          toast.error('Não foi possível carregar suas tarefas. Tente novamente.');
+        }
       } finally {
         setIsMyTasksLoading(false);
       }
@@ -1583,7 +1730,15 @@ export default function App() {
         .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
       setIsTasksLoading(false);
 
-      if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) return;
+      if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) {
+        // Só reseta o retry quando a carga terminou de verdade (única página) —
+        // resetar logo após a 1ª página, com mais páginas ainda por vir, deixava
+        // uma falha persistente em fetchRemainingTaskRows* reagendar retry pra
+        // sempre (a cada volta a 1ª página carregava OK e zerava a flag nesse
+        // ponto de novo) sem nunca chegar no toast de erro terminal.
+        loadTasksRetriedRef.current = false;
+        return;
+      }
 
       const remainingRows = activeListId
         ? await taskRepo.fetchRemainingTaskRowsByListId(activeListId)
@@ -1593,6 +1748,20 @@ export default function App() {
       setTasks(prev => [...firstRows, ...remainingRows]
         .map(taskRepo.mapRowToTaskShell)
         .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
+      loadTasksRetriedRef.current = false;
+    } catch (err) {
+      console.error('Erro ao carregar tarefas:', err);
+      if (requestId === loadTasksRequestIdRef.current && !loadTasksRetriedRef.current) {
+        loadTasksRetriedRef.current = true;
+        // Via loadTasksRef (não loadTasks() direto): se o usuário navegar para
+        // outro escopo durante a espera do retry, essa closure antiga ainda
+        // apontaria pro escopo velho e poderia sobrescrever um resultado novo
+        // e bom com dado do escopo errado.
+        setTimeout(() => { loadTasksRef.current?.(); }, 1500);
+      } else {
+        loadTasksRetriedRef.current = false;
+        toast.error('Não foi possível carregar as tarefas. Tente novamente.');
+      }
     } finally {
       if (requestId === loadTasksRequestIdRef.current) {
         setIsTasksLoading(false);
@@ -2733,6 +2902,44 @@ export default function App() {
     }
   };
 
+  // Saída: reflete view/lista/escopo atuais na URL (deep link, refresh e
+  // compartilhamento de link) via history.pushState — cada navegação vira uma
+  // entrada no histórico, então voltar/avançar do navegador funciona sem
+  // precisar tocar nos ~40 pontos do arquivo que chamam setActiveView/
+  // setActiveListId/setActiveScope diretamente. Não inclui `location`/`navigate`
+  // nas deps de propósito: só deve rodar quando o ESTADO de navegação muda, não
+  // a cada mudança de URL (senão loopa com o efeito de entrada abaixo).
+  useEffect(() => {
+    const targetPath = computeNavPath({ activeView, activeListId, activeScope, activeDocId, selectedTaskId }, location.search);
+    const currentPath = `${location.pathname}${location.search}`;
+    if (targetPath !== currentPath) {
+      navigate(targetPath);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, activeListId, activeScope.type, activeScope.id, activeScope.name, activeDocId, selectedTaskId]);
+
+  // Entrada: aplica a URL de volta ao estado só quando ela mudou por ação do
+  // navegador (voltar/avançar, ou um link colado na barra) — `navigationType`
+  // do react-router distingue isso de uma navegação feita pelo efeito de saída
+  // acima (que usa PUSH). Sem esse filtro, os dois efeitos ficariam disputando
+  // entre si a cada navegação.
+  useEffect(() => {
+    if (navigationType !== 'POP') return;
+    const parsed = parseNavPath(location.pathname, location.search);
+    setActiveView(parsed.view);
+    setActiveListId(parsed.listId);
+    setActiveDocId(parsed.docId);
+    setSelectedTaskId(parsed.taskId);
+    setTaskCommentFocus(null);
+    const resolvedName = parsed.scopeType === 'space'
+      ? spaces.find((s: Space) => s.id === parsed.scopeId)?.name ?? ''
+      : parsed.scopeType === 'folder'
+        ? folders.find((f: Folder) => f.id === parsed.scopeId)?.name ?? ''
+        : parsed.mine ? 'Minhas Tarefas' : 'Dashboard';
+    setActiveScope({ type: parsed.scopeType, id: parsed.scopeId, name: resolvedName });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname, location.search, navigationType]);
+
   const openAdminPanel = () => {
     setIsUserMenuOpen(false);
     setSelectedTaskId(null);
@@ -3623,11 +3830,11 @@ export default function App() {
           <ErrorBoundary
             key={selectedTask.id}
             onClose={() => {
+              // Remover taskId (e tab) da URL fica a cargo do efeito de saída
+              // da navegação (ver computeNavPath), que já roda sempre que
+              // selectedTaskId muda — não precisa mexer na URL aqui.
               setSelectedTaskId(null);
               setTaskCommentFocus(null);
-              const url = new URL(window.location.href);
-              url.searchParams.delete('taskId');
-              window.history.replaceState({}, '', url.toString());
             }}
           >
             <TaskDetailModal
@@ -3637,9 +3844,6 @@ export default function App() {
               onClose={() => {
                 setSelectedTaskId(null);
                 setTaskCommentFocus(null);
-                const url = new URL(window.location.href);
-                url.searchParams.delete('taskId');
-                window.history.replaceState({}, '', url.toString());
               }}
               focusCommentId={taskCommentFocus?.commentId ?? null}
               focusAction={taskCommentFocus?.action ?? null}
@@ -6919,8 +7123,15 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
 
   const confirmInlineCreate = async (status: string) => {
     const title = inlineCreateTitle.trim();
-    if (title && activeListId) {
-      await onCreateTask({ title, status, listId: activeListId });
+    if (title) {
+      // `activeListId` pode ter mudado (navegação/realtime) enquanto a caixa
+      // de criação inline estava aberta — sem isso, o título digitado era
+      // descartado em silêncio, sem toast nem qualquer sinal pro usuário.
+      if (activeListId) {
+        await onCreateTask({ title, status, listId: activeListId });
+      } else {
+        toast.error('Não foi possível criar a tarefa: nenhuma lista está selecionada.');
+      }
     }
     setInlineCreateCol(null);
     setInlineCreateTitle('');
@@ -6966,9 +7177,13 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
   };
 
   const copyTaskLink = async (taskId: string) => {
-    const url = `${window.location.origin}${window.location.pathname}?taskId=${taskId}`;
+    // Preserva os params já presentes (ex: ?listId=, ?scope=) em vez de
+    // descartá-los — sem isso, o link compartilhado perdia o contexto de
+    // lista/espaço de onde a tarefa foi aberta.
+    const url = new URL(window.location.href);
+    url.searchParams.set('taskId', taskId);
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(url.toString());
       toast.success('Link da tarefa copiado.');
     } catch {
       toast.error('Não foi possível copiar o link.');
@@ -8312,7 +8527,24 @@ function TaskDetailModal(props: any) {
   };
 
   // Renamed to avoid shadowing
-  const [detailActiveTab, setDetailActiveTab] = useState<'info' | 'history' | 'checklist' | 'attachments' | 'custom' | 'subtasks' | 'dependencies' | 'watchers'>('info');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [detailActiveTab, setDetailActiveTab] = useState<'info' | 'history' | 'checklist' | 'attachments' | 'custom' | 'subtasks' | 'dependencies' | 'watchers'>(() => {
+    const fromUrl = searchParams.get('tab');
+    const validTabs = ['info', 'history', 'checklist', 'attachments', 'custom', 'subtasks', 'dependencies', 'watchers'] as const;
+    return (validTabs as readonly string[]).includes(fromUrl || '') ? (fromUrl as typeof validTabs[number]) : 'info';
+  });
+
+  // Reflete a aba ativa em `?tab=` — deep link/refresh reabrem na mesma aba.
+  // Usa `replace` (não `push`): trocar de aba não deve virar uma entrada
+  // própria no histórico de voltar/avançar do navegador.
+  useEffect(() => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (detailActiveTab === 'info') next.delete('tab'); else next.set('tab', detailActiveTab);
+      return next;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailActiveTab]);
   const [newDueDate, setNewDueDate] = useState(task.dueDate);
   const [extensionReason, setExtensionReason] = useState('');
   const [isExtending, setIsExtending] = useState(false);
@@ -8762,8 +8994,12 @@ function TaskDetailModal(props: any) {
           <div className="flex items-center gap-4">
             <button
               onClick={() => {
-                const url = `${window.location.origin}${window.location.pathname}?taskId=${task.id}`;
-                navigator.clipboard.writeText(url);
+                // Preserva os params já presentes (ex: ?listId=, ?scope=) em
+                // vez de descartá-los — sem isso, o link compartilhado perdia
+                // o contexto de lista/espaço de onde a tarefa foi aberta.
+                const url = new URL(window.location.href);
+                url.searchParams.set('taskId', task.id);
+                navigator.clipboard.writeText(url.toString());
                 alert('Link da tarefa copiado!');
               }}
               className="flex items-center gap-2 px-3 py-1.5 hover:bg-gray-100 text-gray-500 text-sm font-medium rounded-lg transition-all"

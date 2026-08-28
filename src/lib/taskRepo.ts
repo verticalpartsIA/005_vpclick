@@ -142,7 +142,13 @@ async function fetchAllPages<T>(
   let from = startFrom;
   while (true) {
     const { data: page, error } = await build(from, from + PAGE_SIZE - 1);
-    if (error) { console.error(`taskRepo.${label}: erro ao paginar:`, error); break; }
+    if (error) {
+      console.error(`taskRepo.${label}: erro ao paginar:`, error);
+      // Propaga o erro em vez de devolver o que já foi acumulado (possivelmente
+      // vazio): um resultado parcial silencioso é indistinguível de "sem
+      // tarefas" para quem chama, e a tela fica vazia até um F5 manual.
+      throw error;
+    }
     if (!page || page.length === 0) break;
     all = all.concat(page);
     if (page.length < PAGE_SIZE) break;
@@ -165,7 +171,7 @@ async function fetchTaskRowsRange(
 
   if (error) {
     console.error(`taskRepo.${label}: erro ao carregar página:`, error);
-    return [];
+    throw error;
   }
   return (data || []) as TaskRow[];
 }
@@ -186,7 +192,7 @@ async function fetchTaskRowsBySingleListRange(
 
   if (error) {
     console.error(`taskRepo.${label}: erro ao carregar página:`, error);
-    return [];
+    throw error;
   }
   return (data || []) as TaskRow[];
 }
