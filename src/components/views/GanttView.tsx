@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
-  Filter, Layers, X
+  Filter, Layers, X, Pencil
 } from "lucide-react";
-import { Task, User, List } from '../../types';
+import { Task, User, List, TaskPriority } from '../../types';
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -96,6 +96,14 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [filters, setFilters] = useState<GanttFilters>(EMPTY_FILTERS);
   const [filtersOpen, setFiltersOpen] = useState(false);
+
+  // Edição rápida (Codex_Gantt_09) — altera dados básicos sem sair do Gantt
+  // nem abrir o modal completo (que continua disponível via clique na barra).
+  const [quickEditTaskId, setQuickEditTaskId] = useState<string | null>(null);
+  const [quickDraft, setQuickDraft] = useState<{
+    title: string; priority: TaskPriority; mainAssigneeId: string; status: string; startDate: string; dueDate: string;
+  } | null>(null);
+  const [savingQuickEdit, setSavingQuickEdit] = useState(false);
 
   // Sobrepõe otimisticamente as datas de tarefas recém-arrastadas/redimensio-
   // nadas, até `tasks` (prop, vinda do App) refletir a mesma tarefa já
@@ -357,6 +365,45 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
       return;
     }
     onTaskClick(taskId);
+  };
+
+  const openQuickEdit = (task: Task) => {
+    setQuickEditTaskId(task.id);
+    setQuickDraft({
+      title: task.title,
+      priority: task.priority,
+      mainAssigneeId: task.mainAssigneeId || '',
+      status: task.status,
+      startDate: task.startDate || '',
+      dueDate: task.dueDate || '',
+    });
+  };
+
+  const closeQuickEdit = () => {
+    setQuickEditTaskId(null);
+    setQuickDraft(null);
+  };
+
+  const saveQuickEdit = async () => {
+    if (!quickDraft || !quickEditTaskId || savingQuickEdit || !onUpdateTask) return;
+    const title = quickDraft.title.trim();
+    if (!title) return;
+    if (quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate) return;
+
+    setSavingQuickEdit(true);
+    const ok = await onUpdateTask(quickEditTaskId, {
+      title,
+      priority: quickDraft.priority,
+      mainAssigneeId: quickDraft.mainAssigneeId || undefined,
+      status: quickDraft.status,
+      startDate: quickDraft.startDate || undefined,
+      dueDate: quickDraft.dueDate || undefined,
+    });
+    setSavingQuickEdit(false);
+    // `onUpdateTask` (App.tsx) já mostra o toast de erro em caso de falha —
+    // aqui só decidimos se fecha o popover (sucesso) ou deixa o rascunho
+    // aberto pro usuário tentar de novo (falha/indefinido).
+    if (ok !== false) closeQuickEdit();
   };
 
   const toggleGroupCollapsed = (key: string) => {
@@ -665,6 +712,97 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                          {/* Pontos de dependência (Codex_Gantt_03 — ainda decorativos) */}
                          <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100 pointer-events-none" />
                          <div className="absolute -right-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100 pointer-events-none" />
+
+                         {/* Edição rápida (Codex_Gantt_09): botão só aparece no
+                             hover, acima da barra, pra não competir com os
+                             handles de redimensionar/dependência que já
+                             ocupam as pontas. */}
+                         {onUpdateTask && (
+                           <Popover
+                             open={quickEditTaskId === task.id}
+                             onOpenChange={(open) => { if (!open) closeQuickEdit(); }}
+                           >
+                             <PopoverTrigger asChild>
+                               <button
+                                 type="button"
+                                 className="absolute -top-2 right-1 -translate-y-full hidden group-hover:flex h-5 w-5 items-center justify-center rounded-full border bg-white text-gray-500 shadow-sm hover:text-gray-900"
+                                 title="Edição rápida"
+                                 onMouseDown={(e) => e.stopPropagation()}
+                                 onClick={(e) => { e.stopPropagation(); openQuickEdit(task); }}
+                               >
+                                 <Pencil className="w-3 h-3" />
+                               </button>
+                             </PopoverTrigger>
+                             <PopoverContent
+                               className="w-72 p-3 space-y-2"
+                               align="start"
+                               onMouseDown={(e) => e.stopPropagation()}
+                               onClick={(e) => e.stopPropagation()}
+                             >
+                               {quickDraft && (
+                                 <>
+                                   <input
+                                     autoFocus
+                                     value={quickDraft.title}
+                                     onChange={(e) => setQuickDraft({ ...quickDraft, title: e.target.value })}
+                                     onKeyDown={(e) => { if (e.key === 'Enter') saveQuickEdit(); }}
+                                     className="w-full h-8 text-sm font-medium border rounded-md px-2"
+                                     placeholder="Título da tarefa"
+                                   />
+                                   <div className="grid grid-cols-2 gap-2">
+                                     <select
+                                       value={quickDraft.priority}
+                                       onChange={(e) => setQuickDraft({ ...quickDraft, priority: e.target.value as TaskPriority })}
+                                       className="h-8 text-xs border rounded-md px-2"
+                                     >
+                                       {Object.values(TaskPriority).map(p => <option key={p} value={p}>{p}</option>)}
+                                     </select>
+                                     <select
+                                       value={quickDraft.status}
+                                       onChange={(e) => setQuickDraft({ ...quickDraft, status: e.target.value })}
+                                       className="h-8 text-xs border rounded-md px-2"
+                                     >
+                                       {(filterOptions.statuses.includes(quickDraft.status) ? filterOptions.statuses : [quickDraft.status, ...filterOptions.statuses]).map(s => (
+                                         <option key={s} value={s}>{s}</option>
+                                       ))}
+                                     </select>
+                                   </div>
+                                   <select
+                                     value={quickDraft.mainAssigneeId}
+                                     onChange={(e) => setQuickDraft({ ...quickDraft, mainAssigneeId: e.target.value })}
+                                     className="w-full h-8 text-xs border rounded-md px-2"
+                                   >
+                                     <option value="">Sem responsável</option>
+                                     {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                                   </select>
+                                   <div className="grid grid-cols-2 gap-2">
+                                     <input
+                                       type="date"
+                                       value={quickDraft.startDate}
+                                       onChange={(e) => setQuickDraft({ ...quickDraft, startDate: e.target.value })}
+                                       className="h-8 text-xs border rounded-md px-2"
+                                     />
+                                     <input
+                                       type="date"
+                                       value={quickDraft.dueDate}
+                                       onChange={(e) => setQuickDraft({ ...quickDraft, dueDate: e.target.value })}
+                                       className="h-8 text-xs border rounded-md px-2"
+                                     />
+                                   </div>
+                                   {quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate && (
+                                     <p className="text-[11px] text-destructive">Início não pode ser depois do fim.</p>
+                                   )}
+                                   <div className="flex justify-end gap-2 pt-1">
+                                     <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={closeQuickEdit}>Cancelar</Button>
+                                     <Button size="sm" className="h-7 text-xs" disabled={savingQuickEdit} onClick={saveQuickEdit}>
+                                       {savingQuickEdit ? 'Salvando…' : 'Salvar'}
+                                     </Button>
+                                   </div>
+                                 </>
+                               )}
+                             </PopoverContent>
+                           </Popover>
+                         )}
                       </div>
                     )}
                   </div>
