@@ -728,16 +728,6 @@ export default function App() {
   const [workspace] = useState<Workspace>(INITIAL_WORKSPACE);
   const [session, setSession] = useState<Session | null>(null);
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
-  // Tela de entrada mostra o vídeo do logo até ele terminar de tocar por
-  // completo, mesmo que a verificação de sessão já tenha terminado antes.
-  const [bootVideoEnded, setBootVideoEnded] = useState(false);
-  useEffect(() => {
-    // Segurança: se o vídeo não conseguir tocar por algum motivo (autoplay
-    // bloqueado, formato não suportado, etc.), não travamos o usuário na
-    // tela de carregamento pra sempre — o vídeo dura ~10s.
-    const fallback = setTimeout(() => setBootVideoEnded(true), 12000);
-    return () => clearTimeout(fallback);
-  }, []);
   const [is2faVerified, setIs2faVerified] = useState(() => localStorage.getItem('vp_2fa_verified') === 'true');
   const [ssoError, setSsoError] = useState<string | null>(null);
   // Impede que getSession() libere a tela enquanto o SSO ainda está processando.
@@ -1360,8 +1350,40 @@ export default function App() {
 
   const loadInitialData = useCallback(async () => {
     try {
-      // Carregar Spaces
-      const { data: spacesData } = await supabase.from('spaces').select('*');
+      // As 13 leituras abaixo são independentes entre si (nenhuma usa o
+      // resultado de outra) — disparar todas em paralelo em vez de uma atrás
+      // da outra evita somar 13 round-trips de rede em sequência ao boot do
+      // app (facilmente vários segundos a mais em conexão ruim).
+      const [
+        { data: spacesData },
+        { data: foldersData },
+        { data: listsData },
+        { data: fieldsData },
+        { data: docsData },
+        { data: attachmentsData },
+        { data: projectsData },
+        { data: tagsData },
+        { data: accessData },
+        { data: teamsData },
+        { data: teamMembersData },
+        { data: groupsData },
+        { data: optionsData },
+      ] = await Promise.all([
+        supabase.from('spaces').select('*'),
+        supabase.from('folders').select('*'),
+        supabase.from('lists').select('*'),
+        supabase.from('custom_fields').select('*'),
+        supabase.from('docs').select('*'),
+        supabase.from('doc_attachments').select('*'),
+        supabase.from('projects').select('*'),
+        supabase.from('workspace_tags').select('*').eq('workspace_id', workspace.id).order('name'),
+        supabase.from('user_access').select('*'),
+        supabase.from('teams').select('*').order('name'),
+        supabase.from('team_members').select('*'),
+        supabase.from('task_status_groups').select('*'),
+        supabase.from('task_status_options').select('*').order('order_index'),
+      ]);
+
       if (spacesData) {
         setSpaces(spacesData.map((s: any) => ({
           id: s.id,
@@ -1374,8 +1396,6 @@ export default function App() {
         })));
       }
 
-      // Carregar Folders
-      const { data: foldersData } = await supabase.from('folders').select('*');
       if (foldersData) {
         setFolders(foldersData.map((f: any) => ({
           id: f.id,
@@ -1384,8 +1404,6 @@ export default function App() {
         })));
       }
 
-      // Carregar Lists
-      const { data: listsData } = await supabase.from('lists').select('*');
       if (listsData) {
         // Lista pessoal (ver migration 18): privacidade só no client — a RLS
         // é permissiva, então o próprio carregamento do estado local precisa
@@ -1403,8 +1421,6 @@ export default function App() {
           })));
       }
 
-      // Carregar Custom Fields
-      const { data: fieldsData } = await supabase.from('custom_fields').select('*');
       if (fieldsData) {
         setCustomFields(fieldsData.map((f: any) => ({
           id: f.id,
@@ -1419,10 +1435,6 @@ export default function App() {
           createdAt: f.created_at
         })));
       }
-
-      // Carregar Documentos
-      const { data: docsData } = await supabase.from('docs').select('*');
-      const { data: attachmentsData } = await supabase.from('doc_attachments').select('*');
 
       if (docsData) {
         setDocs(docsData.map((d: any) => {
@@ -1451,8 +1463,6 @@ export default function App() {
         }));
       }
 
-      // Carregar Projetos
-      const { data: projectsData } = await supabase.from('projects').select('*');
       if (projectsData) {
         setProjects(projectsData.map((p: any) => ({
           id: p.id,
@@ -1464,16 +1474,8 @@ export default function App() {
         })));
       }
 
-      // Carregar Workspace Tags
-      const { data: tagsData } = await supabase
-        .from('workspace_tags')
-        .select('*')
-        .eq('workspace_id', workspace.id)
-        .order('name');
       if (tagsData) setWorkspaceTags(tagsData as WorkspaceTag[]);
 
-      // Carregar User Access
-      const { data: accessData } = await supabase.from('user_access').select('*');
       if (accessData) {
         const nextAccess: Record<string, { spaceIds: string[]; folderIds: string[] }> = {};
         accessData.forEach((a: any) => {
@@ -1485,9 +1487,6 @@ export default function App() {
         setUserAccess(nextAccess);
       }
 
-      // Carregar Equipes e membros
-      const { data: teamsData } = await supabase.from('teams').select('*').order('name');
-      const { data: teamMembersData } = await supabase.from('team_members').select('*');
       if (teamsData) {
         setTeams(teamsData.map((t: any) => ({
           id: t.id,
@@ -1497,10 +1496,6 @@ export default function App() {
           memberIds: (teamMembersData || []).filter((m: any) => m.team_id === t.id).map((m: any) => m.user_id),
         })));
       }
-
-      // Carregar Status Groups e Options
-      const { data: groupsData } = await supabase.from('task_status_groups').select('*');
-      const { data: optionsData } = await supabase.from('task_status_options').select('*').order('order_index');
 
       if (groupsData && optionsData) {
         setStatusGroups(groupsData.map((g: any) => ({
@@ -3184,10 +3179,13 @@ export default function App() {
     );
   }
 
-  // Auth guard — a tela só libera quando a sessão for verificada E o vídeo
-  // do logo tiver tocado por completo, o que vier depois. Não há tela de
-  // login própria pra cobrir aqui: a entrada é sempre via SSO do vpsistema.
-  if (isLoadingAuth || !bootVideoEnded) {
+  // Auth guard — a tela libera assim que a sessão for verificada. O vídeo do
+  // logo é só decorativo aqui (toca em loop enquanto isso acontece); antes,
+  // a tela ficava presa esperando o vídeo tocar por completo (~10s, com teto
+  // de 12s) mesmo numa sessão que já validou em instantes — um piso artificial
+  // de ~10s em TODO carregamento do app. Não há tela de login própria pra
+  // cobrir aqui: a entrada é sempre via SSO do vpsistema.
+  if (isLoadingAuth) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
         <div className="text-center">
@@ -3196,9 +3194,8 @@ export default function App() {
             src={bootLogoVideo}
             autoPlay
             muted
+            loop
             playsInline
-            onEnded={() => setBootVideoEnded(true)}
-            onError={() => setBootVideoEnded(true)}
             className="w-full max-w-sm mx-auto rounded-xl shadow-lg shadow-slate-200"
           />
           <p className="font-light text-2xl tracking-wide mt-4" style={{ color: COLORS.primary, fontFamily: 'Poppins, sans-serif' }}>VPCLICK</p>
