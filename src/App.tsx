@@ -6726,8 +6726,15 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDupli
 
   const confirmInlineCreate = async (status: string) => {
     const title = inlineCreateTitle.trim();
-    if (title && activeListId) {
-      await onCreateTask({ title, status, listId: activeListId });
+    if (title) {
+      // `activeListId` pode ter mudado (navegação/realtime) enquanto a caixa
+      // de criação inline estava aberta — sem isso, o título digitado era
+      // descartado em silêncio, sem toast nem qualquer sinal pro usuário.
+      if (activeListId) {
+        await onCreateTask({ title, status, listId: activeListId });
+      } else {
+        toast.error('Não foi possível criar a tarefa: nenhuma lista está selecionada.');
+      }
     }
     setInlineCreateCol(null);
     setInlineCreateTitle('');
