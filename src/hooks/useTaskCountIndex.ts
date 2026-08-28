@@ -29,7 +29,13 @@ export function useTaskCountIndex(session: Session | null, listIds: string[] | n
   const refreshTaskCountIndex = useCallback(async () => {
     if (!session) return;
     const ids = listIdsKey === null ? null : (listIdsKey ? listIdsKey.split(',') : []);
-    setTaskCountIndex(await taskRepo.fetchTaskCountIndex(ids));
+    try {
+      setTaskCountIndex(await taskRepo.fetchTaskCountIndex(ids));
+    } catch (err) {
+      // Contadores são só um complemento visual (badges/progresso) — em erro,
+      // mantém os últimos valores conhecidos em vez de derrubar a tela.
+      console.error('useTaskCountIndex: erro ao atualizar contadores:', err);
+    }
   }, [session, listIdsKey]);
 
   useEffect(() => { refreshTaskCountIndex(); }, [refreshTaskCountIndex]);

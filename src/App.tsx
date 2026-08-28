@@ -1506,6 +1506,10 @@ export default function App() {
   // uma mais antiga que ainda está terminando.
   const loadTasksRequestIdRef = useRef(0);
   const loadTasksCommittedIdRef = useRef(0);
+  // Uma segunda tentativa automática por falha (não por request): erros de
+  // rede/RLS logo após o login costumam ser transitórios e sumiam sem deixar
+  // rastro (array vazio ficava travado até um F5 manual).
+  const loadTasksRetriedRef = useRef(false);
 
   // Lazy-load das sub-entidades ao abrir uma tarefa. As listagens carregam as
   // tarefas SEM comentários/checklists/anexos/atividades/logs/watchers (para
@@ -1545,12 +1549,22 @@ export default function App() {
 
         if (requestId < loadTasksCommittedIdRef.current) return;
         loadTasksCommittedIdRef.current = requestId;
+        loadTasksRetriedRef.current = false;
         setMyTasks(mappedTasks);
         setTasks(prev => {
           const merged = new Map(prev.map(t => [t.id, t]));
           for (const t of mappedTasks) merged.set(t.id, preserveLoadedTaskDetails(t, merged.get(t.id)));
           return Array.from(merged.values());
         });
+      } catch (err) {
+        console.error('Erro ao carregar Minhas Tarefas:', err);
+        if (requestId === loadTasksRequestIdRef.current && !loadTasksRetriedRef.current) {
+          loadTasksRetriedRef.current = true;
+          setTimeout(() => { loadTasks(); }, 1500);
+        } else {
+          loadTasksRetriedRef.current = false;
+          toast.error('Não foi possível carregar suas tarefas. Tente novamente.');
+        }
       } finally {
         setIsMyTasksLoading(false);
       }
@@ -1578,6 +1592,7 @@ export default function App() {
 
       if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
       loadTasksCommittedIdRef.current = requestId;
+      loadTasksRetriedRef.current = false;
       setTasks(prev => firstRows
         .map(taskRepo.mapRowToTaskShell)
         .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
@@ -1593,6 +1608,15 @@ export default function App() {
       setTasks(prev => [...firstRows, ...remainingRows]
         .map(taskRepo.mapRowToTaskShell)
         .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
+    } catch (err) {
+      console.error('Erro ao carregar tarefas:', err);
+      if (requestId === loadTasksRequestIdRef.current && !loadTasksRetriedRef.current) {
+        loadTasksRetriedRef.current = true;
+        setTimeout(() => { loadTasks(); }, 1500);
+      } else {
+        loadTasksRetriedRef.current = false;
+        toast.error('Não foi possível carregar as tarefas. Tente novamente.');
+      }
     } finally {
       if (requestId === loadTasksRequestIdRef.current) {
         setIsTasksLoading(false);
