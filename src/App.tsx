@@ -3707,6 +3707,7 @@ export default function App() {
                 users={adminUsers}
                 lists={lists}
                 currentUserId={currentUser.id}
+                statusGroups={statusGroups}
               />
             )}
             {activeView === 'Inbox' && (
