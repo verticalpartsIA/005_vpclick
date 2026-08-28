@@ -63,6 +63,26 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p 65002 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
+          # A porta 65002 da Hostinger ocasionalmente não responde a tempo
+          # (observado: "Connection timed out" após a rede do runner do GitHub
+          # ficar ~2min tentando conectar, sem nenhum problema na chave/host).
+          # ConnectTimeout encurta essa espera por tentativa, e with_retry reage
+          # a essas falhas passageiras tentando de novo antes de desistir —
+          # cada falha isolada de rede não deve mais quebrar o deploy inteiro.
+          SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=~/.ssh/known_hosts -o ConnectTimeout=15)
+          with_retry() {
+            local tentativas=4 espera=5 n=1
+            until "$@"; do
+              if [ "$n" -ge "$tentativas" ]; then
+                return 1
+              fi
+              echo "  ⚠️  tentativa $n falhou, tentando de novo em ${espera}s..."
+              sleep "$espera"
+              n=$((n + 1))
+              espera=$((espera * 2))
+            done
+          }
+
           REMOTE_BASE="/home/$SSH_USER/domains/vpclick.vpsistema.com"
           LIVE_DIR="$REMOTE_BASE/public_html"
           STAGING_DIR="$REMOTE_BASE/public_html_staging"
@@ -78,9 +98,8 @@ jobs:
           # apagado na hora: abas já abertas que ainda vão carregar um chunk lazy
           # com hash do build anterior continuam funcionando por mais um ciclo de
           # deploy inteiro, em vez de quebrarem no segundo em que o deploy termina.
-          if ! ssh -i deploy_key -p 65002 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=~/.ssh/known_hosts \
+          if ! with_retry ssh -i deploy_key -p 65002 \
+            "${SSH_OPTS[@]}" \
             "$SSH_USER@$SSH_HOST" \
             "rm -rf '$STAGING_DIR' '$PREV_DIR' && mkdir -p '$STAGING_DIR'"; then
             echo '⚠️  Não foi possível preparar o diretório de staging (seguindo mesmo assim).'
@@ -93,9 +112,8 @@ jobs:
           # glob nenhum (não tem "*"), então o scp -r copia o CONTEÚDO do
           # diretório, .htaccess incluído, sem criar uma pasta "dist" aninhada
           # no destino — mesma semântica de "cp -r origem/. destino/".
-          if ! scp -i deploy_key -P 65002 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=~/.ssh/known_hosts \
+          if ! with_retry scp -i deploy_key -P 65002 \
+            "${SSH_OPTS[@]}" \
             -r dist/. \
             "$SSH_USER@$SSH_HOST:$STAGING_DIR/"; then
             echo ''
@@ -112,9 +130,8 @@ jobs:
           # filesystem — não copia dado, então a janela em que o domínio fica
           # sem pasta é da ordem de milissegundos, não dos vários segundos que
           # o scp leva.
-          if ! ssh -i deploy_key -p 65002 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=~/.ssh/known_hosts \
+          if ! with_retry ssh -i deploy_key -p 65002 \
+            "${SSH_OPTS[@]}" \
             "$SSH_USER@$SSH_HOST" \
             "if [ -d '$LIVE_DIR' ]; then mv '$LIVE_DIR' '$PREV_DIR'; fi && mv '$STAGING_DIR' '$LIVE_DIR'"; then
             echo ''
