@@ -4,7 +4,7 @@ import {
   Filter, Layers, X, Pencil, AlertTriangle, Link2
 } from "lucide-react";
 import { toast } from 'sonner';
-import { Task, User, List, TaskPriority, TaskDependency } from '../../types';
+import { Task, User, List, TaskPriority, TaskDependency, StatusGroup } from '../../types';
 import { supabase, fetchTaskDependenciesForTasks, addTaskDependency, shiftTaskDates } from '../../lib/supabase';
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -56,6 +56,13 @@ interface GanttViewProps {
   lists?: List[];
   // Necessário só pra criar dependência (Codex_Gantt_03) — vira `created_by`.
   currentUserId?: string;
+  // Escopa as opções de status do popover de edição rápida ao workflow da
+  // lista da tarefa (Codex_Gantt_09) — sem isso o select oferecia todos os
+  // status de todas as listas visíveis no Gantt, e salvar um status de outro
+  // workflow fazia a tarefa sumir do Kanban da sua própria lista (achado do
+  // review: App.tsx monta as colunas do Kanban a partir do status group
+  // configurado da lista).
+  statusGroups?: StatusGroup[];
 }
 
 // `startDate`/`dueDate` são "YYYY-MM-DD" (sem hora); `new Date(string)`
@@ -98,7 +105,7 @@ interface VisualRow {
   task?: Task;
 }
 
-export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpdateTask, users = [], lists = [], currentUserId }) => {
+export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpdateTask, users = [], lists = [], currentUserId, statusGroups = [] }) => {
   const [scale, setScale] = useState<GanttScale>('day');
   const [zoomLevel, setZoomLevel] = useState(SCALE_CONFIG.day.defaultZoom); // pixels per day
   const [viewStart, setViewStart] = useState(subDays(new Date(), 7));
@@ -242,6 +249,25 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   }, [tasks]);
 
   const activeFilterCount = Object.values(filters).filter(v => v !== '' && v !== false).length;
+
+  // Status disponíveis pra edição rápida (Codex_Gantt_09), restritos ao
+  // workflow (status group) da LISTA da tarefa em edição — ao contrário de
+  // `filterOptions.statuses` acima (que existe só pra filtrar, e por isso
+  // agrega todas as listas visíveis de propósito). Usar `filterOptions` aqui
+  // deixava salvar um status de outro workflow, e a tarefa sumia do Kanban
+  // da própria lista (App.tsx monta as colunas do Kanban a partir do status
+  // group configurado da lista, não reconhece um status de fora).
+  const quickEditStatusOptions = useMemo(() => {
+    if (!quickEditTaskId) return [];
+    const task = tasks.find(t => t.id === quickEditTaskId);
+    const list = task ? lists.find(l => l.id === task.listId) : undefined;
+    const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
+    const labels = group ? group.options.map(o => o.label) : [];
+    // Garante que o valor atual do rascunho sempre apareça no select, mesmo
+    // que esteja fora do workflow configurado (dado legado/inconsistente) —
+    // senão o select ficaria sem nenhuma opção selecionada.
+    return quickDraft && !labels.includes(quickDraft.status) ? [quickDraft.status, ...labels] : labels;
+  }, [quickEditTaskId, tasks, lists, statusGroups, quickDraft]);
 
   const filteredTasks = useMemo(() => {
     if (activeFilterCount === 0) return tasks;
@@ -893,20 +919,53 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     if (!title) return;
     if (quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate) return;
 
+    const taskId = quickEditTaskId;
+    // Otimista, igual a persistDates/persistDatesForMany acima: substitui
+    // (não só desfaz) o override de data por aquilo que acabou de ser salvo —
+    // sem isso, uma tarefa arrastada antes e depois editada por aqui via data
+    // continuava mostrando a barra na posição do drag antigo até o próximo
+    // reload completo (achado do review). Se as duas datas ficaram vazias
+    // (marco sem data, por exemplo), remove o override em vez de gravar ''/''
+    // — `taskBars` não sabe desenhar uma barra sem nenhuma data válida.
+    const previousOverride = dateOverrides[taskId];
+    const hasAnyDate = !!(quickDraft.startDate || quickDraft.dueDate);
+    setDateOverrides(prev => {
+      const next = { ...prev };
+      if (hasAnyDate) next[taskId] = { startDate: quickDraft.startDate, dueDate: quickDraft.dueDate };
+      else delete next[taskId];
+      return next;
+    });
+
     setSavingQuickEdit(true);
-    const ok = await onUpdateTask(quickEditTaskId, {
+    const ok = await onUpdateTask(taskId, {
       title,
       priority: quickDraft.priority,
-      mainAssigneeId: quickDraft.mainAssigneeId || undefined,
+      // `''` (não `undefined`) representa "limpar" nessa base de código (ver
+      // KanbanView) — `undefined` some do payload no spread de handleUpdateTask
+      // e o Supabase nunca chega a tocar a coluna, deixando o valor antigo no
+      // banco (achado do review: campo "limpo" na tela voltava sozinho no
+      // próximo reload). updateTaskFields (taskRepo.ts) converte '' -> null.
+      mainAssigneeId: quickDraft.mainAssigneeId,
       status: quickDraft.status,
-      startDate: quickDraft.startDate || undefined,
-      dueDate: quickDraft.dueDate || undefined,
+      startDate: quickDraft.startDate,
+      dueDate: quickDraft.dueDate,
     });
     setSavingQuickEdit(false);
-    // `onUpdateTask` (App.tsx) já mostra o toast de erro em caso de falha —
-    // aqui só decidimos se fecha o popover (sucesso) ou deixa o rascunho
-    // aberto pro usuário tentar de novo (falha/indefinido).
-    if (ok !== false) closeQuickEdit();
+
+    if (ok === false) {
+      // Falha: desfaz o override otimista, restaurando o que havia antes
+      // (posição de um drag anterior, se houver, ou nada).
+      setDateOverrides(prev => {
+        const next = { ...prev };
+        if (previousOverride) next[taskId] = previousOverride; else delete next[taskId];
+        return next;
+      });
+      // `onUpdateTask` (App.tsx) já mostra o toast de erro — aqui só decide
+      // se fecha o popover (sucesso) ou deixa o rascunho aberto pra tentar de
+      // novo (falha).
+      return;
+    }
+    closeQuickEdit();
   };
 
   const toggleGroupCollapsed = (key: string) => {
@@ -1271,9 +1330,13 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                          )}
 
                          {/* Edição rápida (Codex_Gantt_09): botão só aparece no
-                             hover, acima da barra, pra não competir com os
-                             handles de redimensionar/dependência que já
-                             ocupam as pontas. */}
+                             hover, sobrepondo o canto superior da própria
+                             barra (não flutuando acima dela) — um gap solto
+                             fica fora da caixa da própria linha (`.group`) e
+                             quebra a cadeia de hover ao mover o mouse da
+                             barra até o botão (achado do review: o botão
+                             desaparecia antes de dar tempo de clicar, e na
+                             primeira linha ficava atrás do cabeçalho fixo). */}
                          {onUpdateTask && (
                            <Popover
                              open={quickEditTaskId === task.id}
@@ -1282,7 +1345,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                              <PopoverTrigger asChild>
                                <button
                                  type="button"
-                                 className="absolute -top-2 right-1 -translate-y-full hidden group-hover:flex h-5 w-5 items-center justify-center rounded-full border bg-white text-gray-500 shadow-sm hover:text-gray-900"
+                                 className="absolute -top-1 right-1 hidden group-hover:flex h-5 w-5 items-center justify-center rounded-full border bg-white text-gray-500 shadow-sm hover:text-gray-900 z-10"
                                  title="Edição rápida"
                                  onMouseDown={(e) => e.stopPropagation()}
                                  onClick={(e) => { e.stopPropagation(); openQuickEdit(task); }}
@@ -1319,7 +1382,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                                        onChange={(e) => setQuickDraft({ ...quickDraft, status: e.target.value })}
                                        className="h-8 text-xs border rounded-md px-2"
                                      >
-                                       {(filterOptions.statuses.includes(quickDraft.status) ? filterOptions.statuses : [quickDraft.status, ...filterOptions.statuses]).map(s => (
+                                       {quickEditStatusOptions.map(s => (
                                          <option key={s} value={s}>{s}</option>
                                        ))}
                                      </select>
