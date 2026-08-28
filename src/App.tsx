@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useLocation, useNavigationType, useSearchParams } from 'react-router-dom';
-import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy, ArrowUpDown } from "lucide-react";
+import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy, ArrowUpDown, Search, Filter, RotateCcw, Check, X, Edit3, CalendarDays, UserCircle, Flag, MessageSquare, CheckSquare, GripVertical } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
@@ -2319,12 +2319,12 @@ export default function App() {
     }
   };
 
-  const handleStatusChange = useCallback(async (taskId: string, newStatus: string) => {
+  const handleStatusChange = useCallback(async (taskId: string, newStatus: string): Promise<boolean> => {
     if (isDoneLikeStatus(newStatus)) {
       const blockReason = await getTaskCloseBlockReason(taskId);
       if (blockReason) {
         toast.warning(blockReason);
-        return;
+        return false;
       }
     }
 
@@ -2418,10 +2418,49 @@ export default function App() {
         }
         return t;
       }));
+      return true;
     } else {
       console.error('Erro ao atualizar status:', error);
+      toast.error('Erro ao atualizar status. A tarefa voltou ao estado anterior.');
+      return false;
     }
-  }, []);
+  }, [currentUser, tasks, workspace.id]);
+
+  const handleQuickUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>): Promise<boolean> => {
+    const previous = tasks.find(t => t.id === taskId);
+    if (!previous) return false;
+
+    if (updates.status && updates.status !== previous.status && isDoneLikeStatus(updates.status)) {
+      const blockReason = await getTaskCloseBlockReason(taskId);
+      if (blockReason) {
+        toast.warning(blockReason);
+        return false;
+      }
+    }
+
+    const payload: Record<string, any> = {};
+    if (updates.title !== undefined) payload.title = updates.title;
+    if (updates.status !== undefined) payload.status = updates.status;
+    if (updates.priority !== undefined) payload.priority = updates.priority;
+    if (updates.mainAssigneeId !== undefined) payload.main_assignee_id = updates.mainAssigneeId;
+    if (updates.dueDate !== undefined) payload.due_date = updates.dueDate || null;
+    if (updates.tags !== undefined) payload.tags = updates.tags;
+
+    if (Object.keys(payload).length === 0) return true;
+
+    setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...updates } : t));
+    const { error } = await supabase.from('tasks').update(payload).eq('id', taskId);
+
+    if (error) {
+      setTasks(prev => prev.map(t => t.id === taskId ? previous : t));
+      console.error('Erro ao atualizar tarefa pelo Kanban:', error);
+      toast.error('Erro ao salvar alteração. A tarefa voltou ao estado anterior.');
+      return false;
+    }
+
+    toast.success('Tarefa atualizada.');
+    return true;
+  }, [tasks]);
 
   const handleUpdateFieldValue = useCallback(async (fieldId: string, entityId: string, value: any) => {
     const { error } = await supabase
@@ -3609,6 +3648,7 @@ export default function App() {
                 tasks={filteredTasks}
                 onSelectTask={setSelectedTaskId}
                 onStatusChange={handleStatusChange}
+                onQuickUpdateTask={handleQuickUpdateTask}
                 onDeleteTask={handleDeleteTask}
                 onDuplicateTask={setTaskToDuplicate}
                 onCreateTask={handleCreateTask}
@@ -3620,6 +3660,7 @@ export default function App() {
                 statusGroups={statusGroups}
                 lists={lists}
                 activeListId={activeListId}
+                currentUser={currentUser}
                 workspaceTags={workspaceTags}
               />
             )}
@@ -6895,14 +6936,175 @@ function ListView({
   );
 }
 
-function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDuplicateTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, workspaceTags }: any) {
-  // Refs para não causar re-render durante drag (re-renders destroem o HTML5 DnD)
+function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, onDeleteTask, onDuplicateTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, currentUser, workspaceTags }: any) {
   const draggingTaskIdRef = useRef<string | null>(null);
-  const currentDragOverColRef = useRef<HTMLElement | null>(null);
+  const draggedColumnRef = useRef<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState<{ status: string; index: number } | null>(null);
+  const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+  const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
   const [inlineCreateCol, setInlineCreateCol] = useState<string | null>(null);
   const [inlineCreateTitle, setInlineCreateTitle] = useState('');
+  const [boardSearch, setBoardSearch] = useState('');
+  const [filterPriority, setFilterPriority] = useState('');
+  const [filterAssignee, setFilterAssignee] = useState('');
+  const [filterTag, setFilterTag] = useState('');
+  const [showOnlyOverdue, setShowOnlyOverdue] = useState(false);
+  const [quickEditTaskId, setQuickEditTaskId] = useState<string | null>(null);
+  const [quickDraft, setQuickDraft] = useState<{ title: string; priority: TaskPriority; mainAssigneeId: string; dueDate: string; tags: string[] } | null>(null);
+  const [savingQuickEdit, setSavingQuickEdit] = useState(false);
   const inlineInputRef = useRef<HTMLInputElement>(null);
+
+  const kanbanPrefsKey = `vp_kanban_prefs_${currentUser?.id || 'anon'}_${activeListId || 'global'}`;
+  const [localTaskOrder, setLocalTaskOrder] = useState<Record<string, string[]>>(() => {
+    try {
+      const saved = localStorage.getItem(`${kanbanPrefsKey}_tasks`);
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+  const [localColumnOrder, setLocalColumnOrder] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(`${kanbanPrefsKey}_columns`);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const persistKanbanPreference = (key: string, value: unknown) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      console.warn('Preferência local do Kanban não pôde ser salva.');
+    }
+  };
+
+  useEffect(() => {
+    persistKanbanPreference(`${kanbanPrefsKey}_tasks`, localTaskOrder);
+  }, [kanbanPrefsKey, localTaskOrder]);
+
+  useEffect(() => {
+    persistKanbanPreference(`${kanbanPrefsKey}_columns`, localColumnOrder);
+  }, [kanbanPrefsKey, localColumnOrder]);
+
+  useEffect(() => {
+    setQuickEditTaskId(null);
+    setQuickDraft(null);
+  }, [activeListId]);
+
+  const activeList = lists?.find((l: any) => l.id === activeListId);
+  const activeStatusGroup = statusGroups?.find((g: any) => g.id === activeList?.statusGroupId) || statusGroups?.[0];
+  const activeStatusOptions = activeStatusGroup?.options || [];
+  const canManageBoard = currentUser?.role === UserRole.ADMIN || currentUser?.role === UserRole.GESTOR;
+  const availableUsers = (users || []).filter((u: User) => u?.id && u.id !== 'loading');
+
+  const canEditTask = (task: Task) => {
+    if (!currentUser) return false;
+    if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) return true;
+    return task.mainAssigneeId === currentUser.id || (task.secondaryAssigneeIds || []).includes(currentUser.id);
+  };
+
+  const statusLabels = useMemo(() => {
+    let labels: string[];
+    if (activeListId && activeStatusOptions.length > 0) {
+      labels = activeStatusOptions.map((o: any) => o.label);
+    } else {
+      const uniqueStatuses = Array.from(new Set(tasks.map((t: Task) => t.status).filter(Boolean))) as string[];
+      const defaultOrder = statusGroups?.[0]?.options.map((o: any) => o.label) || [];
+      labels = uniqueStatuses.sort((a, b) => {
+        const idxA = defaultOrder.indexOf(a);
+        const idxB = defaultOrder.indexOf(b);
+        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
+        if (idxA !== -1) return -1;
+        if (idxB !== -1) return 1;
+        return a.localeCompare(b);
+      });
+    }
+    const seen = new Set<string>();
+    return labels.filter(label => {
+      const key = label.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [tasks, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(statusGroups?.[0]?.options)]);
+
+  const columns = useMemo(() => {
+    const valid = localColumnOrder.filter(status => statusLabels.includes(status));
+    const missing = statusLabels.filter(status => !valid.includes(status));
+    return [...valid, ...missing];
+  }, [statusLabels, localColumnOrder]);
+
+  const boardTasks = useMemo(() => {
+    const q = boardSearch.trim().toLowerCase();
+    return tasks.filter((task: Task) => {
+      if (q) {
+        const haystack = [
+          task.title,
+          task.description,
+          task.status,
+          task.priority,
+          ...(task.tags || []),
+          lists?.find((l: any) => l.id === task.listId)?.name || '',
+        ].join(' ').toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+      if (filterPriority && task.priority !== filterPriority) return false;
+      if (filterAssignee && task.mainAssigneeId !== filterAssignee && !(task.secondaryAssigneeIds || []).includes(filterAssignee)) return false;
+      if (filterTag && !(task.tags || []).includes(filterTag)) return false;
+      if (showOnlyOverdue) {
+        if (!task.dueDate) return false;
+        const due = parseLocalDate(task.dueDate);
+        due.setHours(23, 59, 59, 999);
+        if (due >= new Date()) return false;
+      }
+      return true;
+    });
+  }, [tasks, boardSearch, filterPriority, filterAssignee, filterTag, showOnlyOverdue, lists]);
+
+  const getOrderedColumnTasks = (status: string) => {
+    const columnTasks = boardTasks.filter((t: Task) => t.status?.toLowerCase() === status.toLowerCase());
+    const savedOrder = localTaskOrder[status] || [];
+    if (savedOrder.length === 0) return columnTasks;
+    const byId = new Map(columnTasks.map((task: Task) => [task.id, task]));
+    return [
+      ...savedOrder.map(id => byId.get(id)).filter(Boolean),
+      ...columnTasks.filter((task: Task) => !savedOrder.includes(task.id)),
+    ] as Task[];
+  };
+
+  const getStatusColor = (statusLabel: string) => {
+    const sLower = (statusLabel || '').toLowerCase();
+    const opt = activeStatusOptions.find((o: any) => o.label?.toLowerCase() === sLower) ||
+      statusGroups?.flatMap((g: any) => g.options).find((o: any) => o.label?.toLowerCase() === sLower);
+    return opt?.color || '#94a3b8';
+  };
+
+  const PRIORITY_FLAG: Record<string, { color: string; label: string }> = {
+    Urgente: { color: '#ef4444', label: 'Urgente' },
+    Alta: { color: '#f97316', label: 'Alta' },
+    Média: { color: '#3b82f6', label: 'Média' },
+    Media: { color: '#3b82f6', label: 'Média' },
+    Baixa: { color: '#94a3b8', label: 'Baixa' },
+  };
+
+  const activeFilterCount = [filterPriority, filterAssignee, filterTag, showOnlyOverdue].filter(Boolean).length;
+
+  const resetBoardFilters = () => {
+    setBoardSearch('');
+    setFilterPriority('');
+    setFilterAssignee('');
+    setFilterTag('');
+    setShowOnlyOverdue(false);
+  };
+
+  const resetLocalOrder = () => {
+    setLocalTaskOrder({});
+    setLocalColumnOrder([]);
+    toast.success('Ordem visual do Kanban restaurada.');
+  };
 
   const confirmInlineCreate = async (status: string) => {
     const title = inlineCreateTitle.trim();
@@ -6926,352 +7128,482 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onDeleteTask, onDupli
     setTimeout(() => inlineInputRef.current?.focus(), 50);
   };
 
-  const activeList = lists?.find((l: any) => l.id === activeListId);
-  const activeStatusGroup = statusGroups?.find((g: any) => g.id === activeList?.statusGroupId) || statusGroups?.[0];
-  const activeStatusOptions = activeStatusGroup?.options || [];
-
-  const columns = useMemo(() => {
-    let labels: string[];
-    if (activeListId && activeStatusOptions.length > 0) {
-      labels = activeStatusOptions.map((o: any) => o.label);
-    } else {
-      const uniqueStatuses = Array.from(new Set(tasks.map((t: Task) => t.status))) as string[];
-      const defaultOrder = statusGroups?.[0]?.options.map((o: any) => o.label) || [];
-      labels = uniqueStatuses.sort((a, b) => {
-        const idxA = defaultOrder.indexOf(a);
-        const idxB = defaultOrder.indexOf(b);
-        if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-        if (idxA !== -1) return -1;
-        if (idxB !== -1) return 1;
-        return a.localeCompare(b);
-      });
-    }
-    const seen = new Set<string>();
-    return labels.filter(label => {
-      const key = label.toLowerCase();
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+  const openQuickEdit = (task: Task) => {
+    setQuickEditTaskId(task.id);
+    setQuickDraft({
+      title: task.title,
+      priority: task.priority,
+      mainAssigneeId: task.mainAssigneeId || '',
+      dueDate: task.dueDate || '',
+      tags: [...(task.tags || [])],
     });
-  }, [tasks, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(statusGroups?.[0]?.options)]);
-
-  const getStatusColor = (statusLabel: string) => {
-    const sLower = (statusLabel || '').toLowerCase();
-    const opt = activeStatusOptions.find((o: any) => o.label?.toLowerCase() === sLower) ||
-      statusGroups?.flatMap((g: any) => g.options).find((o: any) => o.label?.toLowerCase() === sLower);
-    return opt?.color || '#94a3b8';
   };
 
-  // Highlight via DOM — zero re-renders durante drag
-  const highlightColumn = (el: HTMLElement | null) => {
-    if (currentDragOverColRef.current && currentDragOverColRef.current !== el) {
-      currentDragOverColRef.current.style.backgroundColor = '';
-      currentDragOverColRef.current.style.borderColor = '';
-      currentDragOverColRef.current.style.boxShadow = '';
+  const saveQuickEdit = async (task: Task) => {
+    if (!quickDraft || savingQuickEdit) return;
+    const title = quickDraft.title.trim();
+    if (!title) {
+      toast.error('Informe um título para a tarefa.');
+      return;
     }
-    if (el && el !== currentDragOverColRef.current) {
-      el.style.backgroundColor = '#fefce8';
-      el.style.borderColor = '#facc15';
-      el.style.boxShadow = '0 4px 16px rgba(250,204,21,0.25)';
+    setSavingQuickEdit(true);
+    const ok = await onQuickUpdateTask?.(task.id, {
+      title,
+      priority: quickDraft.priority,
+      mainAssigneeId: quickDraft.mainAssigneeId,
+      dueDate: quickDraft.dueDate,
+      tags: quickDraft.tags,
+    });
+    setSavingQuickEdit(false);
+    if (ok !== false) {
+      setQuickEditTaskId(null);
+      setQuickDraft(null);
     }
-    currentDragOverColRef.current = el;
   };
 
-  const handleDragStart = (e: React.DragEvent, taskId: string) => {
+  const copyTaskLink = async (taskId: string) => {
+    // Preserva os params já presentes (ex: ?listId=, ?scope=) em vez de
+    // descartá-los — sem isso, o link compartilhado perdia o contexto de
+    // lista/espaço de onde a tarefa foi aberta.
+    const url = new URL(window.location.href);
+    url.searchParams.set('taskId', taskId);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      toast.success('Link da tarefa copiado.');
+    } catch {
+      toast.error('Não foi possível copiar o link.');
+    }
+  };
+
+  const handleTaskDragStart = (e: React.DragEvent, taskId: string) => {
     draggingTaskIdRef.current = taskId;
     setDraggingTaskId(taskId);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', taskId);
+    e.dataTransfer.setData('application/x-vpclick-kanban', 'task');
   };
 
-  const handleDragEnd = () => {
-    highlightColumn(null);
+  const finishTaskDrag = () => {
     draggingTaskIdRef.current = null;
     setDraggingTaskId(null);
+    setDragOver(null);
+    setDragOverColumn(null);
   };
 
-  const handleColumnDragOver = (e: React.DragEvent) => {
+  const handleCardDragOver = (e: React.DragEvent, status: string, index: number) => {
+    if (e.dataTransfer.types.includes('application/x-vpclick-kanban-column')) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    let el = e.target as HTMLElement;
-    while (el && !el.dataset.kanbanCol) el = el.parentElement as HTMLElement;
-    if (el) highlightColumn(el);
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const nextIndex = e.clientY > rect.top + rect.height / 2 ? index + 1 : index;
+    setDragOver({ status, index: nextIndex });
+    setDragOverColumn(status);
   };
 
-  const handleColumnDragLeave = (e: React.DragEvent) => {
-    if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
-      highlightColumn(null);
+  const handleColumnDragOver = (e: React.DragEvent, status: string, index: number) => {
+    if (e.dataTransfer.types.includes('application/x-vpclick-kanban-column')) {
+      e.preventDefault();
+      if (draggedColumnRef.current && draggedColumnRef.current !== status) {
+        setLocalColumnOrder(prev => {
+          const base = prev.length ? prev.filter(s => columns.includes(s)) : columns;
+          const next = [...base];
+          const from = next.indexOf(draggedColumnRef.current!);
+          const to = next.indexOf(status);
+          if (from === -1 || to === -1 || from === to) return prev;
+          next.splice(from, 1);
+          next.splice(to, 0, draggedColumnRef.current!);
+          return next;
+        });
+      }
+      return;
     }
-  };
-
-  const handleDrop = (e: React.DragEvent, status: string) => {
     e.preventDefault();
-    highlightColumn(null);
-    const taskId = draggingTaskIdRef.current || e.dataTransfer.getData('text/plain');
-    if (taskId) onStatusChange(taskId, status);
-    draggingTaskIdRef.current = null;
-    setDraggingTaskId(null);
+    setDragOver({ status, index });
+    setDragOverColumn(status);
   };
 
-  const PRIORITY_FLAG: Record<string, { color: string; label: string }> = {
-    Urgente: { color: '#ef4444', label: 'Urgente' },
-    Alta:    { color: '#f97316', label: 'Alta' },
-    Média:   { color: '#3b82f6', label: 'Média' },
-    Media:   { color: '#3b82f6', label: 'Média' },
-    Baixa:   { color: '#94a3b8', label: 'Baixa' },
+  const handleDrop = async (e: React.DragEvent, status: string) => {
+    e.preventDefault();
+    if (e.dataTransfer.types.includes('application/x-vpclick-kanban-column')) return;
+    const taskId = draggingTaskIdRef.current || e.dataTransfer.getData('text/plain');
+    const task = tasks.find((t: Task) => t.id === taskId);
+    if (!task || !canEditTask(task)) {
+      finishTaskDrag();
+      return;
+    }
+
+    const targetIndex = dragOver?.status === status ? dragOver.index : getOrderedColumnTasks(status).length;
+    const previousOrder = localTaskOrder;
+    setLocalTaskOrder(prev => {
+      const next: Record<string, string[]> = {};
+      columns.forEach(col => {
+        next[col] = (prev[col] || getOrderedColumnTasks(col).map((t: Task) => t.id)).filter(id => id !== taskId);
+      });
+      const target = [...(next[status] || [])];
+      target.splice(Math.max(0, Math.min(targetIndex, target.length)), 0, taskId);
+      next[status] = target;
+      return next;
+    });
+
+    if (task.status?.toLowerCase() !== status.toLowerCase()) {
+      const ok = await onStatusChange(taskId, status);
+      if (ok === false) setLocalTaskOrder(previousOrder);
+    }
+    finishTaskDrag();
   };
+
+  const handleColumnDragStart = (e: React.DragEvent, status: string) => {
+    if (!canManageBoard) return;
+    draggedColumnRef.current = status;
+    setDraggedColumn(status);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('application/x-vpclick-kanban-column', status);
+  };
+
+  const finishColumnDrag = () => {
+    draggedColumnRef.current = null;
+    setDraggedColumn(null);
+  };
+
+  const renderDropLine = (status: string, index: number) => (
+    dragOver?.status === status && dragOver.index === index ? (
+      <div className="h-2 rounded-full bg-blue-400/80 shadow-[0_0_0_3px_rgba(96,165,250,0.18)]" />
+    ) : null
+  );
 
   return (
-    <div className="flex gap-5 h-full overflow-x-auto pb-6 px-2 custom-scrollbar items-start" onClick={(e) => e.stopPropagation()}>
-      {columns.map(status => {
-        const statusColor = getStatusColor(status);
-        const columnTasks = tasks.filter((t: Task) => t.status?.toLowerCase() === status.toLowerCase());
+    <div className="flex h-full min-h-0 flex-col gap-3 px-2 pb-4" onClick={(e) => e.stopPropagation()}>
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-sm">
+        <div className="relative min-w-[220px] flex-1 max-w-sm">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+          <input
+            value={boardSearch}
+            onChange={(e) => setBoardSearch(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Escape') setBoardSearch(''); }}
+            placeholder="Buscar no Kanban"
+            className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-8 pr-3 text-xs outline-none transition focus:border-blue-300 focus:bg-white focus:ring-2 focus:ring-blue-100"
+          />
+        </div>
+        <select value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 outline-none">
+          <option value="">Prioridade</option>
+          {Object.values(TaskPriority).map(priority => <option key={priority} value={priority}>{priority}</option>)}
+        </select>
+        <select value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 outline-none">
+          <option value="">Responsável</option>
+          {availableUsers.map((user: User) => <option key={user.id} value={user.id}>{user.name}</option>)}
+        </select>
+        <select value={filterTag} onChange={(e) => setFilterTag(e.target.value)} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 outline-none">
+          <option value="">Tag</option>
+          {(workspaceTags || []).map((tag: WorkspaceTag) => <option key={tag.id} value={tag.name}>{tag.name}</option>)}
+        </select>
+        <button
+          onClick={() => setShowOnlyOverdue(v => !v)}
+          className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition ${showOnlyOverdue ? 'border-red-200 bg-red-50 text-red-600' : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'}`}
+          title="Mostrar apenas tarefas atrasadas"
+        >
+          <Filter className="h-3.5 w-3.5" />
+          Atrasadas
+        </button>
+        {(activeFilterCount > 0 || boardSearch) && (
+          <button onClick={resetBoardFilters} className="inline-flex h-8 items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 text-xs font-medium text-gray-500 hover:bg-gray-50">
+            <X className="h-3.5 w-3.5" />
+            Limpar
+          </button>
+        )}
+        <button onClick={resetLocalOrder} className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2.5 text-xs font-medium text-gray-500 hover:bg-gray-50" title="Restaurar ordem visual">
+          <RotateCcw className="h-3.5 w-3.5" />
+          Ordem
+        </button>
+      </div>
 
-        return (
-          <div
-            key={status}
-            data-kanban-col={status}
-            className="w-72 shrink-0 flex flex-col max-h-full rounded-xl border border-gray-200 bg-[#f8f9fa] transition-all"
-            onDragOver={handleColumnDragOver}
-            onDragLeave={handleColumnDragLeave}
-            onDrop={(e) => handleDrop(e, status)}
-          >
-            {/* ── Cabeçalho da Coluna ── */}
-            <div className="flex items-center justify-between px-3 pt-3 pb-2">
-              <div className="flex items-center gap-2">
-                <span
-                  className="px-2 py-0.5 rounded text-[11px] font-extrabold uppercase text-white tracking-wide"
-                  style={{ backgroundColor: statusColor }}
-                >
-                  {status}
-                </span>
-                <span className="text-xs font-semibold text-gray-400">{columnTasks.length}</span>
+      <div className="flex min-h-0 flex-1 gap-4 overflow-x-auto pb-2 custom-scrollbar items-start">
+        {columns.map(status => {
+          const statusColor = getStatusColor(status);
+          const columnTasks = getOrderedColumnTasks(status);
+          const isColumnHot = dragOverColumn === status;
+
+          return (
+            <div
+              key={status}
+              data-kanban-col={status}
+              className={`w-72 shrink-0 flex max-h-full flex-col rounded-lg border bg-[#f8f9fa] transition-all ${isColumnHot ? 'border-blue-300 bg-blue-50/40 shadow-md shadow-blue-100' : 'border-gray-200'} ${draggedColumn === status ? 'opacity-50' : ''}`}
+              onDragOver={(e) => handleColumnDragOver(e, status, columnTasks.length)}
+              onDrop={(e) => handleDrop(e, status)}
+            >
+              <div
+                className="flex items-center justify-between px-3 pt-3 pb-2"
+                draggable={canManageBoard}
+                onDragStart={(e) => handleColumnDragStart(e, status)}
+                onDragEnd={finishColumnDrag}
+                title={canManageBoard ? 'Arraste para reordenar a coluna visualmente' : undefined}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  {canManageBoard && <GripVertical className="h-3.5 w-3.5 shrink-0 text-gray-300" />}
+                  <span
+                    className="max-w-[160px] truncate rounded px-2 py-0.5 text-[11px] font-extrabold uppercase tracking-wide text-white"
+                    style={{ backgroundColor: statusColor }}
+                  >
+                    {status}
+                  </span>
+                  <span className="text-xs font-semibold text-gray-400">{columnTasks.length}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => activeListId ? openInlineCreate(status) : onQuickCreate?.({ status })}
+                    className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors"
+                    title="Adicionar tarefa"
+                  >
+                    <Icons.Plus />
+                  </button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors" title="Ações da coluna">
+                        <MoreHorizontal className="w-3.5 h-3.5" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => activeListId ? openInlineCreate(status) : onQuickCreate?.({ status })}>
+                        Adicionar tarefa
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={resetLocalOrder}>
+                        Restaurar ordem visual
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               </div>
-              <div className="flex items-center gap-1">
+
+              <div className="flex min-h-[64px] flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2 custom-scrollbar">
+                {renderDropLine(status, 0)}
+                {columnTasks.map((task: Task, index: number) => {
+                  const editable = canEditTask(task);
+                  const isDragging = draggingTaskId === task.id;
+                  const listName = lists?.find((l: any) => l.id === task.listId)?.name;
+                  const subtaskCount = tasks.filter((t: Task) => t.parentId === task.id).length;
+                  const completedChecklist = (task.checklists || []).filter((item: ChecklistItem) => item.completed).length;
+                  const assignee = users?.find((u: User) => u.id === task.mainAssigneeId);
+                  const secondaryAssignees = (task.secondaryAssigneeIds || [])
+                    .map((id: string) => users?.find((u: User) => u.id === id))
+                    .filter(Boolean);
+                  const allAssignees = [assignee, ...secondaryAssignees].filter(Boolean);
+                  const hasDueDate = task.dueDate && !isNaN(parseLocalDate(task.dueDate).getTime());
+                  const dueEnd = hasDueDate ? parseLocalDate(task.dueDate) : null;
+                  if (dueEnd) dueEnd.setHours(23, 59, 59, 999);
+                  const isOverdue = !!dueEnd && dueEnd < new Date() && !isDoneLikeStatus(task.status || '');
+                  const priorityFlag = PRIORITY_FLAG[task.priority];
+                  const h = getTaskHealth(task);
+                  const isQuickEditing = quickEditTaskId === task.id && quickDraft;
+
+                  return (
+                    <React.Fragment key={task.id}>
+                      <div
+                        draggable={editable}
+                        onDragStart={(e) => editable && handleTaskDragStart(e, task.id)}
+                        onDragOver={(e) => handleCardDragOver(e, status, index)}
+                        onDragEnd={finishTaskDrag}
+                        onDrop={(e) => handleDrop(e, status)}
+                        onClick={() => onSelectTask(task.id)}
+                        className={`group relative select-none rounded-lg border bg-white transition-all ${editable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'} ${isDragging ? 'opacity-30' : 'hover:border-gray-300 hover:shadow-sm'} ${isOverdue ? 'border-red-200' : 'border-gray-200'}`}
+                        style={{ borderLeftWidth: 3, borderLeftColor: statusColor }}
+                      >
+                        <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                          {editable && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); openQuickEdit(task); }}
+                              className="rounded p-1 text-gray-400 transition-colors hover:bg-blue-50 hover:text-blue-600"
+                              title="Edição rápida"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                onClick={(e) => e.stopPropagation()}
+                                className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+                                title="Ações da tarefa"
+                              >
+                                <MoreHorizontal className="h-3.5 w-3.5" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+                              <DropdownMenuItem onClick={() => onSelectTask(task.id)}>Abrir tarefa</DropdownMenuItem>
+                              {editable && <DropdownMenuItem onClick={() => openQuickEdit(task)}>Edição rápida</DropdownMenuItem>}
+                              {editable && <DropdownMenuItem onClick={() => onQuickCreate?.({ parentId: task.id, status, listId: task.listId })}>Adicionar subtarefa</DropdownMenuItem>}
+                              <DropdownMenuItem onClick={() => copyTaskLink(task.id)}>Copiar link</DropdownMenuItem>
+                              {editable && <DropdownMenuItem onClick={() => onDuplicateTask?.(task)}>Duplicar</DropdownMenuItem>}
+                              {editable && <DropdownMenuSeparator />}
+                              {editable && <DropdownMenuItem className="text-red-600" onClick={() => onDeleteTask(task.id)}>Excluir</DropdownMenuItem>}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+
+                        <div className="px-3 pb-2 pt-3">
+                          {task.extensionCount > 0 && (
+                            <div className="mb-1 flex items-center gap-1 text-[10px] font-bold text-red-500">
+                              <Icons.Clock /> {task.extensionCount}x prorrogado
+                            </div>
+                          )}
+
+                          <p className="mb-1 flex items-start gap-1 pr-10 text-sm font-semibold leading-snug text-gray-800 line-clamp-2">
+                            {task.dependencies?.some((d: any) => d.type === 'blocked_by') && (
+                              <span title="Tarefa bloqueada" className="mt-0.5 shrink-0">
+                                <AlertTriangleIcon className="h-3 w-3 text-amber-400" />
+                              </span>
+                            )}
+                            {task.title}
+                          </p>
+
+                          {(task.tags ?? []).length > 0 && (
+                            <div className="mb-1.5 flex flex-wrap gap-1">
+                              {(task.tags ?? []).map((tagName: string) => {
+                                const tag = (workspaceTags ?? []).find((t: WorkspaceTag) => t.name === tagName);
+                                if (!tag) return null;
+                                return <TagBadge key={tagName} name={tag.name} color={tag.color} size="xs" />;
+                              })}
+                            </div>
+                          )}
+
+                          {listName && <p className="mb-2 text-[11px] text-gray-400">Em {listName}</p>}
+
+                          {h && (
+                            <div className={`mb-2 inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold ${h.bg} ${h.text} ${h.border}`}>
+                              <span>{h.emoji}</span><span>{h.label}</span>
+                            </div>
+                          )}
+
+                          <div className="mt-2 flex items-center gap-3">
+                            <div className="flex -space-x-1.5 items-center" title={allAssignees.map((u: any) => u.name).join(', ') || 'Sem responsável'}>
+                              {allAssignees.length > 0 ? allAssignees.slice(0, 3).map((u: any) => (
+                                <img key={u.id} src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="h-5 w-5 rounded-full border-2 border-white shadow-sm" alt={u.name} />
+                              )) : (
+                                <UserCircle className="h-4 w-4 text-gray-300" />
+                              )}
+                            </div>
+
+                            <div className={`flex items-center gap-0.5 text-[11px] font-medium ${isOverdue ? 'text-red-500' : 'text-gray-400'}`}>
+                              <CalendarDays className="h-3.5 w-3.5" />
+                              <span>{hasDueDate ? (() => { const [y,m,d] = (task.dueDate as string).split('-'); return `${d}/${m}/${y.slice(2)}`; })() : '-'}</span>
+                            </div>
+
+                            <div className="flex items-center gap-0.5 text-[11px] font-medium" style={{ color: priorityFlag?.color || '#94a3b8' }} title={priorityFlag?.label || 'Sem prioridade'}>
+                              <Flag className="h-3.5 w-3.5 fill-current" />
+                              <span>{priorityFlag?.label || '-'}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {(subtaskCount > 0 || (task.comments || []).length > 0 || (task.attachments || []).length > 0 || (task.checklists || []).length > 0) && (
+                          <div className="flex items-center gap-3 border-t border-gray-100 px-3 py-1.5 text-[11px] text-gray-400">
+                            {subtaskCount > 0 && <span className="inline-flex items-center gap-1"><ListPlus className="h-3 w-3" />{subtaskCount}</span>}
+                            {(task.checklists || []).length > 0 && <span className="inline-flex items-center gap-1"><CheckSquare className="h-3 w-3" />{completedChecklist}/{task.checklists.length}</span>}
+                            {(task.comments || []).length > 0 && <span className="inline-flex items-center gap-1"><MessageSquare className="h-3 w-3" />{task.comments.length}</span>}
+                            {(task.attachments || []).length > 0 && <span className="inline-flex items-center gap-1"><Paperclip className="h-3 w-3" />{task.attachments.length}</span>}
+                          </div>
+                        )}
+
+                        {isQuickEditing && (
+                          <div className="space-y-2 border-t border-blue-100 bg-blue-50/40 p-2" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              value={quickDraft.title}
+                              onChange={(e) => setQuickDraft({ ...quickDraft, title: e.target.value })}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') saveQuickEdit(task);
+                                if (e.key === 'Escape') { setQuickEditTaskId(null); setQuickDraft(null); }
+                              }}
+                              className="h-8 w-full rounded-md border border-blue-200 bg-white px-2 text-xs font-medium outline-none focus:ring-2 focus:ring-blue-100"
+                            />
+                            <div className="grid grid-cols-2 gap-2">
+                              <select value={quickDraft.priority} onChange={(e) => setQuickDraft({ ...quickDraft, priority: e.target.value as TaskPriority })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs">
+                                {Object.values(TaskPriority).map(priority => <option key={priority} value={priority}>{priority}</option>)}
+                              </select>
+                              <input type="date" value={quickDraft.dueDate || ''} onChange={(e) => setQuickDraft({ ...quickDraft, dueDate: e.target.value })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs" />
+                            </div>
+                            <select value={quickDraft.mainAssigneeId} onChange={(e) => setQuickDraft({ ...quickDraft, mainAssigneeId: e.target.value })} className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs">
+                              {availableUsers.map((user: User) => <option key={user.id} value={user.id}>{user.name}</option>)}
+                            </select>
+                            {(workspaceTags || []).length > 0 && (
+                              <div className="flex max-h-16 flex-wrap gap-1 overflow-y-auto">
+                                {(workspaceTags || []).map((tag: WorkspaceTag) => {
+                                  const active = quickDraft.tags.includes(tag.name);
+                                  return (
+                                    <button
+                                      key={tag.id}
+                                      onClick={() => setQuickDraft({
+                                        ...quickDraft,
+                                        tags: active ? quickDraft.tags.filter(t => t !== tag.name) : [...quickDraft.tags, tag.name],
+                                      })}
+                                      className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${active ? 'bg-white text-gray-800' : 'bg-transparent text-gray-500 opacity-70'}`}
+                                      style={{ borderColor: tag.color }}
+                                    >
+                                      {tag.name}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            <div className="flex justify-end gap-1">
+                              <button onClick={() => { setQuickEditTaskId(null); setQuickDraft(null); }} className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-gray-500 hover:bg-white">
+                                <X className="h-3.5 w-3.5" /> Cancelar
+                              </button>
+                              <button onClick={() => saveQuickEdit(task)} disabled={savingQuickEdit} className="inline-flex h-7 items-center gap-1 rounded-md bg-blue-600 px-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60">
+                                <Check className="h-3.5 w-3.5" /> {savingQuickEdit ? 'Salvando' : 'Salvar'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      {renderDropLine(status, index + 1)}
+                    </React.Fragment>
+                  );
+                })}
+
+                {columnTasks.length === 0 && (
+                  <div className="flex h-16 items-center justify-center rounded-lg border-2 border-dashed border-gray-200 text-xs text-gray-400">
+                    {boardTasks.length === 0 && (boardSearch || activeFilterCount > 0) ? 'Nada corresponde aos filtros' : 'Sem tarefas'}
+                  </div>
+                )}
+              </div>
+
+              {inlineCreateCol === status ? (
+                <div className="border-t border-gray-100 px-2 pb-2 pt-1">
+                  <input
+                    ref={inlineInputRef}
+                    type="text"
+                    value={inlineCreateTitle}
+                    onChange={e => setInlineCreateTitle(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') confirmInlineCreate(status);
+                      if (e.key === 'Escape') { setInlineCreateCol(null); setInlineCreateTitle(''); }
+                    }}
+                    onBlur={() => confirmInlineCreate(status)}
+                    placeholder="Nome da tarefa..."
+                    className="w-full rounded border border-blue-300 bg-white px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-blue-400"
+                  />
+                  <p className="mt-1 px-1 text-[10px] text-gray-400">Enter para salvar · Esc para cancelar</p>
+                </div>
+              ) : (
                 <button
-                  onClick={() => onQuickCreate?.({ status })}
-                  className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors"
-                  title="Adicionar tarefa"
+                  onClick={() => activeListId ? openInlineCreate(status) : onQuickCreate?.({ status })}
+                  className="flex w-full items-center gap-2 rounded-b-lg border-t border-gray-100 px-3 py-2.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-700"
                 >
                   <Icons.Plus />
+                  Adicionar Tarefa
                 </button>
-                <button className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-colors">
-                  <MoreHorizontal className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-
-            {/* ── Cards ── */}
-            <div className="flex flex-col gap-2 overflow-y-auto flex-1 custom-scrollbar px-2 pb-2 min-h-[60px]">
-              {columnTasks.map((task: Task) => {
-                const isDragging = draggingTaskId === task.id;
-                const listName = lists?.find((l: any) => l.id === task.listId)?.name;
-                const subtaskCount = tasks.filter((t: Task) => t.parentId === task.id).length;
-                const assignee = users?.find((u: User) => u.id === task.mainAssigneeId);
-                const secondaryAssignees = (task.secondaryAssigneeIds || [])
-                  .map((id: string) => users?.find((u: User) => u.id === id))
-                  .filter(Boolean);
-                const allAssignees = [assignee, ...secondaryAssignees].filter(Boolean);
-                const hasDueDate = task.dueDate && !isNaN(new Date(task.dueDate).getTime());
-                const isOverdue = hasDueDate && parseLocalDate(task.dueDate) < new Date();
-                const priorityFlag = PRIORITY_FLAG[task.priority];
-                const h = getTaskHealth(task);
-
-                return (
-                  <div
-                    key={task.id}
-                    draggable
-                    onDragStart={(e) => handleDragStart(e, task.id)}
-                    onDragEnd={handleDragEnd}
-                    onClick={() => onSelectTask(task.id)}
-                    className={`bg-white rounded-lg border border-gray-200 hover:border-gray-300 hover:shadow-sm cursor-grab active:cursor-grabbing transition-all group relative select-none ${
-                      isDragging ? 'opacity-30' : ''
-                    }`}
-                    style={{ borderLeftWidth: 3, borderLeftColor: statusColor }}
-                  >
-                    {/* Hover actions */}
-                    <div className="absolute top-2 right-2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onSelectTask(task.id); }}
-                        className="p-1 rounded text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
-                        title="Abrir tarefa"
-                      >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M7 3H3v10h10V9M9 3h4v4M13 3L7 9"/>
-                        </svg>
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onQuickCreate?.({ parentId: task.id, status, listId: task.listId }); }}
-                        className="p-1 rounded text-gray-400 hover:text-purple-500 hover:bg-purple-50 transition-colors"
-                        title="Adicionar subtarefa"
-                      >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
-                          <circle cx="8" cy="8" r="6"/><path d="M8 5v6M5 8h6"/>
-                        </svg>
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onStatusChange(task.id, columns[columns.length - 1]); }}
-                        className="p-1 rounded text-gray-400 hover:text-green-600 hover:bg-green-50 transition-colors"
-                        title="Marcar como concluída"
-                      >
-                        <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M3 8l3.5 3.5L13 4.5"/>
-                        </svg>
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onDuplicateTask?.(task); }}
-                        className="p-1 rounded text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
-                        title="Duplicar tarefa"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); onDeleteTask(task.id); }}
-                        className="p-1 rounded text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-                        title="Excluir"
-                      >
-                        <Icons.Trash />
-                      </button>
-                    </div>
-
-                    {/* Card body */}
-                    <div className="px-3 pt-3 pb-2">
-                      {/* Extension count badge */}
-                      {task.extensionCount > 0 && (
-                        <div className="flex items-center gap-1 text-[10px] text-red-500 font-bold mb-1">
-                          <Icons.Clock /> {task.extensionCount}x prorrogado
-                        </div>
-                      )}
-
-                      {/* Title */}
-                      <p className="text-sm font-semibold text-gray-800 leading-snug line-clamp-2 pr-8 mb-1 flex items-start gap-1">
-                        {task.dependencies?.some((d: any) => d.type === 'blocked_by') && (
-                          <span title="Tarefa bloqueada" className="shrink-0 mt-0.5">
-                            <AlertTriangleIcon className="w-3 h-3 text-amber-400" />
-                          </span>
-                        )}
-                        {task.title}
-                      </p>
-
-                      {/* Tags */}
-                      {(task.tags ?? []).length > 0 && (
-                        <div className="flex flex-wrap gap-1 mb-1.5">
-                          {(task.tags ?? []).map((tagName: string) => {
-                            const tag = (workspaceTags ?? []).find((t: WorkspaceTag) => t.name === tagName);
-                            if (!tag) return null;
-                            return <TagBadge key={tagName} name={tag.name} color={tag.color} size="xs" />;
-                          })}
-                        </div>
-                      )}
-
-                      {/* Context */}
-                      {listName && (
-                        <p className="text-[11px] text-gray-400 mb-2">Em {listName}</p>
-                      )}
-
-                      {/* Health indicator */}
-                      {h && (
-                        <div className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border mb-2 ${h.bg} ${h.text} ${h.border}`}>
-                          <span>{h.emoji}</span><span>{h.label}</span>
-                        </div>
-                      )}
-
-                      {/* Fields row */}
-                      <div className="flex items-center gap-3 mt-2">
-                        {/* Assignees */}
-                        <div className="flex -space-x-1.5 items-center" title={allAssignees.map((u: any) => u.name).join(', ') || 'Sem responsável'}>
-                          {allAssignees.length > 0 ? allAssignees.slice(0, 3).map((u: any) => (
-                            <img
-                              key={u.id}
-                              src={u.avatar || `https://picsum.photos/seed/${u.id}/100`}
-                              className="w-5 h-5 rounded-full border-2 border-white shadow-sm"
-                              alt={u.name}
-                            />
-                          )) : (
-                            <span className="text-gray-300 text-xs" title="Sem responsável">
-                              <svg className="w-4 h-4" viewBox="0 0 16 16" fill="currentColor"><path d="M8 8a3 3 0 100-6 3 3 0 000 6zm-4 6s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H4z"/></svg>
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Due date */}
-                        <div className={`flex items-center gap-0.5 text-[11px] font-medium ${isOverdue ? 'text-red-500' : 'text-gray-400'}`}>
-                          <Icons.Calendar />
-                          <span>{hasDueDate ? (() => { const [y,m,d] = (task.dueDate as string).split('-'); return `${d}/${m}/${y.slice(2)}`; })() : '—'}</span>
-                        </div>
-
-                        {/* Priority flag */}
-                        <div className="flex items-center gap-0.5 text-[11px] font-medium" style={{ color: priorityFlag?.color || '#94a3b8' }} title={priorityFlag?.label || 'Sem prioridade'}>
-                          <svg className="w-3 h-3" viewBox="0 0 12 12" fill="currentColor"><path d="M1 1h10l-3 5 3 5H1V1z"/></svg>
-                          <span>{priorityFlag?.label || '—'}</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Card footer — subtasks */}
-                    {subtaskCount > 0 && (
-                      <div className="px-3 py-1.5 border-t border-gray-100 flex items-center gap-1 text-[11px] text-gray-400">
-                        <svg className="w-3 h-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
-                          <path d="M2 3h8M2 6h6M2 9h4"/>
-                        </svg>
-                        {subtaskCount} subtarefa{subtaskCount !== 1 ? 's' : ''}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-              {/* Empty column placeholder */}
-              {columnTasks.length === 0 && (
-                <div className="h-16 rounded-lg border-2 border-dashed border-gray-200 flex items-center justify-center text-xs text-gray-400">
-                  Sem tarefas
-                </div>
               )}
             </div>
+          );
+        })}
 
-            {/* ── Footer — Adicionar Tarefa ── */}
-            {inlineCreateCol === status ? (
-              <div className="px-2 pb-2 pt-1 border-t border-gray-100">
-                <input
-                  ref={inlineInputRef}
-                  type="text"
-                  value={inlineCreateTitle}
-                  onChange={e => setInlineCreateTitle(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') confirmInlineCreate(status);
-                    if (e.key === 'Escape') { setInlineCreateCol(null); setInlineCreateTitle(''); }
-                  }}
-                  onBlur={() => confirmInlineCreate(status)}
-                  placeholder="Nome da tarefa…"
-                  className="w-full px-2 py-1.5 text-xs rounded border border-blue-300 focus:outline-none focus:ring-1 focus:ring-blue-400 bg-white"
-                />
-                <p className="text-[10px] text-gray-400 mt-1 px-1">Enter para salvar · Esc para cancelar</p>
-              </div>
-            ) : (
-              <button
-                onClick={() => activeListId ? openInlineCreate(status) : onQuickCreate?.({ status })}
-                className="flex items-center gap-2 w-full px-3 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-b-xl transition-colors border-t border-gray-100"
-              >
-                <svg className="w-3.5 h-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M7 2v10M2 7h10"/>
-                </svg>
-                Adicionar Tarefa
-              </button>
-            )}
-          </div>
-        );
-      })}
-
-      {/* ── Botão Adicionar Grupo ── */}
-      <div className="shrink-0 w-64">
-        <button
-          className="flex items-center gap-2 w-full px-4 py-3 rounded-xl border-2 border-dashed border-gray-200 text-sm text-gray-400 hover:border-gray-300 hover:text-gray-600 hover:bg-white transition-all"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M7 2v10M2 7h10"/>
-          </svg>
-          Adicionar grupo
-        </button>
+        <div className="w-64 shrink-0">
+          <button
+            className="flex w-full items-center gap-2 rounded-lg border-2 border-dashed border-gray-200 px-4 py-3 text-sm text-gray-400 transition-all hover:border-gray-300 hover:bg-white hover:text-gray-600"
+            title="Os grupos seguem os status configurados da lista"
+          >
+            <Icons.Plus />
+            Adicionar grupo
+          </button>
+        </div>
       </div>
     </div>
   );
