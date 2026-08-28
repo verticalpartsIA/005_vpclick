@@ -3704,6 +3704,8 @@ export default function App() {
                 tasks={filteredTasks}
                 onTaskClick={setSelectedTaskId}
                 onUpdateTask={handleUpdateTask}
+                users={adminUsers}
+                lists={lists}
               />
             )}
             {activeView === 'Inbox' && (
