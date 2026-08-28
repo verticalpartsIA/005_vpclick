@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
-  Filter, Layers, X, Pencil
+  Filter, Layers, X, Pencil, AlertTriangle, Link2
 } from "lucide-react";
-import { Task, User, List, TaskPriority } from '../../types';
+import { toast } from 'sonner';
+import { Task, User, List, TaskPriority, TaskDependency } from '../../types';
+import { fetchTaskDependenciesForTasks, addTaskDependency } from '../../lib/supabase';
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -52,6 +54,8 @@ interface GanttViewProps {
   onUpdateTask?: (taskId: string, updates: Partial<Task>) => Promise<boolean> | void;
   users?: User[];
   lists?: List[];
+  // Necessário só pra criar dependência (Codex_Gantt_03) — vira `created_by`.
+  currentUserId?: string;
 }
 
 // `startDate`/`dueDate` são "YYYY-MM-DD" (sem hora); `new Date(string)`
@@ -88,7 +92,7 @@ interface VisualRow {
   task?: Task;
 }
 
-export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpdateTask, users = [], lists = [] }) => {
+export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpdateTask, users = [], lists = [], currentUserId }) => {
   const [scale, setScale] = useState<GanttScale>('day');
   const [zoomLevel, setZoomLevel] = useState(SCALE_CONFIG.day.defaultZoom); // pixels per day
   const [viewStart, setViewStart] = useState(subDays(new Date(), 7));
@@ -104,15 +108,43 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     title: string; priority: TaskPriority; mainAssigneeId: string; status: string; startDate: string; dueDate: string;
   } | null>(null);
   const [savingQuickEdit, setSavingQuickEdit] = useState(false);
+  // Alternativa sem drag pra criar dependência (Codex_Gantt_03), embutida no
+  // mesmo popover de edição rápida — select de "depende de" + botão.
+  const [quickDependsOnId, setQuickDependsOnId] = useState('');
 
   // Sobrepõe otimisticamente as datas de tarefas recém-arrastadas/redimensio-
   // nadas, até `tasks` (prop, vinda do App) refletir a mesma tarefa já
   // salva — ou até a persistência falhar, quando é removido (rollback).
   const [dateOverrides, setDateOverrides] = useState<Record<string, { startDate: string; dueDate: string }>>({});
 
+  // Dependências das tarefas visíveis (Codex_Gantt_03/#154) — chave é
+  // `task_id` (a tarefa DEPENDENTE), valor são as dependências dela, no
+  // mesmo formato de fetchTaskDependencies (usado no modal de detalhe), só
+  // que buscadas em lote pra não fazer um round-trip por tarefa visível.
+  const [dependenciesByTask, setDependenciesByTask] = useState<Record<string, TaskDependency[]>>({});
+  const taskIdsKey = useMemo(() => tasks.map(t => t.id).sort().join(','), [tasks]);
+  useEffect(() => {
+    if (!taskIdsKey) { setDependenciesByTask({}); return; }
+    let cancelled = false;
+    fetchTaskDependenciesForTasks(taskIdsKey.split(','))
+      .then(deps => {
+        if (cancelled) return;
+        const byTask: Record<string, TaskDependency[]> = {};
+        deps.forEach(d => { (byTask[d.task_id] ||= []).push(d); });
+        setDependenciesByTask(byTask);
+      })
+      .catch(() => { if (!cancelled) toast.error('Não foi possível carregar as dependências do Gantt.'); });
+    return () => { cancelled = true; };
+  }, [taskIdsKey]);
+
   const barRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const dragStateRef = useRef<DragState | null>(null);
   const justDraggedRef = useRef<Set<string>>(new Set());
+
+  // Conexão de dependência arrastando de uma barra a outra (Codex_Gantt_03).
+  const connectStateRef = useRef<{ sourceTaskId: string; sourceX: number; sourceY: number } | null>(null);
+  const connectLineRef = useRef<SVGPathElement | null>(null);
+  const svgContainerRef = useRef<SVGSVGElement | null>(null);
 
   const handleScaleChange = (next: GanttScale) => {
     setScale(next);
@@ -247,6 +279,118 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     }).filter(b => !b.isOverlapping);
   }, [filteredTasks, viewStart, zoomLevel, dateOverrides]);
 
+  // Bloqueio (Codex_Gantt_04): só depende da dependência DIRETA da própria
+  // tarefa, então é confiável mesmo sem enxergar o grafo inteiro — ao
+  // contrário do caminho crítico abaixo, que precisa de todo o subgrafo
+  // visível pra não inventar um resultado.
+  const blockedTaskIds = useMemo(() => {
+    const blocked = new Set<string>();
+    Object.entries(dependenciesByTask).forEach(([taskId, deps]) => {
+      const isBlocked = deps.some(d => d.type === 'blocked_by' && d.depends_on_task && !isDoneLikeStatus(d.depends_on_task.status));
+      if (isBlocked) blocked.add(taskId);
+    });
+    return blocked;
+  }, [dependenciesByTask]);
+
+  // Caminho crítico (Codex_Gantt_04): caminho mais longo (em dias) através da
+  // cadeia de dependências "blocked_by" — igual ao CPM clássico (maior soma
+  // de durações num DAG). Só calcula se o subgrafo das tarefas visíveis for
+  // acíclico e todas as tarefas envolvidas tiverem início/fim válidos; caso
+  // contrário devolve `available: false` e a view não destaca nada em vez de
+  // arriscar um resultado inventado (restrição explícita da issue).
+  const criticalPath = useMemo(() => {
+    const durationByTask = new Map<string, number>();
+    taskBars.forEach(b => durationByTask.set(b.id, differenceInDays(b.end, b.start) + 1));
+
+    // Arestas predecessor -> sucessor, só entre tarefas com data válida.
+    const successors = new Map<string, string[]>();
+    const visibleIds = new Set(durationByTask.keys());
+    Object.entries(dependenciesByTask).forEach(([taskId, deps]) => {
+      if (!visibleIds.has(taskId)) return;
+      deps.forEach(d => {
+        if (d.type !== 'blocked_by' || !visibleIds.has(d.depends_on_id)) return;
+        const list = successors.get(d.depends_on_id) || [];
+        list.push(taskId);
+        successors.set(d.depends_on_id, list);
+      });
+    });
+
+    // Detecta ciclo (DFS com pilha de recursão) — se houver, não calcula.
+    const WHITE = 0, GRAY = 1, BLACK = 2;
+    const color = new Map<string, number>();
+    let hasCycle = false;
+    const dfs = (node: string) => {
+      color.set(node, GRAY);
+      for (const next of successors.get(node) || []) {
+        const c = color.get(next) ?? WHITE;
+        if (c === GRAY) { hasCycle = true; return; }
+        if (c === WHITE) dfs(next);
+        if (hasCycle) return;
+      }
+      color.set(node, BLACK);
+    };
+    for (const id of visibleIds) {
+      if (hasCycle) break;
+      if ((color.get(id) ?? WHITE) === WHITE) dfs(id);
+    }
+
+    if (hasCycle || visibleIds.size === 0) return { available: false, taskIds: new Set<string>() };
+
+    // Ordena topologicamente (Kahn) e propaga o maior término acumulado.
+    const inDegree = new Map<string, number>();
+    visibleIds.forEach(id => inDegree.set(id, 0));
+    successors.forEach(list => list.forEach(to => inDegree.set(to, (inDegree.get(to) || 0) + 1)));
+    const queue = Array.from(visibleIds).filter(id => (inDegree.get(id) || 0) === 0);
+    const longestEnd = new Map<string, number>();
+    const predecessor = new Map<string, string>();
+    visibleIds.forEach(id => longestEnd.set(id, durationByTask.get(id) || 0));
+    const order: string[] = [];
+    while (queue.length > 0) {
+      const node = queue.shift()!;
+      order.push(node);
+      for (const next of successors.get(node) || []) {
+        const candidate = (longestEnd.get(node) || 0) + (durationByTask.get(next) || 0);
+        if (candidate > (longestEnd.get(next) || 0)) {
+          longestEnd.set(next, candidate);
+          predecessor.set(next, node);
+        }
+        inDegree.set(next, (inDegree.get(next) || 0) - 1);
+        if (inDegree.get(next) === 0) queue.push(next);
+      }
+    }
+    if (order.length !== visibleIds.size) return { available: false, taskIds: new Set<string>() }; // não deveria acontecer sem ciclo, mas por segurança
+
+    let endNode = '';
+    let best = -1;
+    longestEnd.forEach((val, id) => { if (val > best) { best = val; endNode = id; } });
+    const path = new Set<string>();
+    let cursor: string | undefined = endNode;
+    while (cursor) { path.add(cursor); cursor = predecessor.get(cursor); }
+    // Caminho de uma tarefa só (sem nenhuma dependência de verdade) não é
+    // "crítico" no sentido do CPM — não há nada a destacar.
+    return { available: path.size > 1, taskIds: path.size > 1 ? path : new Set<string>() };
+  }, [taskBars, dependenciesByTask]);
+
+  // Ciclo transitivo: adicionar `dependentId.depends_on(newPredecessorId)`
+  // criaria um ciclo se `newPredecessorId` já depende (direta ou
+  // transitivamente) de `dependentId`. Restrito ao subgrafo carregado
+  // (tarefas hoje visíveis no Gantt) — mesma limitação prática de qualquer
+  // checagem client-side; o insert ainda pode falhar no servidor se o grafo
+  // real for maior, e nesse caso o erro só aparece via toast do catch.
+  const wouldCreateCycle = useCallback((dependentId: string, newPredecessorId: string): boolean => {
+    if (dependentId === newPredecessorId) return true;
+    const visited = new Set<string>();
+    const stack = [newPredecessorId];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (current === dependentId) return true;
+      if (visited.has(current)) continue;
+      visited.add(current);
+      (dependenciesByTask[current] || []).forEach(d => stack.push(d.depends_on_id));
+    }
+    return false;
+  }, [dependenciesByTask]);
+
   const persistDates = useCallback(async (taskId: string, newStart: Date, newEnd: Date) => {
     const startDateStr = formatLocalDate(newStart);
     const dueDateStr = formatLocalDate(newEnd);
@@ -339,6 +483,100 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     };
   }, [handleWindowMouseMove, handleWindowMouseUp]);
 
+  // Cria a dependência de verdade, com as mesmas checagens (ciclo/duplicata)
+  // usadas pelo drag — chamada tanto pelo drop do arrasto quanto pela
+  // alternativa acessível sem drag (select dentro do popover de edição
+  // rápida, ver #159/#153: "existe alternativa não baseada exclusivamente em
+  // drag").
+  const createDependency = useCallback(async (dependentTaskId: string, predecessorTaskId: string) => {
+    if (!currentUserId) return;
+    if (dependentTaskId === predecessorTaskId) return;
+    if ((dependenciesByTask[dependentTaskId] || []).some(d => d.depends_on_id === predecessorTaskId)) {
+      toast.error('Essa dependência já existe.');
+      return;
+    }
+    if (wouldCreateCycle(dependentTaskId, predecessorTaskId)) {
+      toast.error('Isso criaria um ciclo de dependências.');
+      return;
+    }
+    try {
+      const dep = await addTaskDependency(dependentTaskId, predecessorTaskId, 'blocked_by', currentUserId);
+      setDependenciesByTask(prev => ({ ...prev, [dependentTaskId]: [...(prev[dependentTaskId] || []), dep] }));
+      toast.success('Dependência criada.');
+    } catch {
+      toast.error('Erro ao criar dependência.');
+    }
+  }, [currentUserId, dependenciesByTask, wouldCreateCycle]);
+
+  const clearConnectLine = () => {
+    connectStateRef.current = null;
+    connectLineRef.current?.setAttribute('d', '');
+  };
+
+  const handleConnectMouseMove = useCallback((e: MouseEvent) => {
+    const connect = connectStateRef.current;
+    const svg = svgContainerRef.current;
+    if (!connect || !svg) return;
+    const rect = svg.getBoundingClientRect();
+    const x2 = e.clientX - rect.left;
+    const y2 = e.clientY - rect.top;
+    connectLineRef.current?.setAttribute('d', `M ${connect.sourceX} ${connect.sourceY} L ${x2} ${y2}`);
+  }, []);
+
+  const handleConnectMouseUp = useCallback((e: MouseEvent) => {
+    const connect = connectStateRef.current;
+    window.removeEventListener('mousemove', handleConnectMouseMove);
+    window.removeEventListener('mouseup', handleConnectMouseUp);
+    clearConnectLine();
+    if (!connect) return;
+
+    // Alvo = qualquer barra sob o cursor no momento do drop (não precisa
+    // acertar o ponto exato do outro lado — mais tolerante que exigir soltar
+    // em cima do "ponto" de destino).
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const targetEl = el?.closest('[data-gantt-task-id]') as HTMLElement | null;
+    const targetTaskId = targetEl?.dataset.ganttTaskId;
+    if (!targetTaskId || targetTaskId === connect.sourceTaskId) return;
+
+    // Arrastar do conector direito de A pro conector esquerdo de B: "A tem
+    // que terminar antes de B começar" — B fica com depends_on_id = A.
+    createDependency(targetTaskId, connect.sourceTaskId);
+  }, [handleConnectMouseMove, createDependency]);
+
+  // Esc cancela a conexão em andamento (item explícito da #153).
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && connectStateRef.current) {
+        window.removeEventListener('mousemove', handleConnectMouseMove);
+        window.removeEventListener('mouseup', handleConnectMouseUp);
+        clearConnectLine();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('mousemove', handleConnectMouseMove);
+      window.removeEventListener('mouseup', handleConnectMouseUp);
+    };
+  }, [handleConnectMouseMove, handleConnectMouseUp]);
+
+  const startConnect = (e: React.MouseEvent, task: Task) => {
+    if (!currentUserId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const bar = taskBars.find(b => b.id === task.id);
+    const svg = svgContainerRef.current;
+    if (!bar || !svg) return;
+    const rect = svg.getBoundingClientRect();
+    connectStateRef.current = {
+      sourceTaskId: task.id,
+      sourceX: e.clientX - rect.left,
+      sourceY: e.clientY - rect.top,
+    };
+    window.addEventListener('mousemove', handleConnectMouseMove);
+    window.addEventListener('mouseup', handleConnectMouseUp);
+  };
+
   const startDrag = (e: React.MouseEvent, task: Task, mode: DragMode) => {
     if (!onUpdateTask) return; // sem permissão/serviço de update, barra fica só clicável
     e.preventDefault();
@@ -382,6 +620,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   const closeQuickEdit = () => {
     setQuickEditTaskId(null);
     setQuickDraft(null);
+    setQuickDependsOnId('');
   };
 
   const saveQuickEdit = async () => {
@@ -624,6 +863,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
 
             {/* Dependency arrows */}
             <svg
+              ref={svgContainerRef}
               className="absolute inset-0 pointer-events-none z-0"
               style={{ width: timelineWidth, height: visualRows.length * 40 }}
             >
@@ -631,12 +871,15 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                 <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
                   <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8" />
                 </marker>
+                <marker id="arrowhead-critical" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+                  <polygon points="0 0, 10 3.5, 0 7" fill="#ef4444" />
+                </marker>
               </defs>
               {filteredTasks.flatMap((task) => {
-                const dependencies = (task as any).dependencies || [];
+                const dependencies = dependenciesByTask[task.id] || [];
                 const targetIdx = taskRowIndex.get(task.id);
                 if (targetIdx === undefined) return [];
-                return dependencies.map((dep: any) => {
+                return dependencies.map((dep) => {
                   const sourceIdx = taskRowIndex.get(dep.depends_on_id);
                   if (sourceIdx === undefined) return null;
 
@@ -652,20 +895,25 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
 
                   // Simple path: ┐ then ┘
                   const midX = x1 + (x2 - x1) / 2;
+                  const isCritical = criticalPath.available && criticalPath.taskIds.has(dep.depends_on_id) && criticalPath.taskIds.has(task.id);
 
                   return (
                     <path
                       key={`${dep.depends_on_id}-${task.id}`}
                       d={`M ${x1} ${y1} L ${midX} ${y1} L ${midX} ${y2} L ${x2} ${y2}`}
                       fill="none"
-                      stroke="#94a3b8"
-                      strokeWidth="1.5"
-                      markerEnd="url(#arrowhead)"
+                      stroke={isCritical ? '#ef4444' : '#94a3b8'}
+                      strokeWidth={isCritical ? 2 : 1.5}
+                      markerEnd={isCritical ? 'url(#arrowhead-critical)' : 'url(#arrowhead)'}
                       className="transition-all duration-300"
                     />
                   );
                 });
               })}
+              {/* Linha temporária enquanto o usuário arrasta de uma barra a
+                  outra pra criar uma dependência (Codex_Gantt_03) — atualizada
+                  via DOM direto (ver handleConnectMouseMove), sem re-render. */}
+              <path ref={connectLineRef} fill="none" stroke="#3b82f6" strokeWidth="2" strokeDasharray="4 3" />
             </svg>
 
             {/* Bars */}
@@ -681,14 +929,19 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                     {bar && (
                       <div
                         ref={(el) => { barRefs.current[task.id] = el; }}
+                        data-gantt-task-id={task.id}
+                        title={blockedTaskIds.has(task.id) ? 'Bloqueada por dependência pendente' : undefined}
                         className={`absolute h-6 rounded-md shadow-sm flex items-center px-2 text-[10px] text-white font-medium transition-[filter] hover:brightness-110
                           ${onUpdateTask ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}
                           ${task.priority === 'Urgente' ? 'bg-destructive' : 'bg-primary'}
+                          ${criticalPath.available && criticalPath.taskIds.has(task.id) ? 'ring-2 ring-red-500 ring-offset-1' : ''}
+                          ${blockedTaskIds.has(task.id) ? 'opacity-80 [background-image:repeating-linear-gradient(135deg,rgba(0,0,0,0.15)_0_6px,transparent_6px_12px)]' : ''}
                         `}
                         style={{ left: bar.left, width: bar.width }}
                         onMouseDown={(e) => startDrag(e, task, 'move')}
                         onClick={() => handleBarClick(task.id)}
                       >
+                         {blockedTaskIds.has(task.id) && <AlertTriangle className="w-2.5 h-2.5 shrink-0 mr-0.5" />}
                          <span className="truncate pointer-events-none">{task.title}</span>
 
                          {/* Handles de redimensionar (início/fim) — só aparecem com
@@ -709,9 +962,20 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                            </>
                          )}
 
-                         {/* Pontos de dependência (Codex_Gantt_03 — ainda decorativos) */}
+                         {/* Pontos de dependência (Codex_Gantt_03): o da direita
+                             inicia a conexão (arrastar até outra barra cria
+                             "esta tarefa bloqueia aquela"); o da esquerda é só
+                             indicativo (o alvo é a barra inteira, não precisa
+                             acertar o pixel do ponto). */}
                          <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100 pointer-events-none" />
-                         <div className="absolute -right-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100 pointer-events-none" />
+                         {currentUserId && (
+                           <div
+                             role="presentation"
+                             title="Arraste para criar uma dependência"
+                             className="absolute -right-1 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full bg-white border-2 border-primary opacity-0 group-hover:opacity-100 cursor-crosshair"
+                             onMouseDown={(e) => startConnect(e, task)}
+                           />
+                         )}
 
                          {/* Edição rápida (Codex_Gantt_09): botão só aparece no
                              hover, acima da barra, pra não competir com os
@@ -792,6 +1056,39 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                                    {quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate && (
                                      <p className="text-[11px] text-destructive">Início não pode ser depois do fim.</p>
                                    )}
+
+                                   {/* Alternativa sem drag pra criar dependência
+                                       (Codex_Gantt_03) — o mesmo resultado de
+                                       arrastar o conector direito da barra. */}
+                                   {currentUserId && (
+                                     <div className="border-t pt-2 space-y-1.5">
+                                       <p className="text-[11px] font-semibold text-muted-foreground flex items-center gap-1">
+                                         <Link2 className="w-3 h-3" /> Depende de
+                                       </p>
+                                       <div className="flex gap-1.5">
+                                         <select
+                                           value={quickDependsOnId}
+                                           onChange={(e) => setQuickDependsOnId(e.target.value)}
+                                           className="flex-1 h-7 text-xs border rounded-md px-1.5"
+                                         >
+                                           <option value="">Selecionar tarefa…</option>
+                                           {tasks
+                                             .filter(t => t.id !== quickEditTaskId && !(dependenciesByTask[quickEditTaskId!] || []).some(d => d.depends_on_id === t.id))
+                                             .map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
+                                         </select>
+                                         <Button
+                                           size="sm"
+                                           variant="outline"
+                                           className="h-7 text-xs shrink-0"
+                                           disabled={!quickDependsOnId}
+                                           onClick={() => { createDependency(quickEditTaskId!, quickDependsOnId); setQuickDependsOnId(''); }}
+                                         >
+                                           Vincular
+                                         </Button>
+                                       </div>
+                                     </div>
+                                   )}
+
                                    <div className="flex justify-end gap-2 pt-1">
                                      <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={closeQuickEdit}>Cancelar</Button>
                                      <Button size="sm" className="h-7 text-xs" disabled={savingQuickEdit} onClick={saveQuickEdit}>

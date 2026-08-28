@@ -82,6 +82,24 @@ export async function fetchTaskDependencies(taskId: string): Promise<TaskDepende
   return (data ?? []) as TaskDependency[];
 }
 
+// Versão em lote de fetchTaskDependencies — usada pelo Gantt (Codex_Gantt_03/
+// #154), que precisa das dependências de dezenas/centenas de tarefas visíveis
+// de uma vez (setas + bloqueio + caminho crítico). Uma chamada por tarefa
+// vista faria N round-trips; aqui é sempre um só `IN (...)`.
+export async function fetchTaskDependenciesForTasks(taskIds: string[]): Promise<TaskDependency[]> {
+  if (taskIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from('task_dependencies')
+    .select(`
+      *,
+      depends_on_task:tasks!depends_on_id (id, title, status, priority)
+    `)
+    .in('task_id', taskIds);
+
+  if (error) throw error;
+  return (data ?? []) as TaskDependency[];
+}
+
 export async function addTaskDependency(
   taskId: string,
   dependsOnId: string,
