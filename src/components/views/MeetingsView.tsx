@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
 import { Meeting, MeetingActionItem, MeetingRoom, List, User, UserRole } from '../../types';
@@ -105,7 +106,19 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Reunião aberta ↔ `?meetingId=` — deep link/refresh reabrem na mesma
+  // reunião. Usa `replace` (não `push`): trocar de reunião não precisa virar
+  // uma entrada própria no histórico de voltar/avançar do navegador.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get('meetingId'));
+  useEffect(() => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (selectedId) next.set('meetingId', selectedId); else next.delete('meetingId');
+      return next;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newTitle, setNewTitle] = useState('');

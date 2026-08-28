@@ -196,6 +196,13 @@ function computeNavPath(
     params.delete('tab');
   }
 
+  // `meetingId` é lido/escrito pela própria MeetingsView (useSearchParams) —
+  // só é limpo aqui quando o usuário sai da view, pra não vazar pra outras
+  // rotas (ex: navegar pra /gantt não deveria carregar ?meetingId= a tiracolo).
+  if (state.activeView !== 'Meetings') {
+    params.delete('meetingId');
+  }
+
   if (state.activeView === 'Doc') {
     const search = params.toString();
     return `/doc${state.activeDocId ? `/${state.activeDocId}` : ''}${search ? `?${search}` : ''}`;
