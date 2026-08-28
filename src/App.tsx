@@ -1877,19 +1877,19 @@ export default function App() {
     }
   }, [belongsToMyTasks]);
 
-  const handleUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>) => {
+  const handleUpdateTask = useCallback(async (taskId: string, updates: Partial<Task>): Promise<boolean> => {
     const task = tasks.find(t => t.id === taskId);
-    if (!task) return;
+    if (!task) return false;
 
     if (updates.status && isDoneLikeStatus(updates.status)) {
       const blockReason = await getTaskCloseBlockReason(taskId);
       if (blockReason) {
         toast.warning(blockReason);
-        return;
+        return false;
       }
     }
 
-    updateTask({ ...task, ...updates });
+    return updateTask({ ...task, ...updates });
   }, [tasks, updateTask]);
 
   // --- Bulk Actions (T701) ---
@@ -3703,6 +3703,7 @@ export default function App() {
               <GanttView
                 tasks={filteredTasks}
                 onTaskClick={setSelectedTaskId}
+                onUpdateTask={handleUpdateTask}
               />
             )}
             {activeView === 'Inbox' && (

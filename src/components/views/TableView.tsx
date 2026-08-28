@@ -59,7 +59,7 @@ interface TableViewProps {
   currentUser?: User;
   statusGroups?: StatusGroup[];
   onTaskClick: (taskId: string) => void;
-  onUpdateTask: (taskId: string, updates: Partial<Task>) => void | Promise<void>;
+  onUpdateTask: (taskId: string, updates: Partial<Task>) => void | boolean | Promise<void | boolean>;
   onUpdateFieldValue: (fieldId: string, taskId: string, value: any) => void | Promise<void>;
   onCreateTask?: (task: Partial<Task>) => void | Promise<void>;
   onDeleteTask?: (taskId: string) => void;
