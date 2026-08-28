@@ -1560,7 +1560,9 @@ export default function App() {
         console.error('Erro ao carregar Minhas Tarefas:', err);
         if (requestId === loadTasksRequestIdRef.current && !loadTasksRetriedRef.current) {
           loadTasksRetriedRef.current = true;
-          setTimeout(() => { loadTasks(); }, 1500);
+          // Via loadTasksRef (não loadTasks() direto): se o escopo mudou durante
+          // a espera do retry, essa closure ficaria presa no escopo antigo.
+          setTimeout(() => { loadTasksRef.current?.(); }, 1500);
         } else {
           loadTasksRetriedRef.current = false;
           toast.error('Não foi possível carregar suas tarefas. Tente novamente.');
@@ -1592,13 +1594,20 @@ export default function App() {
 
       if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
       loadTasksCommittedIdRef.current = requestId;
-      loadTasksRetriedRef.current = false;
       setTasks(prev => firstRows
         .map(taskRepo.mapRowToTaskShell)
         .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
       setIsTasksLoading(false);
 
-      if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) return;
+      if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) {
+        // Só reseta o retry quando a carga terminou de verdade (única página) —
+        // resetar logo após a 1ª página, com mais páginas ainda por vir, deixava
+        // uma falha persistente em fetchRemainingTaskRows* reagendar retry pra
+        // sempre (a cada volta a 1ª página carregava OK e zerava a flag nesse
+        // ponto de novo) sem nunca chegar no toast de erro terminal.
+        loadTasksRetriedRef.current = false;
+        return;
+      }
 
       const remainingRows = activeListId
         ? await taskRepo.fetchRemainingTaskRowsByListId(activeListId)
@@ -1608,11 +1617,16 @@ export default function App() {
       setTasks(prev => [...firstRows, ...remainingRows]
         .map(taskRepo.mapRowToTaskShell)
         .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
+      loadTasksRetriedRef.current = false;
     } catch (err) {
       console.error('Erro ao carregar tarefas:', err);
       if (requestId === loadTasksRequestIdRef.current && !loadTasksRetriedRef.current) {
         loadTasksRetriedRef.current = true;
-        setTimeout(() => { loadTasks(); }, 1500);
+        // Via loadTasksRef (não loadTasks() direto): se o usuário navegar para
+        // outro escopo durante a espera do retry, essa closure antiga ainda
+        // apontaria pro escopo velho e poderia sobrescrever um resultado novo
+        // e bom com dado do escopo errado.
+        setTimeout(() => { loadTasksRef.current?.(); }, 1500);
       } else {
         loadTasksRetriedRef.current = false;
         toast.error('Não foi possível carregar as tarefas. Tente novamente.');
