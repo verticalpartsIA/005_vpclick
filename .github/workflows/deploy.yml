@@ -136,7 +136,7 @@ jobs:
           set -e
           SITE='https://vpclick.vpsistema.com'
           echo "Buscando $SITE/index.html publicado..."
-          curl -fsS -H 'Cache-Control: no-cache' "$SITE/?cachebust=$GITHUB_RUN_ID" -o published.html
+          curl --http1.1 --retry 3 --retry-delay 2 --retry-all-errors -fsS -H 'Cache-Control: no-cache' "$SITE/?cachebust=$GITHUB_RUN_ID" -o published.html
 
           ASSETS=$(grep -oE '(src|href)="/assets/[^"]+"' published.html | sed 's/.*"\(.*\)"/\1/' | sort -u)
           if [ -z "$ASSETS" ]; then
@@ -153,7 +153,7 @@ jobs:
           # disfarçado de bundle é detectado na hora em vez de passar batido.
           FALHAS=0
           for asset in $ASSETS; do
-            LINHA=$(curl -s -o /dev/null -w '%{http_code} %{content_type}' "$SITE$asset")
+            LINHA=$(curl --http1.1 --retry 3 --retry-delay 2 --retry-all-errors -s -o /dev/null -w '%{http_code} %{content_type}' "$SITE$asset")
             CODE=${LINHA%% *}
             TIPO=${LINHA#* }
             if [ "$CODE" != "200" ]; then
