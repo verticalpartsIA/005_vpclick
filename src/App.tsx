@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useNavigate, useLocation, useNavigationType } from 'react-router-dom';
 import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy, ArrowUpDown } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
@@ -101,6 +102,109 @@ interface NavigationScope {
   type: ScopeType;
   id: string | null;
   name: string;
+}
+
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks';
+
+// --- Navegação ↔ URL ---------------------------------------------------------
+// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
+// path próprio (`/gantt`, `/kanban`...); a lista/pasta/espaço ativo e o filtro
+// "Minhas Tarefas" (Atribuídas a mim) viajam como query params por cima desse
+// path — mesmo mecanismo que o `?taskId=` já usava, só que agora cobrindo view
+// e escopo também. Views "standalone" (Inbox, Reuniões etc.) e Doc não têm
+// conceito de escopo, então viram só um path fixo (Doc leva o id da página).
+const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard'];
+
+const VIEW_TO_SLUG: Record<ActiveView, string> = {
+  Dashboard: '', // path canônico é a raiz ("/")
+  List: 'list',
+  Kanban: 'kanban',
+  Calendar: 'calendar',
+  Gantt: 'gantt',
+  Table: 'table',
+  Admin: 'admin',
+  Doc: 'doc',
+  Inbox: 'inbox',
+  Replies: 'replies',
+  AssignedComments: 'assigned-comments',
+  Meetings: 'meetings',
+  MyTasks: 'my-tasks',
+  Reminders: 'reminders',
+  RecentTasks: 'recent-tasks',
+};
+
+const SLUG_TO_VIEW: Record<string, ActiveView> = Object.fromEntries(
+  Object.entries(VIEW_TO_SLUG).filter(([, slug]) => slug).map(([view, slug]) => [slug, view as ActiveView])
+);
+// Aceita "/dashboard" digitado manualmente, mesmo o path canônico sendo "/".
+SLUG_TO_VIEW.dashboard = 'Dashboard';
+
+interface ParsedNav {
+  view: ActiveView;
+  docId: string | null;
+  listId: string | null;
+  scopeType: ScopeType;
+  scopeId: string | null;
+  mine: boolean;
+}
+
+// URL → estado de navegação. Usada tanto na carga inicial (deep link/refresh)
+// quanto quando o usuário navega pelo botão voltar/avançar do navegador.
+function parseNavPath(pathname: string, search: string): ParsedNav {
+  const segments = pathname.split('/').filter(Boolean);
+  if (segments[0] === 'doc') {
+    return { view: 'Doc', docId: segments[1] || null, listId: null, scopeType: 'global', scopeId: null, mine: false };
+  }
+  const view = SLUG_TO_VIEW[segments[0] || ''] || 'Dashboard';
+  const params = new URLSearchParams(search);
+  const listId = params.get('listId');
+  const scopeParam = params.get('scope');
+  const scopeId = params.get('scopeId');
+  const mine = params.get('mine') === '1';
+  const scopeType: ScopeType = (scopeParam === 'space' || scopeParam === 'folder') && scopeId ? scopeParam : 'global';
+  return {
+    view,
+    docId: null,
+    listId: WORKSPACE_VIEWS.includes(view) ? listId : null,
+    scopeType,
+    scopeId: scopeType === 'global' ? null : scopeId,
+    mine: WORKSPACE_VIEWS.includes(view) && mine,
+  };
+}
+
+// Estado de navegação → URL. `currentSearch` carrega params que não são de
+// navegação (hoje só `taskId`, do deep-link de tarefa) e é preservado por cima.
+function computeNavPath(
+  state: { activeView: ActiveView; activeListId: string | null; activeScope: NavigationScope; activeDocId: string | null },
+  currentSearch: string,
+): string {
+  const params = new URLSearchParams(currentSearch);
+  params.delete('listId');
+  params.delete('scope');
+  params.delete('scopeId');
+  params.delete('mine');
+
+  if (state.activeView === 'Doc') {
+    const search = params.toString();
+    return `/doc${state.activeDocId ? `/${state.activeDocId}` : ''}${search ? `?${search}` : ''}`;
+  }
+
+  const slug = VIEW_TO_SLUG[state.activeView] ?? '';
+  if (WORKSPACE_VIEWS.includes(state.activeView)) {
+    if (state.activeListId) {
+      params.set('listId', state.activeListId);
+    } else if (state.activeScope.type === 'space' && state.activeScope.id) {
+      params.set('scope', 'space');
+      params.set('scopeId', state.activeScope.id);
+    } else if (state.activeScope.type === 'folder' && state.activeScope.id) {
+      params.set('scope', 'folder');
+      params.set('scopeId', state.activeScope.id);
+    } else if (state.activeScope.name === 'Minhas Tarefas') {
+      params.set('mine', '1');
+    }
+  }
+  const search = params.toString();
+  return `${slug ? `/${slug}` : '/'}${search ? `?${search}` : ''}`;
 }
 
 type DuplicateTaskBooleanOption = Exclude<keyof DuplicateTaskOptions, 'title' | 'listId'>;
@@ -1149,12 +1253,21 @@ export default function App() {
     localStorage.setItem("vp_column_order", JSON.stringify(columnOrderByList));
   }, [columnOrderByList]);
 
+  // Navegação (view/escopo/lista) ↔ URL — ver parseNavPath/computeNavPath.
+  // `navigate`/`location`/`navigationType` alimentam os efeitos de sincronização
+  // logo após handleNavigate; `initialNav` só é lido pelos inicializadores
+  // preguiçosos de estado abaixo (roda uma vez, na primeira renderização).
+  const navigate = useNavigate();
+  const location = useLocation();
+  const navigationType = useNavigationType();
+  const initialNav = parseNavPath(window.location.pathname, window.location.search);
+
   // Lista ativa (selecionada na sidebar) — afeta filtro e configuração de colunas por lista
-  const [activeListId, setActiveListId] = useState<string | null>(null);
+  const [activeListId, setActiveListId] = useState<string | null>(() => initialNav.listId);
 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
-  const [activeView, setActiveView] = useState<'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks'>('Dashboard');
+  const [activeView, setActiveView] = useState<ActiveView>(() => initialNav.view);
   const [isCommandOpen, setIsCommandOpen] = useState(false);
   const [isAutomationModalOpen, setIsAutomationModalOpen] = useState(false);
   const [automationListId, setAutomationListId] = useState<string | null>(null);
@@ -1173,8 +1286,12 @@ export default function App() {
     document.addEventListener("keydown", down);
     return () => document.removeEventListener("keydown", down);
   }, []);
-  const [activeDocId, setActiveDocId] = useState<string | null>(null);
-  const [activeScope, setActiveScope] = useState<NavigationScope>({ type: 'global', id: null, name: 'Dashboard' });
+  const [activeDocId, setActiveDocId] = useState<string | null>(() => initialNav.docId);
+  const [activeScope, setActiveScope] = useState<NavigationScope>(() => ({
+    type: initialNav.scopeType,
+    id: initialNav.scopeId,
+    name: initialNav.mine ? 'Minhas Tarefas' : (initialNav.scopeType === 'global' ? 'Dashboard' : ''),
+  }));
 
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [openMeetingId, setOpenMeetingId] = useState<string | null>(null);
@@ -2731,6 +2848,42 @@ export default function App() {
       setActiveView('Dashboard');
     }
   };
+
+  // Saída: reflete view/lista/escopo atuais na URL (deep link, refresh e
+  // compartilhamento de link) via history.pushState — cada navegação vira uma
+  // entrada no histórico, então voltar/avançar do navegador funciona sem
+  // precisar tocar nos ~40 pontos do arquivo que chamam setActiveView/
+  // setActiveListId/setActiveScope diretamente. Não inclui `location`/`navigate`
+  // nas deps de propósito: só deve rodar quando o ESTADO de navegação muda, não
+  // a cada mudança de URL (senão loopa com o efeito de entrada abaixo).
+  useEffect(() => {
+    const targetPath = computeNavPath({ activeView, activeListId, activeScope, activeDocId }, location.search);
+    const currentPath = `${location.pathname}${location.search}`;
+    if (targetPath !== currentPath) {
+      navigate(targetPath);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView, activeListId, activeScope.type, activeScope.id, activeScope.name, activeDocId]);
+
+  // Entrada: aplica a URL de volta ao estado só quando ela mudou por ação do
+  // navegador (voltar/avançar, ou um link colado na barra) — `navigationType`
+  // do react-router distingue isso de uma navegação feita pelo efeito de saída
+  // acima (que usa PUSH). Sem esse filtro, os dois efeitos ficariam disputando
+  // entre si a cada navegação.
+  useEffect(() => {
+    if (navigationType !== 'POP') return;
+    const parsed = parseNavPath(location.pathname, location.search);
+    setActiveView(parsed.view);
+    setActiveListId(parsed.listId);
+    setActiveDocId(parsed.docId);
+    const resolvedName = parsed.scopeType === 'space'
+      ? spaces.find((s: Space) => s.id === parsed.scopeId)?.name ?? ''
+      : parsed.scopeType === 'folder'
+        ? folders.find((f: Folder) => f.id === parsed.scopeId)?.name ?? ''
+        : parsed.mine ? 'Minhas Tarefas' : 'Dashboard';
+    setActiveScope({ type: parsed.scopeType, id: parsed.scopeId, name: resolvedName });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname, location.search, navigationType]);
 
   const openAdminPanel = () => {
     setIsUserMenuOpen(false);
