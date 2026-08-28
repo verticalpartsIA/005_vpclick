@@ -1,25 +1,65 @@
-import React, { useMemo, useState } from 'react';
-import { 
-  ChevronLeft, ChevronRight, ZoomIn, ZoomOut, 
-  Maximize2, Filter, Settings2, Plus, ArrowRight
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
+  Filter
 } from "lucide-react";
 import { Task } from '../../types';
 import { Button } from "@/components/ui/button";
-import { 
-  format, startOfToday, addDays, subDays, 
-  differenceInDays, startOfWeek, endOfWeek, 
-  eachDayOfInterval, isWeekend, isToday 
+import {
+  format, addDays, subDays,
+  differenceInDays, eachDayOfInterval, isWeekend, isToday
 } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
 interface GanttViewProps {
   tasks: Task[];
   onTaskClick: (taskId: string) => void;
+  // Mesmo formato de handleUpdateTask (App.tsx) usado pela TableView, só que
+  // aqui o resultado importa: em falha precisamos desfazer a posição/tamanho
+  // da barra que já tinha sido movida/redimensionada na tela (ver
+  // dateOverrides abaixo — item 6 do Codex_Gantt_01/02: "restaurar as datas
+  // anteriores").
+  onUpdateTask?: (taskId: string, updates: Partial<Task>) => Promise<boolean> | void;
 }
 
-export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
+// `startDate`/`dueDate` são "YYYY-MM-DD" (sem hora); `new Date(string)`
+// interpreta isso como meia-noite UTC, que em fusos atrás de UTC cai no dia
+// anterior ao comparar com datas locais. Parseamos/formatamos manualmente
+// para não deslocar um dia (mesmo cuidado do resto do app, ver App.tsx).
+function parseLocalDate(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+function formatLocalDate(date: Date): string {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+type DragMode = 'move' | 'resize-left' | 'resize-right';
+
+interface DragState {
+  taskId: string;
+  mode: DragMode;
+  startX: number;
+  originalStart: Date;
+  originalEnd: Date;
+  currentDeltaDays: number;
+}
+
+export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpdateTask }) => {
   const [zoomLevel, setZoomLevel] = useState(30); // pixels per day
-  const [viewStart, setViewStart] = useState(subDays(startOfToday(), 7));
+  const [viewStart, setViewStart] = useState(subDays(new Date(), 7));
+
+  // Sobrepõe otimisticamente as datas de tarefas recém-arrastadas/redimensio-
+  // nadas, até `tasks` (prop, vinda do App) refletir a mesma tarefa já
+  // salva — ou até a persistência falhar, quando é removido (rollback).
+  const [dateOverrides, setDateOverrides] = useState<Record<string, { startDate: string; dueDate: string }>>({});
+
+  const barRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const dragStateRef = useRef<DragState | null>(null);
+  const justDraggedRef = useRef<Set<string>>(new Set());
 
   const timelineDays = useMemo(() => {
     return eachDayOfInterval({
@@ -29,29 +69,147 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
   }, [viewStart]);
 
   const taskBars = useMemo(() => {
-    // task.startDate/dueDate são "YYYY-MM-DD" (sem hora); `new Date(string)`
-    // interpreta isso como meia-noite UTC, que em fusos atrás de UTC cai no
-    // dia anterior ao comparar com `viewStart` (local). Parseamos manualmente.
-    const parseLocalDate = (dateStr: string) => {
-      const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
-      return new Date(y, m - 1, d);
-    };
     return tasks.filter(t => t.startDate || t.dueDate).map(task => {
-      const start = task.startDate ? parseLocalDate(task.startDate) : parseLocalDate(task.dueDate!);
-      const end = task.dueDate ? parseLocalDate(task.dueDate) : parseLocalDate(task.startDate!);
-      
+      const override = dateOverrides[task.id];
+      const startStr = override?.startDate ?? task.startDate;
+      const endStr = override?.dueDate ?? task.dueDate;
+      const start = startStr ? parseLocalDate(startStr) : parseLocalDate(endStr!);
+      const end = endStr ? parseLocalDate(endStr) : parseLocalDate(startStr!);
+
       const left = differenceInDays(start, viewStart) * zoomLevel;
       const duration = Math.max(1, differenceInDays(end, start) + 1);
       const width = duration * zoomLevel;
 
       return {
         ...task,
+        start,
+        end,
         left,
         width,
         isOverlapping: left < 0 && (left + width) < 0
       };
     }).filter(b => !b.isOverlapping);
-  }, [tasks, viewStart, zoomLevel]);
+  }, [tasks, viewStart, zoomLevel, dateOverrides]);
+
+  const persistDates = useCallback(async (taskId: string, newStart: Date, newEnd: Date) => {
+    const startDateStr = formatLocalDate(newStart);
+    const dueDateStr = formatLocalDate(newEnd);
+
+    // Otimista: aplica local antes de esperar a persistência (o próximo
+    // render já mostra a barra na posição/tamanho final).
+    setDateOverrides(prev => ({ ...prev, [taskId]: { startDate: startDateStr, dueDate: dueDateStr } }));
+
+    if (!onUpdateTask) return;
+    const ok = await onUpdateTask(taskId, { startDate: startDateStr, dueDate: dueDateStr });
+    if (ok === false) {
+      // Falha de persistência: restaura as datas anteriores (remove o
+      // override — a barra volta a refletir `task.startDate/dueDate`, que
+      // nunca chegaram a mudar no servidor nem no estado do App).
+      setDateOverrides(prev => {
+        const next = { ...prev };
+        delete next[taskId];
+        return next;
+      });
+    }
+  }, [onUpdateTask]);
+
+  const handleWindowMouseMove = useCallback((e: MouseEvent) => {
+    const drag = dragStateRef.current;
+    if (!drag) return;
+    const deltaPixels = e.clientX - drag.startX;
+    const deltaDays = Math.round(deltaPixels / zoomLevel);
+    if (deltaDays === drag.currentDeltaDays) return;
+    drag.currentDeltaDays = deltaDays;
+
+    const el = barRefs.current[drag.taskId];
+    if (!el) return;
+
+    if (drag.mode === 'move') {
+      el.style.transform = `translateX(${deltaDays * zoomLevel}px)`;
+    } else if (drag.mode === 'resize-right') {
+      const newEnd = addDays(drag.originalEnd, deltaDays);
+      const clampedEnd = newEnd < drag.originalStart ? drag.originalStart : newEnd;
+      const newDuration = Math.max(1, differenceInDays(clampedEnd, drag.originalStart) + 1);
+      el.style.width = `${newDuration * zoomLevel}px`;
+    } else if (drag.mode === 'resize-left') {
+      const newStart = addDays(drag.originalStart, deltaDays);
+      const clampedStart = newStart > drag.originalEnd ? drag.originalEnd : newStart;
+      const newDuration = Math.max(1, differenceInDays(drag.originalEnd, clampedStart) + 1);
+      el.style.width = `${newDuration * zoomLevel}px`;
+      el.style.transform = `translateX(${differenceInDays(clampedStart, drag.originalStart) * zoomLevel}px)`;
+    }
+  }, [zoomLevel]);
+
+  const handleWindowMouseUp = useCallback(() => {
+    const drag = dragStateRef.current;
+    window.removeEventListener('mousemove', handleWindowMouseMove);
+    window.removeEventListener('mouseup', handleWindowMouseUp);
+    dragStateRef.current = null;
+    if (!drag) return;
+
+    const el = barRefs.current[drag.taskId];
+    if (el) {
+      el.style.transform = '';
+      el.style.width = '';
+    }
+
+    if (drag.currentDeltaDays === 0) return; // clique simples, sem arrastar de verdade
+
+    justDraggedRef.current.add(drag.taskId);
+
+    let newStart = drag.originalStart;
+    let newEnd = drag.originalEnd;
+    if (drag.mode === 'move') {
+      newStart = addDays(drag.originalStart, drag.currentDeltaDays);
+      newEnd = addDays(drag.originalEnd, drag.currentDeltaDays);
+    } else if (drag.mode === 'resize-right') {
+      newEnd = addDays(drag.originalEnd, drag.currentDeltaDays);
+      if (newEnd < newStart) newEnd = newStart;
+    } else if (drag.mode === 'resize-left') {
+      newStart = addDays(drag.originalStart, drag.currentDeltaDays);
+      if (newStart > newEnd) newStart = newEnd;
+    }
+
+    persistDates(drag.taskId, newStart, newEnd);
+  }, [handleWindowMouseMove, persistDates]);
+
+  // Segurança: se o componente desmontar (trocou de view) no meio de um
+  // arrasto, não deixa listeners de window vivos apontando pra um bar
+  // desmontado.
+  useEffect(() => {
+    return () => {
+      window.removeEventListener('mousemove', handleWindowMouseMove);
+      window.removeEventListener('mouseup', handleWindowMouseUp);
+    };
+  }, [handleWindowMouseMove, handleWindowMouseUp]);
+
+  const startDrag = (e: React.MouseEvent, task: Task, mode: DragMode) => {
+    if (!onUpdateTask) return; // sem permissão/serviço de update, barra fica só clicável
+    e.preventDefault();
+    e.stopPropagation();
+    const bar = taskBars.find(b => b.id === task.id);
+    if (!bar) return;
+    dragStateRef.current = {
+      taskId: task.id,
+      mode,
+      startX: e.clientX,
+      originalStart: bar.start,
+      originalEnd: bar.end,
+      currentDeltaDays: 0,
+    };
+    window.addEventListener('mousemove', handleWindowMouseMove);
+    window.addEventListener('mouseup', handleWindowMouseUp);
+  };
+
+  const handleBarClick = (taskId: string) => {
+    // Suprime o clique que "sobra" logo depois de um arrasto de verdade —
+    // sem isso, soltar a barra também abria o modal de detalhe da tarefa.
+    if (justDraggedRef.current.has(taskId)) {
+      justDraggedRef.current.delete(taskId);
+      return;
+    }
+    onTaskClick(taskId);
+  };
 
   return (
     <div className="flex flex-col h-full bg-background overflow-hidden">
@@ -61,7 +219,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
           <Button variant="outline" size="sm" onClick={() => setViewStart(subDays(viewStart, 7))}>
             <ChevronLeft className="w-4 h-4" />
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setViewStart(new Date())}>Hoje</Button>
+          <Button variant="outline" size="sm" onClick={() => setViewStart(subDays(new Date(), 7))}>Hoje</Button>
           <Button variant="outline" size="sm" onClick={() => setViewStart(addDays(viewStart, 7))}>
             <ChevronRight className="w-4 h-4" />
           </Button>
@@ -69,7 +227,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
             {format(viewStart, 'MMMM yyyy', { locale: ptBR })}
           </span>
         </div>
-        
+
         <div className="flex items-center gap-2">
            <div className="flex items-center bg-muted rounded-lg p-1">
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setZoomLevel(Math.max(15, zoomLevel - 5))}>
@@ -104,7 +262,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
           {/* Timeline Header */}
           <div className="h-16 border-b flex sticky top-0 bg-background z-20" style={{ width: timelineDays.length * zoomLevel }}>
             {timelineDays.map(day => (
-              <div key={day.toISOString()} 
+              <div key={day.toISOString()}
                 className={`flex-shrink-0 border-r text-[10px] flex flex-col items-center justify-center
                   ${isWeekend(day) ? 'bg-muted/30' : ''}
                   ${isToday(day) ? 'bg-primary/5' : ''}
@@ -121,16 +279,16 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
             {/* Grid Lines */}
             <div className="absolute inset-0 flex pointer-events-none">
                {timelineDays.map(day => (
-                 <div key={`line-${day.toISOString()}`} 
+                 <div key={`line-${day.toISOString()}`}
                     className={`border-r h-full ${isWeekend(day) ? 'bg-muted/10' : ''} ${isToday(day) ? 'border-primary/20' : ''}`}
-                    style={{ width: zoomLevel }} 
+                    style={{ width: zoomLevel }}
                  />
                ))}
             </div>
 
             {/* Dependency arrows */}
-            <svg 
-              className="absolute inset-0 pointer-events-none z-0" 
+            <svg
+              className="absolute inset-0 pointer-events-none z-0"
               style={{ width: timelineDays.length * zoomLevel, height: tasks.length * 40 }}
             >
               <defs>
@@ -156,7 +314,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
 
                   // Simple path: ┐ then ┘
                   const midX = x1 + (x2 - x1) / 2;
-                  
+
                   return (
                     <path
                       key={`${dep.depends_on_id}-${task.id}`}
@@ -174,31 +332,50 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick }) => {
 
             {/* Bars */}
             <div className="relative z-10 py-1">
-              {tasks.map((task, idx) => {
+              {tasks.map((task) => {
                 const bar = taskBars.find(b => b.id === task.id);
                 return (
                   <div key={task.id} className="h-10 border-b flex items-center relative group">
                     {bar && (
-                      <div 
-                        className={`absolute h-6 rounded-md shadow-sm flex items-center px-2 text-[10px] text-white font-medium cursor-pointer transition-all hover:brightness-110
+                      <div
+                        ref={(el) => { barRefs.current[task.id] = el; }}
+                        className={`absolute h-6 rounded-md shadow-sm flex items-center px-2 text-[10px] text-white font-medium transition-[filter] hover:brightness-110
+                          ${onUpdateTask ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}
                           ${task.priority === 'Urgente' ? 'bg-destructive' : 'bg-primary'}
                         `}
                         style={{ left: bar.left, width: bar.width }}
-                        onClick={() => onTaskClick(task.id)}
+                        onMouseDown={(e) => startDrag(e, task, 'move')}
+                        onClick={() => handleBarClick(task.id)}
                       >
-                         <span className="truncate">{task.title}</span>
-                         
-                         {/* Dependency Handles (Mock for UI) */}
-                         <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100" />
-                         <div className="absolute -right-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100" />
+                         <span className="truncate pointer-events-none">{task.title}</span>
+
+                         {/* Handles de redimensionar (início/fim) — só aparecem com
+                             permissão de editar (onUpdateTask presente) e no hover,
+                             pra manter a barra limpa no resto do tempo. */}
+                         {onUpdateTask && (
+                           <>
+                             <div
+                               role="presentation"
+                               className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize opacity-0 group-hover:opacity-100 bg-white/40 rounded-l-md"
+                               onMouseDown={(e) => startDrag(e, task, 'resize-left')}
+                             />
+                             <div
+                               role="presentation"
+                               className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize opacity-0 group-hover:opacity-100 bg-white/40 rounded-r-md"
+                               onMouseDown={(e) => startDrag(e, task, 'resize-right')}
+                             />
+                           </>
+                         )}
+
+                         {/* Pontos de dependência (Codex_Gantt_03 — ainda decorativos) */}
+                         <div className="absolute -left-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100 pointer-events-none" />
+                         <div className="absolute -right-1 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-white border border-primary opacity-0 group-hover:opacity-100 pointer-events-none" />
                       </div>
                     )}
                   </div>
                 );
               })}
             </div>
-            
-            {/* SVG arrows for dependencies would be rendered here */}
           </div>
         </div>
       </div>
