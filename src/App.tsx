@@ -1567,6 +1567,13 @@ export default function App() {
                 id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id, ownerId: l.owner_id || undefined
               })));
           }
+          // Explícito (não via reação a `lists`/`folders` mudando de
+          // referência): no escopo global e de lista específica,
+          // `scopedListIds` fica estável (null) mesmo quando essas arrays
+          // mudam, então loadTasks não reroda sozinho aqui — sem isso, um
+          // usuário recém-liberado para um novo espaço/pasta só veria as
+          // tarefas novas após um F5 (achado de review).
+          loadTasksRef.current?.();
         }
       })
       .subscribe();
