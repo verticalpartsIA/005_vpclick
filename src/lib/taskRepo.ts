@@ -71,6 +71,24 @@ interface WatcherRow { task_id: string; user_id: string; }
 interface CountRow { id: string; list_id: string | null; status: string }
 export interface TaskCountSummary { listId: string | null; status: string; count: number }
 interface TaskCountSummaryRow { list_id: string | null; status: string; total_count: number | string }
+export interface DashboardSummaryRow {
+  listId: string | null;
+  mainAssigneeId: string | null;
+  status: string;
+  priority: string;
+  healthKey: string;
+  isExtended: boolean;
+  count: number;
+}
+interface DashboardSummaryDbRow {
+  list_id: string | null;
+  main_assignee_id: string | null;
+  status: string;
+  priority: string;
+  health_key: string;
+  is_extended: boolean;
+  count: number | string;
+}
 interface CustomFieldValueRow { field_id: string; entity_id: string; value: unknown }
 
 // Resposta genérica do PostgREST usada nas assinaturas dos builders paginados.
@@ -329,6 +347,34 @@ export async function fetchTaskCountIndex(listIds: string[] | null = null): Prom
   return fetchTaskCountIndexFallback(listIds);
 }
 
+export type DashboardPeriod = 'all' | '7d' | '30d' | '90d';
+
+// Resumo agregado do Dashboard (visão global): uma célula por combinação de
+// lista/responsável/status/prioridade/saúde/extensão, calculada no banco
+// (get_dashboard_summary) — evita baixar uma linha por tarefa (chegando a
+// dezenas de milhares) só pra montar os widgets do Dashboard. `null` sinaliza
+// pro chamador que a função ainda não foi migrada pro banco (precisa aplicar
+// supabase/migrations/20260829013000_dashboard_summary_rpc.sql manualmente
+// em produção — mesma ressalva de outras RPCs deste arquivo); sem fallback
+// client-side aqui porque ele exigiria baixar exatamente as milhares de
+// linhas que esta função existe pra evitar.
+export async function fetchDashboardSummary(period: DashboardPeriod): Promise<DashboardSummaryRow[] | null> {
+  const { data, error } = await supabase.rpc('get_dashboard_summary', { p_period: period });
+  if (error) {
+    console.warn('taskRepo.fetchDashboardSummary: RPC indisponível:', error);
+    return null;
+  }
+  return ((data ?? []) as DashboardSummaryDbRow[]).map((row) => ({
+    listId: row.list_id,
+    mainAssigneeId: row.main_assignee_id,
+    status: row.status,
+    priority: row.priority,
+    healthKey: row.health_key,
+    isExtended: row.is_extended,
+    count: Number(row.count) || 0,
+  }));
+}
+
 export async function fetchCustomFieldValuesByEntityIds(entityIds: string[]): Promise<CustomFieldValue[]> {
   const uniqueIds = Array.from(new Set(entityIds.filter(Boolean)));
   if (uniqueIds.length === 0) return [];
@@ -490,8 +536,11 @@ export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | 
       priority: input.priority,
       main_assignee_id: input.mainAssigneeId,
       secondary_assignee_ids: input.secondaryAssigneeIds ?? [],
-      start_date: input.startDate,
-      due_date: input.dueDate,
+      start_date: input.startDate || null,
+      // `''` (sem data) precisa virar `null` — as colunas são `date`
+      // nullable, e o Postgres rejeita `''` como data (mesmo ajuste feito em
+      // updateTaskFields acima).
+      due_date: input.dueDate || null,
       list_id: input.listId,
       project_id: input.projectId ?? null,
       parent_id: input.parentId ?? null,
