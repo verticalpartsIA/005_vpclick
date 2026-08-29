@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { PRIORITY_COLORS } from '../../constants';
 import { avatarThumb } from '../../lib/avatarUrl';
+import { readRecentTaskIds } from '../../lib/recentTasks';
 import { Task, User } from '../../types';
 
 interface MyTasksViewProps {
@@ -33,31 +34,6 @@ function greeting() {
   if (h < 12) return 'Bom dia';
   if (h < 18) return 'Boa tarde';
   return 'Boa noite';
-}
-
-function recentTasksKey(userId: string) {
-  return `vp-click-recent-tasks-${userId}`;
-}
-
-/** Lê os ids de tarefa vistos recentemente (gravados pelo App ao abrir uma tarefa). */
-export function readRecentTaskIds(userId: string): string[] {
-  try {
-    const raw = localStorage.getItem(recentTasksKey(userId));
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-/** Grava um id de tarefa como "visto recentemente" (mais recente primeiro, sem duplicar, até 15). */
-export function recordRecentTaskId(userId: string, taskId: string) {
-  try {
-    const ids = readRecentTaskIds(userId);
-    const next = [taskId, ...ids.filter((id) => id !== taskId)].slice(0, 15);
-    localStorage.setItem(recentTasksKey(userId), JSON.stringify(next));
-  } catch {
-    // localStorage indisponível (modo privado, quota etc.) — não é crítico, ignora.
-  }
 }
 
 function PriorityBadge({ priority }: { priority: string }) {

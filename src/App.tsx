@@ -10,22 +10,12 @@ import {
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
 import { Icons, PRIORITY_COLORS, COLORS } from './constants';
 import { WIKI_INTRO_HTML, WIKI_TEMPLATE_SECTIONS } from './wikiTemplate';
-import AdminPanel from './pages/AdminPanel';
 import LoginScreen from './pages/LoginScreen';
 import ChangePasswordModal from './components/ChangePasswordModal';
 import CreateListModal from './components/CreateListModal';
 import compactLogoWhite from './assets/logo-verticalparts-white.png';
 import bootLogoVideo from './assets/logo-limpo-video.mp4';
-import { TableView } from './components/views/TableView';
-import { CalendarView } from './components/views/CalendarView';
-import { GanttView } from './components/views/GanttView';
-import { InboxView } from './components/views/InboxView';
-import { RepliesView } from './components/views/RepliesView';
-import { AssignedCommentsView } from './components/views/AssignedCommentsView';
-import { MeetingsView } from './components/views/MeetingsView';
-import { MyTasksView, recordRecentTaskId } from './components/views/MyTasksView';
-import { RecentTasksView } from './components/views/RecentTasksView';
-import { RemindersView } from './components/views/RemindersView';
+import { recordRecentTaskId } from './lib/recentTasks';
 import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
@@ -91,6 +81,45 @@ import { Checkbox } from "@/components/ui/checkbox";
 
 const DashboardCharts = React.lazy(() =>
   import('./components/views/DashboardCharts').then((module) => ({ default: module.DashboardCharts }))
+);
+
+// Views carregadas sob demanda (só quando o usuário abre aquela aba). Reduz o
+// bundle inicial — cada uma dessas é um módulo isolado (não referenciado de
+// nenhum outro lugar do app fora daqui), então dá pra baixar só quando
+// activeView realmente precisar dela (ver o <Suspense> em volta do bloco de
+// views, mais abaixo). Achado da auditoria Lighthouse: index.js sozinho tinha
+// 1,2 MB, boa parte código de abas que a maioria das sessões nunca abre
+// (Gantt, Reuniões, Inbox, Admin etc.).
+const AdminPanel = React.lazy(() => import('./pages/AdminPanel'));
+const TableView = React.lazy(() =>
+  import('./components/views/TableView').then((m) => ({ default: m.TableView }))
+);
+const CalendarView = React.lazy(() =>
+  import('./components/views/CalendarView').then((m) => ({ default: m.CalendarView }))
+);
+const GanttView = React.lazy(() =>
+  import('./components/views/GanttView').then((m) => ({ default: m.GanttView }))
+);
+const InboxView = React.lazy(() =>
+  import('./components/views/InboxView').then((m) => ({ default: m.InboxView }))
+);
+const RepliesView = React.lazy(() =>
+  import('./components/views/RepliesView').then((m) => ({ default: m.RepliesView }))
+);
+const AssignedCommentsView = React.lazy(() =>
+  import('./components/views/AssignedCommentsView').then((m) => ({ default: m.AssignedCommentsView }))
+);
+const MeetingsView = React.lazy(() =>
+  import('./components/views/MeetingsView').then((m) => ({ default: m.MeetingsView }))
+);
+const MyTasksView = React.lazy(() =>
+  import('./components/views/MyTasksView').then((m) => ({ default: m.MyTasksView }))
+);
+const RecentTasksView = React.lazy(() =>
+  import('./components/views/RecentTasksView').then((m) => ({ default: m.RecentTasksView }))
+);
+const RemindersView = React.lazy(() =>
+  import('./components/views/RemindersView').then((m) => ({ default: m.RemindersView }))
 );
 
 const SSOHandler: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -3611,6 +3640,13 @@ export default function App() {
               de página normal do <main>. */}
           <main className={`flex-1 custom-scrollbar ${activeView === 'Table' ? 'overflow-hidden flex flex-col' : 'overflow-auto p-4 sm:p-6'}`}>
           <div key={activeView} className={`animate-in fade-in slide-in-from-bottom-1 duration-200 ${activeView === 'Table' ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
+          <React.Suspense
+            fallback={
+              <div className="flex items-center justify-center py-24">
+                <div className="w-8 h-8 border-2 border-gray-200 border-t-orange-500 rounded-full animate-spin" />
+              </div>
+            }
+          >
             {activeView === 'Admin' && (
               <AdminPanel
                 spaces={spaces}
@@ -3852,6 +3888,7 @@ export default function App() {
                 uploadFile={uploadFile}
               />
             )}
+          </React.Suspense>
           </div>
           </main>
         </div>

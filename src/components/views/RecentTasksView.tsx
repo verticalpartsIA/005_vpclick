@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { PRIORITY_COLORS } from '../../constants';
 import { avatarThumb } from '../../lib/avatarUrl';
 import { Task, User } from '../../types';
-import { readRecentTaskIds } from './MyTasksView';
+import { readRecentTaskIds } from '../../lib/recentTasks';
 
 interface RecentTasksViewProps {
   currentUser: User;
