@@ -6456,13 +6456,23 @@ function ListView({
       {/* Inline Quick Create Trigger */}
       <div
         className="p-3 border-b flex items-center gap-3 bg-gray-50/50 hover:bg-gray-100 cursor-pointer transition-colors"
-        onClick={onQuickCreate}
+        onClick={() => onQuickCreate(activeListId ? { listId: activeListId } : undefined)}
       >
         <div className="w-4 h-4 rounded-full border-2 border-gray-300 flex items-center justify-center text-gray-400">
           <span className="text-xs">+</span>
         </div>
         <span className="text-sm text-gray-500">
-          + Adicionar nova tarefa em <span className="font-semibold">{context.name}</span>...
+          {/* `onClick={onQuickCreate}` direto passava o SyntheticEvent do
+              clique como "prefill" (achado de QA: modal nunca vinha
+              pré-selecionado). Além disso, sem `activeListId` (contexto
+              agregado — pasta/espaço/Dashboard, não uma lista de verdade)
+              não existe um alvo único pra pré-selecionar, então o rótulo não
+              promete mais um contexto que a criação não vai respeitar. */}
+          {activeListId ? (
+            <>+ Adicionar nova tarefa em <span className="font-semibold">{context.name}</span>...</>
+          ) : (
+            '+ Adicionar nova tarefa...'
+          )}
         </span>
       </div>
 
@@ -8553,6 +8563,22 @@ function TaskDetailModal(props: any) {
     }, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailActiveTab]);
+
+  // Esc fecha o detalhe da tarefa (achado de QA: só o botão "voltar" do
+  // navegador funcionava). Ignora quando o foco está num campo de texto —
+  // edição de título/comentário já trata Esc localmente (cancelar a edição),
+  // e sem essa checagem as duas coisas aconteceriam juntas no mesmo evento.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const [newDueDate, setNewDueDate] = useState(task.dueDate);
   const [extensionReason, setExtensionReason] = useState('');
   const [isExtending, setIsExtending] = useState(false);
@@ -8990,9 +9016,14 @@ function TaskDetailModal(props: any) {
         )}
         <div className="p-4 border-b shrink-0 flex items-center justify-between bg-white px-8">
           <div className="flex items-center gap-4">
-            <div className="text-gray-400 p-1 hover:bg-gray-100 rounded cursor-pointer">
+            <button
+              type="button"
+              onClick={onClose}
+              title="Voltar"
+              className="text-gray-400 p-1 hover:bg-gray-100 rounded cursor-pointer"
+            >
               <Icons.ChevronRight className="w-5 h-5 rotate-180" />
-            </div>
+            </button>
             <div className="flex items-center gap-2 text-xs font-semibold text-gray-400 uppercase tracking-widest">
               <span>VerticalParts</span>
               <span>/</span>
