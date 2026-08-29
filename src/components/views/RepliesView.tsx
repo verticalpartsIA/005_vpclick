@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { isToday, isYesterday } from 'date-fns';
 import { supabase } from '../../lib/supabase';
+import { avatarThumb } from '../../lib/avatarUrl';
 import { AppNotification, User } from '../../types';
 
 interface RepliesViewProps {
@@ -217,7 +218,7 @@ export function RepliesView({ currentUser, users, onOpenTask }: RepliesViewProps
                   className={`w-full text-left px-4 py-3 border-b border-gray-100 last:border-b-0 flex gap-3 hover:bg-gray-50 transition-colors ${!t.read ? 'bg-orange-50/50' : ''}`}
                 >
                   {actor ? (
-                    <img src={actor.avatar} className="w-9 h-9 rounded-full shrink-0 mt-0.5" alt="" />
+                    <img src={avatarThumb(actor.avatar)} className="w-9 h-9 rounded-full shrink-0 mt-0.5" alt="" />
                   ) : (
                     <span className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5 text-base">💬</span>
                   )}

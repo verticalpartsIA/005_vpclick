@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { avatarThumb } from '../lib/avatarUrl';
 import { Team, User, UserRole } from '../types';
 import { toast } from 'sonner';
 
@@ -190,7 +191,7 @@ export function TeamsModal({ isOpen, onClose, teams, setTeams, users, currentUse
                   </div>
                   <div className="flex -space-x-1.5 shrink-0">
                     {members.slice(0, 5).map((m) => (
-                      <img key={m.id} src={m.avatar} title={m.name} className="w-6 h-6 rounded-full border-2 border-white" alt="" />
+                      <img key={m.id} src={avatarThumb(m.avatar)} title={m.name} className="w-6 h-6 rounded-full border-2 border-white" alt="" />
                     ))}
                     {members.length > 5 && (
                       <span className="w-6 h-6 rounded-full bg-gray-100 border-2 border-white text-[9px] font-bold text-gray-500 flex items-center justify-center">+{members.length - 5}</span>
@@ -220,7 +221,7 @@ export function TeamsModal({ isOpen, onClose, teams, setTeams, users, currentUse
                             onClick={() => handleToggleMember(team, u.id)}
                             className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-left transition-colors ${canManage ? 'hover:bg-white' : 'cursor-default'}`}
                           >
-                            <img src={u.avatar} className="w-6 h-6 rounded-full shrink-0" alt="" />
+                            <img src={avatarThumb(u.avatar)} className="w-6 h-6 rounded-full shrink-0" alt="" />
                             <span className={`text-sm flex-1 truncate ${isMember ? 'font-semibold text-gray-800' : 'text-gray-500'}`}>{u.name}</span>
                             {canManage && (
                               <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${isMember ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400'}`}>

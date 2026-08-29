@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { PRIORITY_COLORS } from '../../constants';
+import { avatarThumb } from '../../lib/avatarUrl';
 import { Task, User } from '../../types';
 
 interface MyTasksViewProps {
@@ -73,7 +74,7 @@ function TaskRow({ task, users, onOpenTask, rightSlot }: { task: Task; users: Us
     >
       <span className="w-3.5 h-3.5 rounded-full border-2 border-gray-300 shrink-0 group-hover:border-orange-400" />
       <span className="text-sm text-gray-700 truncate flex-1">{task.title}</span>
-      {assignee && <img src={assignee.avatar} title={assignee.name} className="w-5 h-5 rounded-full shrink-0" alt="" />}
+      {assignee && <img src={avatarThumb(assignee.avatar)} title={assignee.name} className="w-5 h-5 rounded-full shrink-0" alt="" />}
       <PriorityBadge priority={task.priority} />
       {rightSlot}
     </button>
