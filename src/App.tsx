@@ -3692,11 +3692,17 @@ export default function App() {
               <CalendarView
                 tasks={filteredTasks}
                 users={adminUsers}
-                onTaskClick={setSelectedTaskId} 
+                onTaskClick={setSelectedTaskId}
                 onAddTaskAtDate={(date) => {
                   setPrefilledTaskData({ dueDate: formatLocalDate(date) });
                   setIsTaskModalOpen(true);
                 }}
+                onCreateTask={handleCreateTask}
+                onUpdateTask={handleUpdateTask}
+                lists={lists}
+                statusGroups={statusGroups}
+                activeListId={activeListId}
+                currentUser={currentUser}
               />
             )}
             {activeView === 'Gantt' && (
