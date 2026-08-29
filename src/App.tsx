@@ -2324,7 +2324,8 @@ export default function App() {
         title: updatedDoc.title,
         content: updatedDoc.content,
         header_image: updatedDoc.headerImage,
-        is_wiki: updatedDoc.isWiki || false
+        is_wiki: updatedDoc.isWiki || false,
+        updated_at: new Date().toISOString()
       })
       .eq('id', updatedDoc.id);
 
