@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   AlertTriangle,
   ArrowUpDown,
@@ -703,6 +704,25 @@ export const TableView: React.FC<TableViewProps> = ({
     return null;
   };
 
+  // Virtualização de linhas: o workspace de produção tem milhares de tarefas
+  // (~8 mil), e sem isso o escopo "Dashboard" (sem filtro de lista) montava
+  // uma <tr> real por tarefa de uma vez só — ordenar ou redimensionar coluna
+  // forçava o React a reconciliar milhares de linhas complexas (avatar,
+  // dropdowns, campos customizados) na mesma tarefa síncrona, travando a
+  // aba (e, em máquinas com menos memória, o navegador inteiro). Só as
+  // linhas realmente visíveis (+ overscan) viram <tr> de verdade agora;
+  // altura de linha é medida de verdade (measureElement), não fixa, porque
+  // varia com densidade e com a tag de tarefas quebrando pra 2 linhas.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const estimateRowSize = useCallback(() => (prefs.density === 'compact' ? 40 : 56), [prefs.density]);
+  const rowVirtualizer = useVirtualizer({
+    count: displayedTasks.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: estimateRowSize,
+    overscan: 12,
+    measureElement: (element) => element?.getBoundingClientRect().height ?? estimateRowSize(),
+  });
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
       <div className="flex flex-col gap-3 border-b p-3 lg:flex-row lg:items-center lg:justify-between">
@@ -774,7 +794,7 @@ export const TableView: React.FC<TableViewProps> = ({
         </div>
       )}
 
-      <div className="flex-1 overflow-auto">
+      <div ref={scrollContainerRef} className="flex-1 overflow-auto">
         <table className="border-collapse text-left" style={{ width: 'max-content', minWidth: '100%' }}>
           <thead className="sticky top-0 z-20 bg-muted">
             <tr>
@@ -797,31 +817,49 @@ export const TableView: React.FC<TableViewProps> = ({
               <th className="sticky right-0 z-30 border border-border bg-muted px-2 py-2" style={{ width: 48, minWidth: 48 }} />
             </tr>
           </thead>
+          <tbody style={{ position: 'relative', height: `${rowVirtualizer.getTotalSize()}px` }}>
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const task = displayedTasks[virtualRow.index];
+              if (!task) return null;
+              return (
+                <tr
+                  key={task.id}
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
+                  draggable={canReorderRows}
+                  onDragStart={(e) => { if (!canReorderRows) { e.preventDefault(); toast.info('Remova filtros e ordenação para reordenar linhas.'); return; } setDraggedRowId(task.id); e.dataTransfer.effectAllowed = 'move'; }}
+                  onDragOver={(e) => { if (!canReorderRows) return; e.preventDefault(); setDragOverRowId(task.id); }}
+                  onDrop={(e) => { e.preventDefault(); reorderRow(task.id); setDraggedRowId(null); setDragOverRowId(null); }}
+                  onDragEnd={() => { setDraggedRowId(null); setDragOverRowId(null); }}
+                  onClick={() => onTaskClick(task.id)}
+                  className={`group cursor-pointer hover:bg-muted/40 ${dragOverRowId === task.id ? 'outline outline-2 outline-primary/40' : ''}`}
+                  style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  <td className="sticky left-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 44, minWidth: 44 }}>
+                    <div className="flex items-center justify-center gap-1">
+                      <GripVertical className={`h-4 w-4 ${canReorderRows ? 'text-muted-foreground' : 'text-muted-foreground/30'}`} />
+                      <input type="checkbox" checked={selectedTaskIds.has(task.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleSelected(task.id)} className="h-4 w-4 rounded border-border" />
+                    </div>
+                  </td>
+                  {visibleColumns.map((column) => renderCell(task, column))}
+                  <td className="sticky right-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 48, minWidth: 48 }} onClick={(e) => e.stopPropagation()}>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild><button type="button" className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Ações da tarefa"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-52">
+                        <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Abrir tarefa</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Editar detalhes</DropdownMenuItem>
+                        {onDuplicateTask && <DropdownMenuItem onClick={() => onDuplicateTask(task)}><Copy className="mr-2 h-4 w-4" />Duplicar</DropdownMenuItem>}
+                        <DropdownMenuItem onClick={() => copyTaskLink(task.id)}><Copy className="mr-2 h-4 w-4" />Copiar link</DropdownMenuItem>
+                        {onBulkMove && <><DropdownMenuSeparator />{lists.map((list) => <DropdownMenuItem key={list.id} onClick={() => onBulkMove([task.id], list.id)}><FolderOpen className="mr-2 h-4 w-4" />Mover para {list.name}</DropdownMenuItem>)}</>}
+                        {onDeleteTask && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => onDeleteTask(task.id)}><Trash2 className="mr-2 h-4 w-4" />Excluir</DropdownMenuItem></>}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
           <tbody>
-            {displayedTasks.map((task) => (
-              <tr key={task.id} draggable={canReorderRows} onDragStart={(e) => { if (!canReorderRows) { e.preventDefault(); toast.info('Remova filtros e ordenação para reordenar linhas.'); return; } setDraggedRowId(task.id); e.dataTransfer.effectAllowed = 'move'; }} onDragOver={(e) => { if (!canReorderRows) return; e.preventDefault(); setDragOverRowId(task.id); }} onDrop={(e) => { e.preventDefault(); reorderRow(task.id); setDraggedRowId(null); setDragOverRowId(null); }} onDragEnd={() => { setDraggedRowId(null); setDragOverRowId(null); }} onClick={() => onTaskClick(task.id)} className={`group cursor-pointer hover:bg-muted/40 ${dragOverRowId === task.id ? 'outline outline-2 outline-primary/40' : ''}`}>
-                <td className="sticky left-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 44, minWidth: 44 }}>
-                  <div className="flex items-center justify-center gap-1">
-                    <GripVertical className={`h-4 w-4 ${canReorderRows ? 'text-muted-foreground' : 'text-muted-foreground/30'}`} />
-                    <input type="checkbox" checked={selectedTaskIds.has(task.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleSelected(task.id)} className="h-4 w-4 rounded border-border" />
-                  </div>
-                </td>
-                {visibleColumns.map((column) => renderCell(task, column))}
-                <td className="sticky right-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 48, minWidth: 48 }} onClick={(e) => e.stopPropagation()}>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild><button type="button" className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Ações da tarefa"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-52">
-                      <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Abrir tarefa</DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Editar detalhes</DropdownMenuItem>
-                      {onDuplicateTask && <DropdownMenuItem onClick={() => onDuplicateTask(task)}><Copy className="mr-2 h-4 w-4" />Duplicar</DropdownMenuItem>}
-                      <DropdownMenuItem onClick={() => copyTaskLink(task.id)}><Copy className="mr-2 h-4 w-4" />Copiar link</DropdownMenuItem>
-                      {onBulkMove && <><DropdownMenuSeparator />{lists.map((list) => <DropdownMenuItem key={list.id} onClick={() => onBulkMove([task.id], list.id)}><FolderOpen className="mr-2 h-4 w-4" />Mover para {list.name}</DropdownMenuItem>)}</>}
-                      {onDeleteTask && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => onDeleteTask(task.id)}><Trash2 className="mr-2 h-4 w-4" />Excluir</DropdownMenuItem></>}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </td>
-              </tr>
-            ))}
             {displayedTasks.length === 0 && <tr><td colSpan={visibleColumns.length + 2} className="border border-border px-4 py-12 text-center text-sm text-muted-foreground">Nenhuma tarefa encontrada na Tabela.</td></tr>}
             <tr className="bg-muted/20">
               <td className="sticky left-0 z-10 border border-border bg-muted/20 px-2 py-2" style={{ width: 44, minWidth: 44 }} />
