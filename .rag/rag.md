@@ -1446,3 +1446,285 @@ O roteador pode usar regras e classificação por modelo, mas deve registrar pla
 - GraphRAG Query Engine: <https://microsoft.github.io/graphrag/query/overview/>
 - Sarthi et al. (2024), RAPTOR: <https://arxiv.org/abs/2401.18059>
 - Zhang et al. (2024), RAFT: <https://arxiv.org/abs/2403.10131>
+
+## 34. Revisão dos artefatos complementares `rag-v2.md` e `task-chunker.py`
+
+Os dois artefatos recebidos complementam esta especificação em três áreas: identidade determinística, transformação naturalizada de tarefas e verificação da resposta. Entretanto, eles são material de proposta e demonstração, não devem ser executados ou adotados como “produção” sem as correções desta seção.
+
+### 34.1 Conteúdo incorporado
+
+| Contribuição | Decisão |
+|---|---|
+| UUID v5 determinístico | incorporar com namespace persistido e política clara de versão |
+| SHA-256 do texto canônico | incorporar para detectar mudança de conteúdo |
+| Naturalização de tarefa | incorporar como representação de embedding versionada |
+| Comentário filho enriquecido | incorporar com contexto mínimo, sanitização e Parent Retrieval |
+| Fixture reproduzível | incorporar ao plano de testes, sempre marcada como sintética |
+| Resposta com citações numeradas | incorporar ao contrato de saída |
+| Relevância e faithfulness | incorporar como validação pré e pós-geração |
+
+### 34.2 Conteúdo que precisa de correção
+
+- O DDL fixa `vector(1536)` e um modelo específico, contrariando a política de modelos intercambiáveis. A dimensão deve ser decidida por índice/modelo e migrada explicitamente.
+- A tabela `workspace_members` usada no exemplo não foi identificada no esquema atual do VPClick. A autorização deve reutilizar as funções e tabelas reais, incluindo `user_access`, `space_ids`, `folder_ids` e políticas existentes.
+- Um JSON `acl` pode apoiar auditoria e filtragem, mas não deve duplicar nem substituir a autorização canônica.
+- A ACL do script concede `ADMIN`, `GESTOR` e `COLABORADOR` a toda tarefa; isso não representa os acessos reais por espaço/pasta/lista.
+- A política dos chunks baseada apenas em `document_id in (select id from rag_documents)` depende corretamente da RLS do pai, mas deve ser testada contra bypass, funções `SECURITY DEFINER`, service roles e planos de consulta.
+- O `X-Service-Auth` estático proposto é insuficiente como padrão corporativo; preferir identidade de workload, segredo rotacionável de curto prazo ou JWT assinado com audience/escopo.
+- `top_k = 5` e `confidence_threshold = 0.72` são exemplos, não defaults universais.
+- “Self-RAG” não é sinônimo de executar uma segunda chamada genérica ao LLM. O método acadêmico treina o modelo para recuperação e crítica adaptativas com tokens de reflexão. A verificação proposta aqui é um pipeline inspirado em princípios de crítica, não uma implementação fiel de Self-RAG.
+
+## 35. Contrato de chunking determinístico para tarefas
+
+### 35.1 Entrada validada
+
+O chunker deve receber um objeto tipado, não um dicionário arbitrário. Campos mínimos:
+
+```json
+{
+  "id": "uuid",
+  "workspace_id": "uuid",
+  "list_id": "uuid",
+  "title": "texto não vazio",
+  "description": "texto",
+  "status": "código controlado",
+  "priority": "código controlado",
+  "main_assignee_id": "uuid|null",
+  "secondary_assignee_ids": [],
+  "start_date": "ISO-8601|null",
+  "due_date": "ISO-8601|null",
+  "updated_at": "ISO-8601",
+  "comments": [],
+  "checklists": [],
+  "dependencies": []
+}
+```
+
+Antes de produzir conteúdo:
+
+- validar UUIDs, enumerações, datas e limites de tamanho;
+- resolver breadcrumb e nomes a partir de registros autorizados;
+- tratar `null` sem chamar `.strip()` ou `join()` diretamente;
+- normalizar Unicode e espaços;
+- sanitizar HTML e marcar texto da fonte como dado não confiável;
+- preservar IDs dos autores nos metadados e usar nomes apenas na apresentação;
+- validar tipos de dependência `blocks`, `blocked_by` e `relates_to` sem convertê-los todos em “depende de”.
+
+### 35.2 Identidade determinística
+
+UUID v5, padronizado como UUID baseado em nome, é adequado para gerar IDs reproduzíveis. O namespace do VPClick deve ser definido uma vez, documentado e mantido estável.
+
+```text
+document_identity = uuid5(VPCLICK_RAG_NAMESPACE,
+  workspace_id + ":" + source_type + ":" + source_id)
+
+chunk_identity = uuid5(VPCLICK_RAG_NAMESPACE,
+  document_identity + ":" + chunk_kind + ":" + stable_child_id)
+```
+
+Não usar posição do comentário como identidade quando existe `comment_id`; reordenação produziria IDs incorretos. Para chunks por seção sem ID nativo, combinar identificador lógico da seção e checksum estável.
+
+### 35.3 Política de versão
+
+Existem duas estratégias válidas, que não podem ser misturadas acidentalmente:
+
+1. **Documento lógico estável:** o ID não inclui versão; um upsert atualiza `current_version` e chunks atuais, preservando histórico em tabela separada.
+2. **Versões imutáveis:** o ID inclui versão; uma chave lógica agrupa versões e somente uma recebe `is_current = true`.
+
+O exemplo anexado inclui `version` no UUID, mas não invalida a anterior. Isso pode fazer múltiplas versões competirem na recuperação. A primeira estratégia é recomendada inicialmente para o VPClick, com histórico/auditoria separado.
+
+### 35.4 Canonicalização e checksum
+
+Calcular SHA-256 sobre uma representação canônica, não sobre texto dependente de ordem arbitrária ou valores default voláteis:
+
+```text
+canonical_payload = canonical_json({
+  title, description, status, priority,
+  assignee_ids_sorted, dates_iso,
+  tags_sorted, dependency_ids_and_types_sorted,
+  breadcrumb_ids, source_updated_at
+})
+
+content_checksum = sha256(canonical_payload)
+```
+
+Comentários têm checksum e ciclo de vida próprios. Alterar comentário não deve exigir recriar IDs de todos os demais comentários. Se o objetivo for detectar qualquer mudança no agregado, manter também `aggregate_checksum` no documento-pai.
+
+### 35.5 Representação naturalizada da tarefa
+
+```text
+Tarefa: {title}
+Localização: {workspace} > {space} > {folder?} > {list}
+Descrição e critério de aceite: {description}
+Status: {status_label}
+Prioridade: {priority_label}
+Responsável principal: {main_assignee}
+Corresponsáveis: {secondary_assignees}
+Início: {start_date_or_absent}
+Prazo: {due_date_or_absent}
+Tags: {tags}
+Dependências: {typed_dependencies}
+```
+
+Essa representação deve ter `template_version`. Campos usados em cálculo/filtro permanecem também em metadados tipados; o texto não é a fonte de verdade para status, prazo ou prioridade.
+
+### 35.6 Chunk filho de comentário
+
+```text
+Contexto da tarefa: {task_title}
+Localização: {breadcrumb}
+Status da tarefa na data do índice: {status}
+Comentário de {author_display_name} em {created_at}:
+{sanitized_comment_text}
+```
+
+O comentário não deve repetir descrição completa, todos os responsáveis ou toda a discussão. O recuperador expande a janela e o pai quando necessário, conforme a Seção 6.6.
+
+Metadados mínimos:
+
+```json
+{
+  "source_type": "comment",
+  "source_id": "comment-id",
+  "parent_document_id": "task-document-uuid",
+  "task_id": "task-id",
+  "workspace_id": "workspace-id",
+  "space_id": "space-id",
+  "folder_id": "folder-id|null",
+  "list_id": "list-id",
+  "author_id": "user-id",
+  "created_at": "ISO-8601",
+  "updated_at": "ISO-8601|null",
+  "template_version": "task-comment-v1",
+  "acl_version": "version"
+}
+```
+
+### 35.7 Tokenização
+
+`len(text.split())` conta palavras aproximadas, não tokens do modelo. Usar o tokenizer compatível com o modelo ou biblioteca oficialmente recomendada. Se o provedor não expuser tokenizer, armazenar `estimated_token_count` explicitamente como estimativa e aplicar margem de segurança.
+
+### 35.8 Saída do chunker
+
+Cada chunk deve preencher todos os campos exigidos pelo esquema: `embedding_model`, `embedding_dimensions`, `template_version`, checksums, identidade da fonte e metadados de segurança. O chunker não gera vetor; ele produz um artefato validado para a etapa `EMBEDDED`.
+
+## 36. Verificação de relevância, fundamentação e citações
+
+O `rag-v2.md` acrescenta uma preocupação válida: não basta recuperar e gerar; é necessário verificar se as evidências são relevantes e se a resposta está fundamentada.
+
+### 36.1 Recuperação adaptativa
+
+Nem toda pergunta precisa de busca vetorial. O roteador decide entre:
+
+- resposta de navegação/documentação estática;
+- consulta SQL/full-text;
+- retrieval semântico;
+- grafo;
+- combinação de estratégias.
+
+Para retrieval semântico:
+
+1. aplicar ACL e filtros determinísticos;
+2. recuperar candidatos;
+3. calibrar score por tipo de fonte/modelo;
+4. reranquear;
+5. rejeitar conjunto sem cobertura suficiente;
+6. expandir pai/janela;
+7. registrar por que cada evidência entrou no contexto.
+
+Não adotar um threshold único como `0.70` ou `0.72` para todos os embeddings. A escala varia por modelo, métrica, normalização, domínio e distribuição do corpus.
+
+### 36.2 Matriz de suporte por afirmação
+
+Após a geração, decompor a resposta em afirmações verificáveis:
+
+| `claim_id` | Afirmação | Fontes | Estado |
+|---|---|---|---|
+| `c1` | texto da afirmação | `task:t1` | `SUPPORTED` |
+| `c2` | texto da afirmação | `comment:c9` | `PARTIAL` |
+| `c3` | texto da afirmação | nenhuma | `UNSUPPORTED` |
+
+Estados: `SUPPORTED`, `PARTIAL`, `CONFLICTING`, `UNSUPPORTED`, `NON_FACTUAL`. Afirmações operacionais `UNSUPPORTED` devem ser removidas ou causar abstenção; `PARTIAL` e `CONFLICTING` exigem ressalva explícita.
+
+### 36.3 Verificador independente
+
+O verificador pode combinar regras, comparação estruturada e um modelo avaliador. Uma segunda chamada ao mesmo LLM não garante verdade. Para reduzir falhas correlacionadas:
+
+- validar IDs, status, datas e valores diretamente na fonte;
+- exigir trechos de suporte por afirmação;
+- usar prompt/modelo de verificação versionado;
+- impedir acesso do verificador a fontes não autorizadas;
+- avaliar o verificador contra anotações humanas;
+- registrar falso aceite e falsa rejeição;
+- não expor chain-of-thought privada; armazenar justificativa curta e evidências.
+
+### 36.4 Contrato de resposta com citações
+
+```json
+{
+  "answer": "A tarefa está em andamento [1]. O comentário mais recente informa que o worker de outbox está pronto [2].",
+  "as_of": "2026-08-29T12:00:00Z",
+  "citations": [
+    {
+      "id": 1,
+      "source_type": "task",
+      "source_id": "uuid",
+      "title": "Título da tarefa",
+      "url": "/list?taskId=uuid",
+      "updated_at": "ISO-8601",
+      "supporting_excerpt": "trecho mínimo autorizado"
+    }
+  ],
+  "claim_support": [
+    {"claim_id": "c1", "citation_ids": [1], "state": "SUPPORTED"}
+  ],
+  "warnings": [],
+  "trace_id": "uuid"
+}
+```
+
+Deep links devem usar as rotas reais do VPClick, como `/list?taskId=...`, e não inventar `/workspace/{id}/tasks/{id}` sem que essa rota exista.
+
+### 36.5 Relação correta com Self-RAG
+
+Self-RAG, conforme o trabalho de Asai et al., treina um modelo para recuperar, gerar e criticar adaptativamente usando tokens de reflexão. O VPClick pode estudar esse método, mas a primeira implementação deve ser descrita como **pipeline de retrieval adaptativo e verificação de grounding**. Usar o nome Self-RAG somente se o método implementado reproduzir seus elementos essenciais e for avaliado como tal.
+
+## 37. Hardening do esquema e RLS antes da implementação
+
+O DDL presente em `rag-v2.md` é ilustrativo e **não deve ser aplicado diretamente no Supabase**. Antes de criar migrations:
+
+1. mapear as políticas e funções RLS já existentes no repositório;
+2. reutilizar `user_access`, `space_ids`, `folder_ids`, `is_admin()` e funções canônicas equivalentes;
+3. definir acesso a listas, tarefas, documentos e reuniões conforme a hierarquia real;
+4. escolher política de identidade/versão da Seção 35.3;
+5. decidir dimensão e namespace por modelo de embedding;
+6. criar índices de filtros (`workspace_id`, `source_type`, `source_id`, `is_current`, `deleted_at`) antes do HNSW;
+7. impedir leitura direta de chunks sem acesso ao pai;
+8. impedir escrita pelo usuário final; somente worker autorizado indexa;
+9. testar `service_role`, funções `SECURITY DEFINER`, views, RPCs e acesso anônimo;
+10. executar `EXPLAIN ANALYZE` com o padrão real de filtros + busca vetorial;
+11. validar remoção e revogação em prazo definido;
+12. criar migration reversível e ambiente de homologação.
+
+### 37.1 Testes obrigatórios do chunker
+
+- mesmo input gera os mesmos IDs e checksums;
+- mudança textual altera checksum, mas não identidade lógica;
+- comentário atualizado não altera IDs de comentários vizinhos;
+- comentário excluído é tombstonado/removido;
+- `null`, texto vazio, Unicode e conteúdo muito longo são tratados;
+- HTML/script e prompt injection não viram instrução;
+- breadcrumb é resolvido com IDs e nomes corretos;
+- dependências preservam tipo;
+- rota canônica abre a tarefa correta;
+- ACL não é ampliada pelo chunker;
+- contagem de tokens usa modelo compatível;
+- versões antigas não competem na busca;
+- dois workspaces com `source_id` igual geram identidades distintas;
+- saída cumpre o schema completo antes do embedding.
+
+## 38. Referências adicionais dos artefatos revisados
+
+- Asai et al. (2023), Self-RAG: <https://arxiv.org/abs/2310.11511>
+- RFC 9562, UUIDs e UUID versão 5: <https://www.rfc-editor.org/info/rfc9562/>
+- Artefatos recebidos e revisados: `rag-v2.md` e `task-chunker.py`; suas contribuições foram incorporadas como requisitos corrigidos, não como código aprovado para produção.
