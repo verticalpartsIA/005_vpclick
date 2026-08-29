@@ -8072,6 +8072,25 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [isSubmitting, setIsSubmitting] = useState(false);
   const todayLabel = new Date().toLocaleDateString('pt-BR');
 
+  // Esc fecha este modal (não tinha nenhum jeito de fechar por teclado antes).
+  // Ouve na fase de CAPTURA (como o próprio Radix faz) e marca o evento como
+  // tratado (`preventDefault`) antes que ele chegue no listener de Esc do
+  // TaskDetailModal por baixo (que abre este modal pra criar subtarefa) — sem
+  // isso, fechar "+ Nova Subtarefa" com Esc fechava o detalhe da tarefa junto
+  // (achado de review). Ignora quando o foco está num campo de texto, pra não
+  // fechar o formulário sozinho por reflexo.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      e.preventDefault();
+      onClose();
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+
   // Duração é opcional, mas se preenchida precisa ser um número de dias (ex: 5)
   // ou horas no formato `3h`. Qualquer outra coisa (ex: `abc`) é sinalizada.
   const trimmedDuration = duration.trim();
@@ -8570,9 +8589,14 @@ function TaskDetailModal(props: any) {
   // navegador funcionava). Ignora quando o foco está num campo de texto —
   // edição de título/comentário já trata Esc localmente (cancelar a edição),
   // e sem essa checagem as duas coisas aconteceriam juntas no mesmo evento.
+  // Também ignora um Esc já `preventDefault()`-ado por outra camada acima
+  // (achado de review): os dropdowns Radix daqui dentro (status/responsável)
+  // e o modal de criar subtarefa (irmão, fora desta árvore) marcam o evento
+  // como tratado ao fechar — sem essa checagem, dispensar um DropdownMenu ou
+  // fechar "+ Nova Subtarefa" com Esc fechava o detalhe da tarefa junto.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
       onClose();
