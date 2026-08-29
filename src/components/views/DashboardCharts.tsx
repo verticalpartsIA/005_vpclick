@@ -20,10 +20,10 @@ export function DashboardCharts({ userPerformance, statusData, total, primaryCha
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
       <div className="bg-white p-6 rounded-xl border shadow-sm lg:col-span-2">
-        <h3 className="font-bold text-gray-700 mb-5 flex items-center gap-2">
+        <h2 className="font-bold text-gray-700 mb-5 flex items-center gap-2">
           👥 Performance por Usuário
           <span className="ml-auto text-xs text-gray-400 font-normal">{userPerformance.length} membro{userPerformance.length !== 1 ? 's' : ''} ativos</span>
-        </h3>
+        </h2>
         {userPerformance.length === 0 ? (
           <div className="h-[260px] flex items-center justify-center text-sm text-gray-400">Nenhum usuário com tarefas no período.</div>
         ) : (
@@ -56,7 +56,7 @@ export function DashboardCharts({ userPerformance, statusData, total, primaryCha
       </div>
 
       <div className="bg-white p-6 rounded-xl border shadow-sm">
-        <h3 className="font-bold text-gray-700 mb-5">🎯 Distribuição de Status</h3>
+        <h2 className="font-bold text-gray-700 mb-5">🎯 Distribuição de Status</h2>
         <div className="h-[200px]">
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
