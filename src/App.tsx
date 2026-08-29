@@ -2324,8 +2324,9 @@ export default function App() {
         title: updatedDoc.title,
         content: updatedDoc.content,
         header_image: updatedDoc.headerImage,
-        is_wiki: updatedDoc.isWiki || false,
-        updated_at: new Date().toISOString()
+        is_wiki: updatedDoc.isWiki || false
+        // updated_at: um trigger no banco (docs_updated_at) já garante isso
+        // em toda UPDATE, com o relógio do servidor — não do client.
       })
       .eq('id', updatedDoc.id);
 
