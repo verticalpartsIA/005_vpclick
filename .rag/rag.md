@@ -12,6 +12,10 @@ Este documento especifica a base de conhecimento e a arquitetura de **Geração 
 
 RAG combina a memória paramétrica de um modelo de linguagem com memória externa recuperável. No VPClick, a resposta não deve depender apenas do conhecimento geral do LLM: deve recuperar registros autorizados do workspace, fornecer evidências e declarar quando não houver informação suficiente.
 
+![Arquitetura RAG em microsserviços do VPClick](./arquitetura-rag-microsservicos-vpclick.jpg)
+
+*Figura 1 — Arquitetura de referência: serviços de negócio, configuração e descoberta, microagentes e pipeline RAG desacoplado.*
+
 ### 1.1 Escopo real identificado no código
 
 O sistema possui 15 visões de navegação: Dashboard, Lista, Kanban, Calendário, Gantt, Tabela, Administração, Documento, Caixa de entrada, Respostas, Comentários atribuídos, Reuniões, Minhas tarefas, Lembretes e Tarefas recentes. Existem 16 formas de URL quando se conta `/dashboard`, que é apenas um alias aceito para `/`, não uma tela adicional. O Dashboard também possui uma apresentação contextual de Espaço, selecionada por parâmetros de escopo.
@@ -936,3 +940,174 @@ Além das fixtures reproduzíveis, criar os seguintes cenários:
 - Michelli Brito, `rag-spring-ai`: <https://github.com/MichelliBrito/rag-spring-ai>
 - Commit analisado: `db1e5cf69cee0c29ceef6153a05ab7d9075f434b`
 - Elementos estudados: configuração Spring AI/pgvector, `VectorStoreRepository`, indexadores de produtos e pedidos, serviço de recomendação, prompt de sistema, endpoints de demonstração, fixtures e coleção Postman.
+
+## 28. Arquitetura RAG em microsserviços aplicada ao VPClick
+
+A Figura 1 evolui a estrutura visual estudada no projeto `rag-spring-ai` para uma arquitetura adequada ao VPClick. O desenho não significa que todos os componentes já existam no repositório: trata-se da topologia-alvo para separar responsabilidades, escalar partes críticas e impedir que o LLM se torne o sistema de registro.
+
+### 28.1 Leitura da arquitetura
+
+| Camada | Componentes | Responsabilidade |
+|---|---|---|
+| Entrada | API Gateway | autenticação, autorização inicial, rate limit, roteamento e correlação |
+| Configuração e descoberta | Config Server, Service Registry | configuração externa, descoberta, health check e roteamento entre serviços |
+| Negócio | Produtos, Pedidos, Pagamentos, Notificações | manter o estado transacional e publicar eventos confirmados |
+| Agentes | Recomendação RAG, Detecção de Fraudes | executar raciocínio especializado sob regras e universo autorizado |
+| Pipeline RAG | Ingestão/Chunking, Embedding, pgvector, Recuperação/Reranking, LLM | transformar fontes, recuperar evidências e gerar resposta fundamentada |
+
+### 28.2 Fluxo “produto atualizado”
+
+1. Produtos confirma criação ou alteração no banco transacional.
+2. O serviço publica `ProductCreated` ou `ProductUpdated` através da outbox.
+3. O consumidor RAG valida versão, workspace, visibilidade e checksum.
+4. O indexador constrói o texto de embedding e separa os metadados estruturados.
+5. O conteúdo é dividido apenas quando exceder a unidade semântica do produto.
+6. O modelo de embedding gera o vetor com versão identificada.
+7. Documento e vetor são gravados no pgvector por operação idempotente.
+8. A etapa de verificação confirma que a nova versão pode ser recuperada e a anterior foi invalidada.
+
+O evento não deve transportar segredo ou informação sem finalidade de recuperação. Preço, moeda, estoque, status e elegibilidade continuam sendo campos estruturados da fonte e filtros obrigatórios.
+
+### 28.3 Fluxo “novo pedido”
+
+1. Pedidos confirma o pedido e publica `OrderCreated`.
+2. O histórico autorizado é indexado separadamente do catálogo.
+3. O microagente recebe a intenção e os identificadores do contexto.
+4. O recuperador consulta produtos elegíveis e histórico do cliente em planos separados.
+5. Regras determinísticas eliminam itens já adquiridos, inativos, incompatíveis, sem disponibilidade ou fora das políticas comerciais.
+6. O reranker ordena os candidatos restantes.
+7. O LLM recebe somente o universo permitido, evidências e contrato da resposta.
+8. Um validador confirma IDs, valores, citações e ausência de repetição.
+9. A recomendação pode ser devolvida ao serviço de Pedidos ou enviada por Notificações, sem alterar automaticamente o pedido.
+
+### 28.4 Relação com Pagamentos e Detecção de Fraudes
+
+O microagente de Detecção de Fraudes aparece como domínio adjacente, não como parte do RAG de conhecimento. Ele pode combinar regras, modelos estatísticos, features e evidências recuperadas, mas decisões financeiras críticas não podem depender somente de texto gerado por LLM.
+
+- Pagamentos permanece proprietário do estado financeiro.
+- O agente recebe apenas dados necessários e autorizados.
+- Score, regras acionadas e versão do modelo devem ser persistidos.
+- Bloqueio ou liberação exige política determinística e trilha auditável.
+- Notificações informa o resultado; não decide fraude.
+- Conteúdo RAG pode explicar contexto, nunca substituir controles antifraude.
+
+### 28.5 API Gateway
+
+O gateway é a única entrada pública representada. Deve:
+
+- validar identidade e tenant/workspace;
+- propagar `trace_id`, `correlation_id` e identidade do usuário;
+- aplicar rate limit e limites de payload;
+- bloquear endpoints internos de ingestão/reindexação;
+- encaminhar apenas claims verificadas;
+- não executar embedding, retrieval ou regras de negócio;
+- não registrar prompts ou dados sensíveis integralmente.
+
+### 28.6 Config Server
+
+Centraliza configurações operacionais versionadas, sem armazenar segredos em texto aberto:
+
+- modelos habilitados por ambiente;
+- `candidate_k`, `final_k` e limiares;
+- timeouts, retries e circuit breakers;
+- feature flags;
+- versões de prompt e plano de recuperação;
+- políticas de fallback;
+- endpoints lógicos dos provedores.
+
+Segredos devem permanecer em cofre próprio e ser injetados em tempo de execução. Alterações de configuração que afetem qualidade precisam de aprovação, auditoria e rollback.
+
+### 28.7 Service Registry
+
+É útil quando os componentes são realmente implantados como serviços independentes e possuem instâncias dinâmicas. Em uma arquitetura menor, descoberta nativa da plataforma de containers pode substituir um registry dedicado. Sua função é informar onde um serviço saudável está, nunca conceder autorização.
+
+### 28.8 Microagente de Recomendação RAG
+
+Este componente orquestra o caso de uso, mas não deve concentrar toda a plataforma. Responsabilidades:
+
+- interpretar intenção de recomendação;
+- requisitar filtros determinísticos ao domínio;
+- executar recuperações separadas de catálogo e histórico;
+- montar o contexto com orçamento de tokens;
+- chamar o LLM;
+- validar o resultado contra candidatos autorizados;
+- retornar resposta estruturada com citações;
+- registrar métricas sem vazar conteúdo sensível.
+
+Ele não pode criar produto, alterar pedido, autorizar pagamento, conceder permissão ou mudar catálogo sem uma chamada explícita ao serviço proprietário e autorização correspondente.
+
+### 28.9 Pipeline RAG desacoplado
+
+#### Ingestão e chunking
+
+Recebe eventos, extrai conteúdo, limpa, classifica, mascara dados, cria chunks e preserva proveniência. Deve poder reprocessar a fonte sem duplicação.
+
+#### Modelo de embedding
+
+Transforma consulta e documentos no mesmo espaço vetorial. Pode operar como serviço interno ou provedor externo, sempre com versão, dimensão, política de retenção, timeout e cache controlados.
+
+#### Base vetorial — pgvector
+
+Armazena embeddings e metadados com RLS. A base vetorial é um índice derivado e reconstruível; a fonte transacional continua sendo autoridade. Backups, migrações de dimensão e reindexação devem fazer parte da operação.
+
+#### Recuperação e reranking
+
+Combina filtros SQL, busca lexical e similaridade vetorial; agrega fontes diferentes; remove duplicatas; aplica recência e autoridade; reranqueia candidatos; interrompe a resposta quando a evidência é insuficiente.
+
+#### LLM
+
+Sintetiza uma resposta limitada às evidências. Não recebe acesso direto irrestrito ao banco e não aplica sozinho autorização, cálculos financeiros, mudança de status ou decisão antifraude.
+
+### 28.10 Síncrono versus assíncrono
+
+| Operação | Padrão recomendado | Motivo |
+|---|---|---|
+| confirmação de produto/pedido/pagamento | síncrona no serviço proprietário | consistência transacional |
+| publicação de evento | outbox assíncrona | entrega confiável sem acoplar ao RAG |
+| geração de embedding | assíncrona | latência e retries independentes |
+| consulta RAG do usuário | síncrona com timeout | interação imediata |
+| recomendação pós-pedido | assíncrona quando não bloquear a compra | disponibilidade do fluxo principal |
+| notificação | assíncrona | tolerância a falhas e escalabilidade |
+| reconciliação/reindexação | job assíncrono | processamento em lote controlado |
+
+### 28.11 Falhas e mecanismos de proteção
+
+- **Embedding indisponível:** manter evento para retry; não perder nem confirmar indexação falsa.
+- **pgvector indisponível:** abrir circuit breaker e responder sem RAG somente se o caso permitir e estiver claramente rotulado.
+- **LLM indisponível:** preservar evidências, devolver erro controlado ou resposta determinística limitada.
+- **Configuração inválida:** impedir promoção e reverter para versão estável.
+- **Serviço não descoberto:** não redirecionar para instância não verificada.
+- **Evento duplicado:** deduplicar por `event_id` e versão.
+- **Evento fora de ordem:** rejeitar regressão de `source_version`.
+- **Evidência insuficiente:** não gerar recomendação.
+- **Saída fora do universo:** bloquear na validação pós-geração.
+- **Permissão revogada:** invalidar acesso e reindexar metadados antes de novas respostas.
+
+### 28.12 Implantação progressiva no VPClick
+
+Não é recomendável dividir imediatamente o VPClick em todos os serviços mostrados. A figura representa fronteiras lógicas que podem começar como módulos bem separados:
+
+1. manter Produtos, Pedidos, RAG e Notificações como módulos/serviços conforme a realidade atual;
+2. implementar outbox, worker de indexação e pgvector primeiro;
+3. expor uma API RAG interna com autenticação e fontes;
+4. separar o microagente somente quando escala, equipe, segurança ou ciclo de implantação justificarem;
+5. adotar Config Server e Service Registry dedicados apenas se a infraestrutura não fornecer equivalentes;
+6. introduzir Detecção de Fraudes como projeto próprio, com governança financeira específica.
+
+Essa abordagem evita “microserviços por desenho”: as fronteiras são preservadas desde o início, mas a complexidade operacional cresce somente quando houver benefício comprovado.
+
+### 28.13 Critérios de aceite da arquitetura visual
+
+- [ ] Toda entrada pública passa pelo API Gateway.
+- [ ] Serviços de negócio permanecem proprietários dos dados transacionais.
+- [ ] Produtos e pedidos publicam eventos versionados.
+- [ ] Indexação não bloqueia o fluxo principal.
+- [ ] Catálogo e histórico usam tipos e filtros separados.
+- [ ] ACL/RLS é aplicada antes da similaridade.
+- [ ] pgvector é tratado como índice derivado.
+- [ ] O LLM recebe somente evidências autorizadas.
+- [ ] Recomendações são validadas contra IDs permitidos.
+- [ ] Notificações não executa decisões de negócio.
+- [ ] Fraude possui regras e auditoria independentes do texto gerado.
+- [ ] Falhas possuem timeout, retry, circuit breaker e observabilidade.
+- [ ] A implementação começa modular e só se distribui quando necessário.
