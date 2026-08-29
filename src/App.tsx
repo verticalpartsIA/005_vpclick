@@ -16,6 +16,7 @@ import CreateListModal from './components/CreateListModal';
 import compactLogoWhite from './assets/logo-verticalparts-white.png';
 import bootLogoVideo from './assets/logo-limpo-video.mp4';
 import { recordRecentTaskId } from './lib/recentTasks';
+import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
 import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
@@ -79,9 +80,9 @@ import {
 
 import { Checkbox } from "@/components/ui/checkbox";
 
-const DashboardCharts = React.lazy(() =>
+const DashboardCharts = React.lazy(lazyImportWithReload(() =>
   import('./components/views/DashboardCharts').then((module) => ({ default: module.DashboardCharts }))
-);
+));
 
 // Views carregadas sob demanda (só quando o usuário abre aquela aba). Reduz o
 // bundle inicial — cada uma dessas é um módulo isolado (não referenciado de
@@ -89,38 +90,41 @@ const DashboardCharts = React.lazy(() =>
 // activeView realmente precisar dela (ver o <Suspense> em volta do bloco de
 // views, mais abaixo). Achado da auditoria Lighthouse: index.js sozinho tinha
 // 1,2 MB, boa parte código de abas que a maioria das sessões nunca abre
-// (Gantt, Reuniões, Inbox, Admin etc.).
-const AdminPanel = React.lazy(() => import('./pages/AdminPanel'));
-const TableView = React.lazy(() =>
+// (Gantt, Reuniões, Inbox, Admin etc.). `lazyImportWithReload` (ver
+// lib/lazyRetry.ts) recarrega a página uma vez se o chunk pedido não existir
+// mais no servidor (build antigo trocado por um deploy) em vez de derrubar a
+// UI inteira no ErrorBoundary de topo.
+const AdminPanel = React.lazy(lazyImportWithReload(() => import('./pages/AdminPanel')));
+const TableView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/TableView').then((m) => ({ default: m.TableView }))
-);
-const CalendarView = React.lazy(() =>
+));
+const CalendarView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/CalendarView').then((m) => ({ default: m.CalendarView }))
-);
-const GanttView = React.lazy(() =>
+));
+const GanttView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/GanttView').then((m) => ({ default: m.GanttView }))
-);
-const InboxView = React.lazy(() =>
+));
+const InboxView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/InboxView').then((m) => ({ default: m.InboxView }))
-);
-const RepliesView = React.lazy(() =>
+));
+const RepliesView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/RepliesView').then((m) => ({ default: m.RepliesView }))
-);
-const AssignedCommentsView = React.lazy(() =>
+));
+const AssignedCommentsView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/AssignedCommentsView').then((m) => ({ default: m.AssignedCommentsView }))
-);
-const MeetingsView = React.lazy(() =>
+));
+const MeetingsView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/MeetingsView').then((m) => ({ default: m.MeetingsView }))
-);
-const MyTasksView = React.lazy(() =>
+));
+const MyTasksView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/MyTasksView').then((m) => ({ default: m.MyTasksView }))
-);
-const RecentTasksView = React.lazy(() =>
+));
+const RecentTasksView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/RecentTasksView').then((m) => ({ default: m.RecentTasksView }))
-);
-const RemindersView = React.lazy(() =>
+));
+const RemindersView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/RemindersView').then((m) => ({ default: m.RemindersView }))
-);
+));
 
 const SSOHandler: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   return <>{children}</>;
@@ -776,6 +780,11 @@ export default function App() {
   // sem invalidação — uma aba deixada aberta pode ficar rodando código
   // antigo por muito tempo). Ver src/lib/versionCheck.ts.
   useEffect(() => startVersionCheck(), []);
+
+  // App montou com sucesso: libera um novo reload automático caso um chunk de
+  // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
+  // src/lib/lazyRetry.ts — a flag sobrevive ao reload que ela mesma dispara).
+  useEffect(() => clearChunkReloadFlag(), []);
 
   // --- SSO LOGIC ---
   // "Failed to send a request to the Edge Function" é o erro que o supabase-js
