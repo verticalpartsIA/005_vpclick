@@ -83,6 +83,16 @@ export function startVersionCheck(): () => void {
             label: 'Atualizar agora',
             onClick: () => window.location.reload(),
           },
+          // Sem isso o aviso (duration: Infinity) ficava preso na tela pra
+          // sempre — sem "X" nem outro jeito de dispensar — cobrindo o botão
+          // "+ Criar" da barra de abas até o usuário decidir recarregar
+          // (achado de QA). Dispensar aqui só fecha o toast; a versão nova
+          // já foi marcada como notificada (markNotified acima) e continua
+          // valendo na próxima visita/reload natural.
+          cancel: {
+            label: 'Depois',
+            onClick: () => {},
+          },
         });
       }
     } catch {

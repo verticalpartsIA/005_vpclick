@@ -2724,7 +2724,11 @@ export default function App() {
         mainAssigneeId: newTaskPartial.mainAssigneeId || currentUser.id,
         secondaryAssigneeIds: [],
         startDate: formatLocalDate(new Date()),
-        dueDate: newTaskPartial.dueDate || formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+        // Sem prazo inventado (achado de QA): antes toda tarefa nova sem
+        // dueDate explícito ganhava +7 dias escondido, fazendo o usuário
+        // achar que tinha definido um prazo quando não tinha — e virando
+        // "atrasada" fantasma no dashboard de saúde depois.
+        dueDate: newTaskPartial.dueDate || '',
         listId: newTaskPartial.listId,
         projectId: newTaskPartial.projectId || null,
         parentId: newTaskPartial.parentId || null,
@@ -2765,7 +2769,7 @@ export default function App() {
       mainAssigneeId: currentUser.id,
       secondaryAssigneeIds: [],
       startDate: formatLocalDate(new Date()),
-      dueDate: formatLocalDate(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+      dueDate: '', // mesmo raciocínio de handleCreateTask acima: sem prazo inventado
       listId,
       createdBy: currentUser.id,
     });
@@ -6456,13 +6460,23 @@ function ListView({
       {/* Inline Quick Create Trigger */}
       <div
         className="p-3 border-b flex items-center gap-3 bg-gray-50/50 hover:bg-gray-100 cursor-pointer transition-colors"
-        onClick={onQuickCreate}
+        onClick={() => onQuickCreate(activeListId ? { listId: activeListId } : undefined)}
       >
         <div className="w-4 h-4 rounded-full border-2 border-gray-300 flex items-center justify-center text-gray-400">
           <span className="text-xs">+</span>
         </div>
         <span className="text-sm text-gray-500">
-          + Adicionar nova tarefa em <span className="font-semibold">{context.name}</span>...
+          {/* `onClick={onQuickCreate}` direto passava o SyntheticEvent do
+              clique como "prefill" (achado de QA: modal nunca vinha
+              pré-selecionado). Além disso, sem `activeListId` (contexto
+              agregado — pasta/espaço/Dashboard, não uma lista de verdade)
+              não existe um alvo único pra pré-selecionar, então o rótulo não
+              promete mais um contexto que a criação não vai respeitar. */}
+          {activeListId ? (
+            <>+ Adicionar nova tarefa em <span className="font-semibold">{context.name}</span>...</>
+          ) : (
+            '+ Adicionar nova tarefa...'
+          )}
         </span>
       </div>
 
@@ -7642,60 +7656,54 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
   // --- Period filter ---
   type PeriodKey = '7d' | '30d' | '90d' | 'all';
   const [period, setPeriod] = useState<PeriodKey>('all');
-  const filteredTasks = useMemo(() => {
-    if (period === 'all') return tasks;
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - (period === '7d' ? 7 : period === '30d' ? 30 : 90));
-    cutoff.setHours(0, 0, 0, 0);
-    return tasks.filter((t: Task) => {
-      // Usa dueDate → startDate → createdAt como referência de data; sem data = sempre inclui
-      const ref = t.dueDate || t.startDate || t.createdAt;
-      if (!ref) return true;
-      return new Date(ref) >= cutoff;
-    });
-  }, [tasks, period]);
 
   const activeList = lists?.find((l: any) => l.id === activeListId);
   const activeStatusGroup = statusGroups?.find((g: any) => g.id === activeList?.statusGroupId) || statusGroups?.[0];
   const activeStatusOptions = activeStatusGroup?.options || [];
 
-  const isConcluido = (status: string) => {
-    const s = (status || '').toLowerCase();
-    return s.includes('conclu') || s.includes('aprovado') || s.includes('fechado');
-  };
-
-  // --- Health buckets (dynamic, using getTaskHealth) ---
-  const healthBuckets = useMemo(() => {
-    const buckets: Record<string, { label: string; emoji: string; color: string; bg: string; count: number }> = {
-      done:      { label: 'Missão cumprida',        emoji: '🎉', color: '#10b981', bg: '#d1fae5', count: 0 },
-      ok:        { label: 'Tranquilo, em dia',      emoji: '😄', color: '#3b82f6', bg: '#dbeafe', count: 0 },
-      warning:   { label: 'Atenção ao prazo',       emoji: '😅', color: '#f59e0b', bg: '#fef9c3', count: 0 },
-      urgent:    { label: 'Cuidado, últimos dias',  emoji: '😰', color: '#f97316', bg: '#ffedd5', count: 0 },
-      late:      { label: 'Atrasado! Corra',        emoji: '😡', color: '#ef4444', bg: '#fee2e2', count: 0 },
-      waiting:   { label: 'Aguardando início',      emoji: '⏰', color: '#6b7280', bg: '#f3f4f6', count: 0 },
-      blocked:   { label: 'Aguardando / Em espera', emoji: '⏳', color: '#8b5cf6', bg: '#ede9fe', count: 0 },
-      cancelled: { label: 'Cancelado / Reprovado',  emoji: '🚫', color: '#9ca3af', bg: '#f3f4f6', count: 0 },
-      nodate:    { label: 'Sem prazo definido',      emoji: '—',  color: '#d1d5db', bg: '#f9fafb', count: 0 },
-    };
-
-    filteredTasks.forEach((t: Task) => {
-      const h = getTaskHealth(t);
-      if (!h) { buckets.nodate.count++; return; }
-      if (h.emoji === '🎉') buckets.done.count++;
-      else if (h.emoji === '😄') buckets.ok.count++;
-      else if (h.emoji === '😅') buckets.warning.count++;
-      else if (h.emoji === '😰') buckets.urgent.count++;
-      else if (h.emoji === '😡') buckets.late.count++;
-      else if (h.emoji === '⏰') buckets.waiting.count++;
-      else if (h.emoji === '⏳') buckets.blocked.count++;
-      else if (h.emoji === '🚫') buckets.cancelled.count++;
-      else buckets.nodate.count++;
+  // --- Resumo agregado (Total/Concluídas/Atrasadas/Em Dia/Aguardando/
+  // Prorrogadas, Radar de Saúde, pizza de status, ranking por usuário,
+  // distribuição por prioridade e resumo por lista) ---
+  //
+  // Calculado no banco (get_dashboard_summary), NÃO a partir de `tasks`: o
+  // Dashboard global pode ter dezenas de milhares de tarefas, e baixar uma
+  // linha por tarefa só pra somar esses números deixava a tela em branco no
+  // primeiro carregamento (achado de QA — o carregamento de `tasks` nem
+  // chegava a acontecer nesse escopo). `tasks` continua sendo usado só pela
+  // "Atividade Recente" mais abaixo, que precisa dos registros de verdade
+  // (não dá pra agregar no banco uma lista de itens individuais).
+  const [summaryRows, setSummaryRows] = useState<taskRepo.DashboardSummaryRow[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    taskRepo.fetchDashboardSummary(period).then(rows => {
+      if (!cancelled) setSummaryRows(rows ?? []);
     });
+    return () => { cancelled = true; };
+  }, [period]);
 
-    return Object.values(buckets);
-  }, [filteredTasks]);
+  const summaryTotal = useMemo(() => (summaryRows || []).reduce((s, r) => s + r.count, 0), [summaryRows]);
 
-  const totalWithHealth = filteredTasks.length || 1;
+  // --- Health buckets (usa health_key já classificado no banco — mesmas
+  // categorias de getTaskHealth, ver migration get_dashboard_summary) ---
+  const HEALTH_BUCKET_META: Record<string, { label: string; emoji: string; color: string; bg: string }> = {
+    done:      { label: 'Missão cumprida',        emoji: '🎉', color: '#10b981', bg: '#d1fae5' },
+    ok:        { label: 'Tranquilo, em dia',      emoji: '😄', color: '#3b82f6', bg: '#dbeafe' },
+    warning:   { label: 'Atenção ao prazo',       emoji: '😅', color: '#f59e0b', bg: '#fef9c3' },
+    urgent:    { label: 'Cuidado, últimos dias',  emoji: '😰', color: '#f97316', bg: '#ffedd5' },
+    late:      { label: 'Atrasado! Corra',        emoji: '😡', color: '#ef4444', bg: '#fee2e2' },
+    waiting:   { label: 'Aguardando início',      emoji: '⏰', color: '#6b7280', bg: '#f3f4f6' },
+    blocked:   { label: 'Aguardando / Em espera', emoji: '⏳', color: '#8b5cf6', bg: '#ede9fe' },
+    cancelled: { label: 'Cancelado / Reprovado',  emoji: '🚫', color: '#9ca3af', bg: '#f3f4f6' },
+    nodate:    { label: 'Sem prazo definido',     emoji: '—',  color: '#d1d5db', bg: '#f9fafb' },
+  };
+  const healthBuckets = useMemo(() => {
+    const counts: Record<string, number> = {};
+    Object.keys(HEALTH_BUCKET_META).forEach(k => { counts[k] = 0; });
+    (summaryRows || []).forEach(r => { counts[r.healthKey] = (counts[r.healthKey] || 0) + r.count; });
+    return Object.entries(HEALTH_BUCKET_META).map(([key, meta]) => ({ ...meta, count: counts[key] || 0 }));
+  }, [summaryRows]);
+
+  const totalWithHealth = summaryTotal || 1;
 
   // --- Status distribution (grupos consolidados — evita torta com 13 fatias) ---
   const STATUS_GROUPS_DASH = [
@@ -7708,29 +7716,31 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
   const statusData = useMemo(() => {
     const groups = STATUS_GROUPS_DASH.map(g => ({
       name: g.name,
-      value: filteredTasks.filter((t: Task) => g.test((t.status || '').toLowerCase())).length,
+      value: (summaryRows || []).filter(r => g.test((r.status || '').toLowerCase())).reduce((sum, r) => sum + r.count, 0),
       color: g.color,
     }));
     // Status que não batem em nenhum grupo (ex.: "Aberto", "Não Iniciado") ainda
     // contam no Total do KPI — sem esse catch-all a pizza somava menos que o total.
-    const semGrupo = filteredTasks.length - groups.reduce((sum, g) => sum + g.value, 0);
+    const semGrupo = summaryTotal - groups.reduce((sum, g) => sum + g.value, 0);
     if (semGrupo > 0) groups.push({ name: '📌 Outros', value: semGrupo, color: '#94a3b8' });
     return groups.filter(d => d.value > 0);
-  }, [filteredTasks]);
+  }, [summaryRows, summaryTotal]);
 
   // --- User performance ---
   const userPerformance = useMemo(() =>
     users
       .map((u: User) => {
-        const mine = filteredTasks.filter((t: Task) => t.mainAssigneeId === u.id);
-        const late = mine.filter((t: Task) => { const h = getTaskHealth(t); return h?.emoji === '😡'; }).length;
+        const rows = (summaryRows || []).filter(r => r.mainAssigneeId === u.id);
+        const totalU = rows.reduce((s, r) => s + r.count, 0);
+        const concluidasU = rows.filter(r => r.healthKey === 'done').reduce((s, r) => s + r.count, 0);
+        const atrasadasU = rows.filter(r => r.healthKey === 'late').reduce((s, r) => s + r.count, 0);
         return {
           name: u.name.split(' ')[0],
           fullName: u.name,
           avatar: u.avatar,
-          total: mine.length,
-          concluidas: mine.filter((t: Task) => isConcluido(t.status)).length,
-          atrasadas: late,
+          total: totalU,
+          concluidas: concluidasU,
+          atrasadas: atrasadasU,
         };
       })
       .filter((u: any) => u.total > 0)
@@ -7741,7 +7751,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
         const taxaB = b.total > 0 ? b.concluidas / b.total : 0;
         return taxaB - taxaA;
       })
-  , [filteredTasks, users]);
+  , [summaryRows, users]);
 
   // --- Priority breakdown ---
   const PRIORITY_CFG = [
@@ -7758,24 +7768,23 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
   const priorityData = useMemo(() => {
     const counts: Record<string, number> = {};
     PRIORITY_CFG.forEach(c => { counts[normalizePriorityKey(c.key)] = 0; });
-    filteredTasks.forEach((t: Task) => {
-      const p = normalizePriorityKey(t.priority || 'SEM PRIORIDADE');
-      if (counts[p] !== undefined) counts[p]++;
-      else counts[normalizePriorityKey('SEM PRIORIDADE')]++;
+    (summaryRows || []).forEach(r => {
+      const p = normalizePriorityKey(r.priority || 'SEM PRIORIDADE');
+      if (counts[p] !== undefined) counts[p] += r.count;
+      else counts[normalizePriorityKey('SEM PRIORIDADE')] += r.count;
     });
     return PRIORITY_CFG
       .map(c => ({ name: c.label, color: c.color, count: counts[normalizePriorityKey(c.key)] }))
       .filter(d => d.count > 0);
-  }, [filteredTasks]);
+  }, [summaryRows]);
 
   // --- KPI values ---
-  const total = filteredTasks.length;
-  const concluidas = filteredTasks.filter((t: Task) => isConcluido(t.status)).length;
+  const total = summaryTotal;
+  const concluidas = healthBuckets.find(b => b.emoji === '🎉')?.count || 0;
   const atrasadas = healthBuckets.find(b => b.emoji === '😡')?.count || 0;
   const emDia = healthBuckets.find(b => b.emoji === '😄')?.count || 0;
-  const criticas = healthBuckets.find(b => b.emoji === '😰')?.count || 0;
   const aguardando = healthBuckets.find(b => b.emoji === '⏳')?.count || 0;
-  const prorrogadas = filteredTasks.filter((t: Task) => (t.extensionCount || 0) > 0).length;
+  const prorrogadas = useMemo(() => (summaryRows || []).filter(r => r.isExtended).reduce((s, r) => s + r.count, 0), [summaryRows]);
   const taxaConclusao = total > 0 ? Math.round((concluidas / total) * 100) : 0;
 
   // --- Resumo por lista (todos os projetos) — usa allLists (dados globais) ---
@@ -7783,22 +7792,22 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
     // Prefere allLists (carregado globalmente) → cai no lists local como fallback
     const availLists = (allLists && allLists.length > 0) ? allLists : (lists || []);
     const map = new Map<string, { name: string; total: number; done: number }>();
-    filteredTasks.forEach((t: Task) => {
-      if (!t.listId) return;
-      const list = availLists.find((l: any) => l.id === t.listId);
+    (summaryRows || []).forEach(r => {
+      if (!r.listId) return;
+      const list = availLists.find((l: any) => l.id === r.listId);
       if (!list) return;
-      const cur = map.get(t.listId) || { name: list.name, total: 0, done: 0 };
-      map.set(t.listId, {
+      const cur = map.get(r.listId) || { name: list.name, total: 0, done: 0 };
+      map.set(r.listId, {
         name: list.name,
-        total: cur.total + 1,
-        done: cur.done + (isConcluido(t.status) ? 1 : 0)
+        total: cur.total + r.count,
+        done: cur.done + (r.healthKey === 'done' ? r.count : 0),
       });
     });
     return Array.from(map.values())
       .filter(l => l.total > 0)
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
-  }, [filteredTasks, lists, allLists]);
+  }, [summaryRows, lists, allLists]);
 
   // --- Atividade recente (últimas mudanças de status — usa tasks completo, não filtrado por período) ---
   const recentActivity = useMemo(() => {
@@ -7815,8 +7824,11 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
       .slice(0, 8);
   }, [tasks]);
 
-  // Loading state: mostra skeleton enquanto carrega dados globais pela primeira vez
-  if (isLoading) {
+  // Loading state: mostra skeleton enquanto carrega dados globais pela primeira
+  // vez — `summaryRows === null` cobre o resumo agregado (get_dashboard_summary,
+  // widgets principais), `isLoading` cobre `tasks` (só usado por "Atividade
+  // Recente" abaixo).
+  if (summaryRows === null || isLoading) {
     return (
       <div className="flex flex-col gap-6 animate-pulse">
         <div className="h-8 bg-gray-100 rounded-lg w-48 ml-auto" />
@@ -8059,6 +8071,25 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [dueDate, setDueDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const todayLabel = new Date().toLocaleDateString('pt-BR');
+
+  // Esc fecha este modal (não tinha nenhum jeito de fechar por teclado antes).
+  // Ouve na fase de CAPTURA (como o próprio Radix faz) e marca o evento como
+  // tratado (`preventDefault`) antes que ele chegue no listener de Esc do
+  // TaskDetailModal por baixo (que abre este modal pra criar subtarefa) — sem
+  // isso, fechar "+ Nova Subtarefa" com Esc fechava o detalhe da tarefa junto
+  // (achado de review). Ignora quando o foco está num campo de texto, pra não
+  // fechar o formulário sozinho por reflexo.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      e.preventDefault();
+      onClose();
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
 
   // Duração é opcional, mas se preenchida precisa ser um número de dias (ex: 5)
   // ou horas no formato `3h`. Qualquer outra coisa (ex: `abc`) é sinalizada.
@@ -8553,6 +8584,27 @@ function TaskDetailModal(props: any) {
     }, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detailActiveTab]);
+
+  // Esc fecha o detalhe da tarefa (achado de QA: só o botão "voltar" do
+  // navegador funcionava). Ignora quando o foco está num campo de texto —
+  // edição de título/comentário já trata Esc localmente (cancelar a edição),
+  // e sem essa checagem as duas coisas aconteceriam juntas no mesmo evento.
+  // Também ignora um Esc já `preventDefault()`-ado por outra camada acima
+  // (achado de review): os dropdowns Radix daqui dentro (status/responsável)
+  // e o modal de criar subtarefa (irmão, fora desta árvore) marcam o evento
+  // como tratado ao fechar — sem essa checagem, dispensar um DropdownMenu ou
+  // fechar "+ Nova Subtarefa" com Esc fechava o detalhe da tarefa junto.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const [newDueDate, setNewDueDate] = useState(task.dueDate);
   const [extensionReason, setExtensionReason] = useState('');
   const [isExtending, setIsExtending] = useState(false);
@@ -8990,9 +9042,14 @@ function TaskDetailModal(props: any) {
         )}
         <div className="p-4 border-b shrink-0 flex items-center justify-between bg-white px-8">
           <div className="flex items-center gap-4">
-            <div className="text-gray-400 p-1 hover:bg-gray-100 rounded cursor-pointer">
+            <button
+              type="button"
+              onClick={onClose}
+              title="Voltar"
+              className="text-gray-400 p-1 hover:bg-gray-100 rounded cursor-pointer"
+            >
               <Icons.ChevronRight className="w-5 h-5 rotate-180" />
-            </div>
+            </button>
             <div className="flex items-center gap-2 text-xs font-semibold text-gray-400 uppercase tracking-widest">
               <span>VerticalParts</span>
               <span>/</span>
