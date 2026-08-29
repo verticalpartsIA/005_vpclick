@@ -3600,8 +3600,14 @@ export default function App() {
           </div>
 
           {/* Dynamic View Area */}
-          <main className="flex-1 overflow-auto p-4 sm:p-6 custom-scrollbar">
-          <div key={activeView} className="animate-in fade-in slide-in-from-bottom-1 duration-200">
+          {/* Tabela é uma view de altura travada com scroll (vertical + horizontal)
+              e cabeçalho sticky internos — precisa herdar altura definida do <main>
+              em vez de "auto" (senão a própria página rola, o cabeçalho sticky não
+              tem efeito e a barra horizontal só aparece depois de milhares de linhas,
+              lá no rodapé real da página). As outras views continuam usando o scroll
+              de página normal do <main>. */}
+          <main className={`flex-1 custom-scrollbar ${activeView === 'Table' ? 'overflow-hidden flex flex-col' : 'overflow-auto p-4 sm:p-6'}`}>
+          <div key={activeView} className={`animate-in fade-in slide-in-from-bottom-1 duration-200 ${activeView === 'Table' ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
             {activeView === 'Admin' && (
               <AdminPanel
                 spaces={spaces}
