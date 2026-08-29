@@ -36,6 +36,7 @@ import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/
 import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
+import { avatarThumb } from './lib/avatarUrl';
 import { TaskDependencies } from './components/TaskDependencies';
 import { NotificationBell } from './components/NotificationBell';
 import { TeamsModal } from './components/TeamsModal';
@@ -388,7 +389,7 @@ function CommentAssignmentBar({ item, users, currentUserId, formatDate, onAssign
               onClick={() => { if (u.id !== item.assignedTo) onAssign(u.id); }}
               className="flex items-center gap-2 text-sm"
             >
-              <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-5 h-5 rounded-full" alt="" />
+              <img src={avatarThumb(u.avatar) || `https://picsum.photos/seed/${u.id}/100`} className="w-5 h-5 rounded-full" alt="" />
               {u.name}
               {item.assignedTo === u.id && <Icons.Check className="w-3.5 h-3.5 ml-auto text-purple-500" />}
             </DropdownMenuItem>
@@ -448,7 +449,7 @@ function ReplyItem({ item, users, teams, currentUserId, taskId, onEdit, onDelete
   return (
     <div className="relative group/comment">
       <div className="absolute -left-[22px] top-0 w-5 h-5 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
-        <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
+        <img src={avatarThumb(author?.avatar) || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
       </div>
       <div className="bg-white p-3 rounded-xl border border-gray-100 shadow-sm">
         <div className="flex items-center justify-between mb-1.5">
@@ -584,7 +585,7 @@ function CommentItem({ item, replies, users, teams, currentUserId, taskId, onEdi
     <div>
       <div className="relative group/comment">
         <div className="absolute -left-[28px] top-0 w-6 h-6 rounded-full border-2 border-white shadow-sm overflow-hidden bg-white hover:scale-150 z-10 transition-all cursor-pointer">
-          <img src={author?.avatar || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
+          <img src={avatarThumb(author?.avatar) || `https://picsum.photos/seed/${item.userId}/100`} alt="" />
         </div>
         <div
           ref={cardRef}
@@ -3475,7 +3476,7 @@ export default function App() {
                 className="relative cursor-pointer"
                 onClick={(e) => { e.stopPropagation(); setIsUserMenuOpen(!isUserMenuOpen); }}
               >
-                <img src={currentUser.avatar} alt="Avatar" className="w-10 h-10 rounded-full border-2 border-[var(--primary-color)] hover:opacity-90 transition-opacity" />
+                <img src={avatarThumb(currentUser.avatar)} alt="Avatar" className="w-10 h-10 rounded-full border-2 border-[var(--primary-color)] hover:opacity-90 transition-opacity" />
 
                 {isUserMenuOpen && (
                   <div className="absolute right-0 top-12 w-56 bg-white rounded-xl shadow-xl border border-gray-100 py-2 z-[100] animate-in fade-in zoom-in-95 duration-100">
@@ -6740,7 +6741,7 @@ function ListView({
                                           <div className="flex -space-x-2">
                                             {t.mainAssigneeId ? (
                                               <img
-                                                src={users?.find((u: User) => u.id === t.mainAssigneeId)?.avatar || `https://picsum.photos/seed/${t.mainAssigneeId}/100`}
+                                                src={avatarThumb(users?.find((u: User) => u.id === t.mainAssigneeId)?.avatar) || `https://picsum.photos/seed/${t.mainAssigneeId}/100`}
                                                 className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
                                                 alt="Assignee"
                                                 title={users?.find((u: User) => u.id === t.mainAssigneeId)?.name}
@@ -6751,7 +6752,7 @@ function ListView({
                                             {(t.secondaryAssigneeIds || []).map((id: string) => (
                                               <img
                                                 key={id}
-                                                src={users?.find((u: User) => u.id === id)?.avatar || `https://picsum.photos/seed/${id}/100`}
+                                                src={avatarThumb(users?.find((u: User) => u.id === id)?.avatar) || `https://picsum.photos/seed/${id}/100`}
                                                 className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
                                                 alt="Assignee"
                                                 title={users?.find((u: User) => u.id === id)?.name}
@@ -7541,7 +7542,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
                           <div className="mt-2 flex items-center gap-3">
                             <div className="flex -space-x-1.5 items-center" title={allAssignees.map((u: any) => u.name).join(', ') || 'Sem responsável'}>
                               {allAssignees.length > 0 ? allAssignees.slice(0, 3).map((u: any) => (
-                                <img key={u.id} src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="h-5 w-5 rounded-full border-2 border-white shadow-sm" alt={u.name} />
+                                <img key={u.id} src={avatarThumb(u.avatar) || `https://picsum.photos/seed/${u.id}/100`} className="h-5 w-5 rounded-full border-2 border-white shadow-sm" alt={u.name} />
                               )) : (
                                 <UserCircle className="h-4 w-4 text-gray-300" />
                               )}
@@ -7998,7 +7999,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
               return (
                 <div key={u.fullName} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 transition-colors">
                   <span className="text-base w-7 text-center shrink-0">{medal}</span>
-                  <img src={u.avatar || `https://picsum.photos/seed/${u.fullName}/100`} className="w-7 h-7 rounded-full border shrink-0" alt={u.name} />
+                  <img src={avatarThumb(u.avatar) || `https://picsum.photos/seed/${u.fullName}/100`} className="w-7 h-7 rounded-full border shrink-0" alt={u.name} />
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-semibold text-gray-800 truncate">{u.fullName}</p>
                     <div className="flex items-center gap-2 mt-0.5">
@@ -9233,7 +9234,7 @@ function TaskDetailModal(props: any) {
                       <DropdownMenuTrigger asChild>
                         <div className="relative cursor-pointer group">
                           <img
-                            src={users?.find((u: any) => u.id === task.mainAssigneeId)?.avatar || `https://picsum.photos/seed/${task.mainAssigneeId}/100`}
+                            src={avatarThumb(users?.find((u: any) => u.id === task.mainAssigneeId)?.avatar) || `https://picsum.photos/seed/${task.mainAssigneeId}/100`}
                             className="w-7 h-7 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white group-hover:ring-2 group-hover:ring-orange-200"
                             alt=""
                           />
@@ -9246,7 +9247,7 @@ function TaskDetailModal(props: any) {
                         <div className="p-2 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/50 mb-1 rounded-sm">Principal</div>
                         {[...users].filter((u: any) => u.email !== AI_AGENT_EMAIL || u.id === task.mainAssigneeId).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleSetMainAssignee(u.id)} className="flex items-center gap-3 py-2">
-                            <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
+                            <img src={avatarThumb(u.avatar) || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
                             <span className={`text-sm ${task.mainAssigneeId === u.id ? 'font-bold text-gray-900' : 'text-gray-600'}`}>{u.name}</span>
                             {task.mainAssigneeId === u.id && <Icons.Check className="w-4 h-4 ml-auto text-blue-500" />}
                           </DropdownMenuItem>
@@ -9256,7 +9257,7 @@ function TaskDetailModal(props: any) {
                         {users.filter((u: any) => u.id !== task.mainAssigneeId && (u.email !== AI_AGENT_EMAIL || (task.secondaryAssigneeIds || []).includes(u.id))).sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')).map((u: any) => (
                           <DropdownMenuItem key={u.id} onClick={() => handleToggleSecondaryAssignee(u.id)} className="flex items-center gap-3 py-2">
                             <div className="relative">
-                              <img src={u.avatar || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
+                              <img src={avatarThumb(u.avatar) || `https://picsum.photos/seed/${u.id}/100`} className="w-6 h-6 rounded-full" alt="" />
                               {(task.secondaryAssigneeIds || []).includes(u.id) && (
                                 <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-0.5 border border-white">
                                   <Icons.Check className="w-2 h-2 text-white" />
@@ -9289,7 +9290,7 @@ function TaskDetailModal(props: any) {
                       {(task.secondaryAssigneeIds || []).map(id => (
                         <img
                           key={id}
-                          src={users?.find((u: any) => u.id === id)?.avatar || `https://picsum.photos/seed/${id}/100`}
+                          src={avatarThumb(users?.find((u: any) => u.id === id)?.avatar) || `https://picsum.photos/seed/${id}/100`}
                           className="w-7 h-7 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
                           alt=""
                           title={users.find((u: any) => u.id === id)?.name}
@@ -9484,7 +9485,7 @@ function TaskDetailModal(props: any) {
                       <div className="flex items-center gap-4">
                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${PRIORITY_COLORS[sub.priority as TaskPriority]}`}>{sub.priority}</span>
                         <img
-                          src={users?.find((u: any) => u.id === sub.mainAssigneeId)?.avatar || `https://picsum.photos/seed/${sub.mainAssigneeId}/100`}
+                          src={avatarThumb(users?.find((u: any) => u.id === sub.mainAssigneeId)?.avatar) || `https://picsum.photos/seed/${sub.mainAssigneeId}/100`}
                           className="w-6 h-6 rounded-full border-2 border-white shadow-sm hover:scale-[3] hover:z-50 transition-all cursor-pointer bg-white"
                           alt=""
                         />
@@ -9650,7 +9651,7 @@ function TaskDetailModal(props: any) {
                               if (!watcher) return null;
                               return (
                                 <div key={uid} className="flex items-center gap-3 p-2 rounded-xl hover:bg-gray-50">
-                                  <img src={watcher.avatar} className="w-8 h-8 rounded-full" alt="" />
+                                  <img src={avatarThumb(watcher.avatar)} className="w-8 h-8 rounded-full" alt="" />
                                   <div className="flex-1 min-w-0">
                                     <p className="text-sm font-semibold text-gray-800 truncate">{watcher.name}</p>
                                     <p className="text-[11px] text-gray-400 truncate">{watcher.email}</p>

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
+import { avatarThumb } from '../../lib/avatarUrl';
 import { Meeting, MeetingActionItem, MeetingRoom, List, User, UserRole } from '../../types';
 import {
   DropdownMenu,
@@ -430,7 +431,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
               {selected.participantIds.map((id) => {
                 const u = users.find((usr) => usr.id === id);
                 if (!u) return null;
-                return <img key={id} src={u.avatar} title={u.name} className="w-6 h-6 rounded-full border-2 border-white" alt="" />;
+                return <img key={id} src={avatarThumb(u.avatar)} title={u.name} className="w-6 h-6 rounded-full border-2 border-white" alt="" />;
               })}
             </div>
           )}
@@ -690,7 +691,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
                     {m.participantIds.slice(0, 5).map((id) => {
                       const u = users.find((usr) => usr.id === id);
                       if (!u) return null;
-                      return <img key={id} src={u.avatar} title={u.name} className="w-5 h-5 rounded-full border-2 border-white" alt="" />;
+                      return <img key={id} src={avatarThumb(u.avatar)} title={u.name} className="w-5 h-5 rounded-full border-2 border-white" alt="" />;
                     })}
                   </div>
                   {room && (
@@ -880,7 +881,7 @@ function RoomStatusPanel({ rooms, users, onSelectMeeting }: { rooms: MeetingRoom
                         {m.participant_ids.slice(0, 6).map((id) => {
                           const u = users.find((usr) => usr.id === id);
                           if (!u) return null;
-                          return <img key={id} src={u.avatar} title={u.name} className="w-5 h-5 rounded-full border-2 border-white" alt="" />;
+                          return <img key={id} src={avatarThumb(u.avatar)} title={u.name} className="w-5 h-5 rounded-full border-2 border-white" alt="" />;
                         })}
                       </div>
                     )}

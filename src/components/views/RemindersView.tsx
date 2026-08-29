@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
+import { avatarThumb } from '../../lib/avatarUrl';
 import { List, Reminder, ReminderNotifyPreference, User } from '../../types';
 import {
   DropdownMenu,
@@ -245,7 +246,7 @@ export function RemindersView({ currentUser, users, lists, onOpenTask, onCreateT
               <DropdownMenuContent align="end" className="w-56 max-h-72 overflow-y-auto">
                 {users.filter((u) => u.id !== currentUser.id).sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')).map((u) => (
                   <DropdownMenuItem key={u.id} onClick={() => delegateReminder(r, u.id)} className="flex items-center gap-2 text-sm">
-                    <img src={u.avatar} className="w-5 h-5 rounded-full" alt="" />
+                    <img src={avatarThumb(u.avatar)} className="w-5 h-5 rounded-full" alt="" />
                     {u.name}
                   </DropdownMenuItem>
                 ))}

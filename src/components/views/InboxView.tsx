@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { isToday, isYesterday } from 'date-fns';
 import { supabase } from '../../lib/supabase';
+import { avatarThumb } from '../../lib/avatarUrl';
 import { AppNotification, List, User } from '../../types';
 import {
   DropdownMenu,
@@ -441,7 +442,7 @@ export function InboxView({ currentUser, users, lists, onOpenTask, onOpenMeeting
                     className={`flex-1 min-w-0 text-left flex gap-3 hover:bg-gray-50 transition-colors ${density === 'compact' ? 'px-4 py-1.5' : 'px-4 py-3'}`}
                   >
                     {actor ? (
-                      <img src={actor.avatar} className={`rounded-full shrink-0 ${density === 'compact' ? 'w-6 h-6 mt-0.5' : 'w-9 h-9 mt-0.5'}`} alt="" />
+                      <img src={avatarThumb(actor.avatar)} className={`rounded-full shrink-0 ${density === 'compact' ? 'w-6 h-6 mt-0.5' : 'w-9 h-9 mt-0.5'}`} alt="" />
                     ) : (
                       <span className={`rounded-full bg-gray-100 flex items-center justify-center shrink-0 ${density === 'compact' ? 'w-6 h-6 mt-0.5 text-sm' : 'w-9 h-9 mt-0.5 text-base'}`}>
                         {TYPE_ICONS[n.type] || '🔔'}

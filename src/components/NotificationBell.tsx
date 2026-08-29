@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { avatarThumb } from '../lib/avatarUrl';
 import { AppNotification, User } from '../types';
 
 interface NotificationBellProps {
@@ -208,7 +209,7 @@ export function NotificationBell({ currentUser, users, onOpenTask, onOpenMeeting
                   className={`w-full text-left px-4 py-3 border-b last:border-b-0 flex gap-3 hover:bg-gray-50 transition-colors ${!n.read ? 'bg-orange-50/50' : ''}`}
                 >
                   {actor ? (
-                    <img src={actor.avatar} className="w-8 h-8 rounded-full shrink-0 mt-0.5" alt="" />
+                    <img src={avatarThumb(actor.avatar)} className="w-8 h-8 rounded-full shrink-0 mt-0.5" alt="" />
                   ) : (
                     <span className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5 text-sm">
                       {TYPE_ICONS[n.type] || '🔔'}

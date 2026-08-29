@@ -16,6 +16,7 @@ import {
 
 import { Folder, Space, User, UserRole } from "@/types";
 import { supabase } from "@/lib/supabase";
+import { avatarThumb } from "@/lib/avatarUrl";
 import AdminPasswordModal from "@/components/AdminPasswordModal";
 
 type UserAccess = Record<string, { spaceIds: string[]; folderIds: string[] }>;
@@ -87,7 +88,7 @@ function UserAvatar({ user, size = "md" }: { user: User; size?: "sm" | "md" | "l
   }
   return (
     <img
-      src={user.avatar}
+      src={avatarThumb(user.avatar)}
       alt={user.name}
       onError={() => setErr(true)}
       className={`${sz} rounded-full object-cover ring-2 ring-white shadow-sm`}

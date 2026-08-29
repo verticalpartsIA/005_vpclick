@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { avatarThumb } from '../../lib/avatarUrl';
 import { User } from '../../types';
 
 interface AssignedCommentsViewProps {
@@ -176,7 +177,7 @@ export function AssignedCommentsView({ currentUser, users, onOpenTask }: Assigne
               className="w-full text-left px-4 py-3 border-b border-gray-100 last:border-b-0 flex gap-3 hover:bg-gray-50 transition-colors"
             >
               {author ? (
-                <img src={author.avatar} className="w-9 h-9 rounded-full shrink-0 mt-0.5" alt="" />
+                <img src={avatarThumb(author.avatar)} className="w-9 h-9 rounded-full shrink-0 mt-0.5" alt="" />
               ) : (
                 <span className="w-9 h-9 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5 text-base">📝</span>
               )}
