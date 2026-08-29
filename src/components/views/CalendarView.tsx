@@ -94,19 +94,25 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   const draggingTaskIdRef = useRef<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
   const [dragOverDay, setDragOverDay] = useState<string | null>(null);
-  // Sobrepõe otimisticamente o dueDate de uma tarefa recém-arrastada/editada,
-  // até `tasks` (prop) refletir o mesmo valor já salvo — ou até a
-  // persistência falhar, quando é removido (rollback). Mesmo padrão do
-  // `dateOverrides` do GanttView.
-  const [dateOverrides, setDateOverrides] = useState<Record<string, string>>({});
+  // Sobrepõe otimisticamente as datas de uma tarefa recém-arrastada/editada,
+  // até a persistência confirmar (quando é removido — ver comentário em
+  // handleDayDrop/saveQuickEdit sobre por que isso não pode ficar preso pra
+  // sempre) ou falhar (quando é desfeito). Guarda também `startDate` — uma
+  // tarefa com intervalo precisa deslocar as duas datas juntas ao arrastar,
+  // senão persiste dueDate antes de startDate (achado do review).
+  const [dateOverrides, setDateOverrides] = useState<Record<string, { dueDate: string; startDate?: string }>>({});
 
   // Criação rápida (Codex_Calendario_05) — só título, no dia clicado.
   const [quickCreateDay, setQuickCreateDay] = useState<string | null>(null);
   const [quickCreateTitle, setQuickCreateTitle] = useState('');
 
   // Edição rápida (Codex_Calendario_06) — sem sair do calendário nem abrir
-  // o modal completo (que continua disponível clicando na tarefa).
-  const [quickEditTaskId, setQuickEditTaskId] = useState<string | null>(null);
+  // o modal completo (que continua disponível clicando na tarefa). O alvo
+  // guarda taskId + o dia do CHIP clicado — uma tarefa de vários dias
+  // renderiza um chip por dia do intervalo, e sem o dia como parte da chave
+  // todos os chips dessa tarefa abririam o popover ao mesmo tempo (achado do
+  // review: focos/estado de rascunho competindo entre cópias).
+  const [quickEditTarget, setQuickEditTarget] = useState<{ taskId: string; dayKey: string } | null>(null);
   const [quickDraft, setQuickDraft] = useState<{
     title: string; priority: TaskPriority; mainAssigneeId: string; status: string; dueDate: string;
   } | null>(null);
@@ -152,8 +158,9 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   const taskRanges = useMemo((): TaskRange[] => {
     const ranges: TaskRange[] = [];
     filteredTasks.forEach(task => {
-      const dueStr = dateOverrides[task.id] ?? task.dueDate;
-      const startStr = task.startDate;
+      const override = dateOverrides[task.id];
+      const dueStr = override?.dueDate ?? task.dueDate;
+      const startStr = override?.startDate ?? task.startDate;
       if (!dueStr && !startStr) return;
       const end = dueStr ? parseLocalDate(dueStr) : parseLocalDate(startStr!);
       const start = startStr ? parseLocalDate(startStr) : end;
@@ -239,19 +246,45 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
     const task = tasks.find(t => t.id === taskId);
     if (!task || !onUpdateTask || !canEditTask(task)) return;
 
-    const newDueDate = formatLocalDate(day);
-    if ((dateOverrides[taskId] ?? task.dueDate) === newDueDate) return; // soltou no mesmo dia
-
     const previousOverride = dateOverrides[taskId];
-    setDateOverrides(prev => ({ ...prev, [taskId]: newDueDate }));
-    const ok = await onUpdateTask(taskId, { dueDate: newDueDate });
+    const currentDue = previousOverride?.dueDate ?? task.dueDate;
+    const newDueDate = formatLocalDate(day);
+    if (currentDue === newDueDate) return; // soltou no mesmo dia
+
+    const currentStart = previousOverride?.startDate ?? task.startDate;
+    const updates: Partial<Task> = { dueDate: newDueDate };
+    let newStartDate: string | undefined;
+    if (currentStart && currentDue) {
+      // Tarefa com intervalo: desloca as duas datas pelo mesmo delta,
+      // preservando a duração — só mover o prazo podia deixar dueDate antes
+      // de startDate persistido (o Calendário mascarava isso ao renderizar,
+      // trocando a ordem, mas outros consumidores como o Gantt não — achado
+      // do review).
+      const deltaDays = differenceInDays(parseLocalDate(newDueDate), parseLocalDate(currentDue));
+      newStartDate = formatLocalDate(addDays(parseLocalDate(currentStart), deltaDays));
+      updates.startDate = newStartDate;
+    }
+
+    setDateOverrides(prev => ({ ...prev, [taskId]: { dueDate: newDueDate, startDate: newStartDate } }));
+    const ok = await onUpdateTask(taskId, updates);
     if (ok === false) {
       setDateOverrides(prev => {
         const next = { ...prev };
         if (previousOverride !== undefined) next[taskId] = previousOverride; else delete next[taskId];
         return next;
       });
+      return;
     }
+    // Sucesso: `handleUpdateTask` (App.tsx) já atualiza `tasks` (prop) antes
+    // de resolver a promise, então o valor real já chegou — remove o
+    // override em vez de deixar preso pra sempre. Sem isso, uma mudança
+    // posterior por outro caminho (modal completo, realtime) continuaria
+    // mascarada pelo valor antigo do drag (achado do review).
+    setDateOverrides(prev => {
+      const next = { ...prev };
+      delete next[taskId];
+      return next;
+    });
   };
 
   // ── Criação rápida (Codex_Calendario_05) ───────────────────────────────
@@ -278,39 +311,54 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
   // `filterOptions.statuses` (todas as listas visíveis) deixava salvar um
   // status de outro workflow, e a tarefa sumia do Kanban da sua lista.
   const quickEditStatusOptions = useMemo(() => {
-    if (!quickEditTaskId) return [];
-    const task = tasks.find(t => t.id === quickEditTaskId);
+    if (!quickEditTarget) return [];
+    const task = tasks.find(t => t.id === quickEditTarget.taskId);
     const list = task ? lists.find(l => l.id === task.listId) : undefined;
     const group = list ? statusGroups.find(g => g.id === list.statusGroupId) : undefined;
     const labels = group ? group.options.map(o => o.label) : [];
     return quickDraft && !labels.includes(quickDraft.status) ? [quickDraft.status, ...labels] : labels;
-  }, [quickEditTaskId, tasks, lists, statusGroups, quickDraft]);
+  }, [quickEditTarget, tasks, lists, statusGroups, quickDraft]);
 
-  const openQuickEdit = (task: Task) => {
+  const openQuickEdit = (task: Task, day: Date) => {
     if (!onUpdateTask || !canEditTask(task)) return;
-    setQuickEditTaskId(task.id);
+    setQuickEditTarget({ taskId: task.id, dayKey: formatLocalDate(day) });
     setQuickDraft({
       title: task.title,
       priority: task.priority,
       mainAssigneeId: task.mainAssigneeId || '',
       status: task.status,
-      dueDate: dateOverrides[task.id] ?? task.dueDate ?? '',
+      dueDate: dateOverrides[task.id]?.dueDate ?? task.dueDate ?? '',
     });
   };
   const closeQuickEdit = () => {
-    setQuickEditTaskId(null);
+    setQuickEditTarget(null);
     setQuickDraft(null);
   };
   const saveQuickEdit = async () => {
-    if (!quickDraft || !quickEditTaskId || savingQuickEdit || !onUpdateTask) return;
+    if (!quickDraft || !quickEditTarget || savingQuickEdit || !onUpdateTask) return;
     const title = quickDraft.title.trim();
     if (!title) return;
 
-    const taskId = quickEditTaskId;
+    const taskId = quickEditTarget.taskId;
+    const task = tasks.find(t => t.id === taskId);
+    const currentStart = dateOverrides[taskId]?.startDate ?? task?.startDate;
+    // Não deixa persistir um prazo antes do início da própria tarefa — o
+    // formulário de edição rápida só expõe o prazo (não o início), então não
+    // dá pra "corrigir" o início junto como o drag faz; melhor rejeitar que
+    // gravar um intervalo inválido (mesmo critério do GanttView).
+    if (currentStart && quickDraft.dueDate && quickDraft.dueDate < currentStart) return;
+
     const previousOverride = dateOverrides[taskId];
-    if (quickDraft.dueDate) {
-      setDateOverrides(prev => ({ ...prev, [taskId]: quickDraft.dueDate }));
-    }
+    // Otimista: se o prazo ficou vazio, remove qualquer override anterior
+    // (de um drag, por exemplo) em vez de só não setar um novo — senão a
+    // tarefa continuava aparecendo na data antiga arrastada mesmo depois de
+    // "limpar o prazo" aqui (achado do review).
+    setDateOverrides(prev => {
+      const next = { ...prev };
+      if (quickDraft.dueDate) next[taskId] = { dueDate: quickDraft.dueDate, startDate: currentStart };
+      else delete next[taskId];
+      return next;
+    });
 
     setSavingQuickEdit(true);
     const ok = await onUpdateTask(taskId, {
@@ -330,6 +378,15 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
       });
       return;
     }
+    // Sucesso: mesmo raciocínio do handleDayDrop — `tasks` (prop) já deve
+    // refletir o valor novo nesse ponto, então remove o override em vez de
+    // deixar preso pra sempre (senão uma mudança posterior por outro caminho
+    // continuaria mascarada pelo valor antigo).
+    setDateOverrides(prev => {
+      const next = { ...prev };
+      delete next[taskId];
+      return next;
+    });
     closeQuickEdit();
   };
 
@@ -376,14 +433,17 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
         )}
 
         {editable && (
-          <Popover open={quickEditTaskId === task.id} onOpenChange={(open) => { if (!open) closeQuickEdit(); }}>
+          <Popover
+            open={quickEditTarget?.taskId === task.id && quickEditTarget?.dayKey === formatLocalDate(day)}
+            onOpenChange={(open) => { if (!open) closeQuickEdit(); }}
+          >
             <PopoverTrigger asChild>
               <button
                 type="button"
                 className="absolute -top-1.5 right-0.5 hidden group-hover/chip:flex h-4 w-4 items-center justify-center rounded-full border bg-white text-gray-500 shadow-sm hover:text-gray-900 z-10"
                 title="Edição rápida"
                 onMouseDown={(e) => e.stopPropagation()}
-                onClick={(e) => { e.stopPropagation(); openQuickEdit(task); }}
+                onClick={(e) => { e.stopPropagation(); openQuickEdit(task, day); }}
               >
                 <Pencil className="w-2.5 h-2.5" />
               </button>
@@ -394,7 +454,7 @@ export const CalendarView: React.FC<CalendarViewProps> = ({
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
             >
-              {quickDraft && quickEditTaskId === task.id && (
+              {quickDraft && quickEditTarget?.taskId === task.id && quickEditTarget?.dayKey === formatLocalDate(day) && (
                 <>
                   <input
                     autoFocus
