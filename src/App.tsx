@@ -5268,6 +5268,8 @@ function Sidebar({
                     >
                       <button
                         onClick={(e) => { e.stopPropagation(); setSecMinhasTarefasOpen(v => !v); }}
+                        aria-label={secMinhasTarefasOpen ? 'Recolher Minhas Tarefas' : 'Expandir Minhas Tarefas'}
+                        aria-expanded={secMinhasTarefasOpen}
                         className="text-sidebar-foreground/40 hover:text-sidebar-foreground shrink-0"
                       >
                         <svg className={`w-3 h-3 transition-transform ${secMinhasTarefasOpen ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 8 8"><path d="M2 1l4 3-4 3"/></svg>
@@ -5327,11 +5329,11 @@ function Sidebar({
                   {moreCandidates.length > 0 && (
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <div className="flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 text-sidebar-foreground/60 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors text-sm">
+                        <button type="button" className="flex items-center gap-2 px-3 py-1.5 cursor-pointer rounded-lg mx-1 text-sidebar-foreground/60 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground transition-colors text-sm">
                           <div className="w-3 h-3 shrink-0" />
                           <span className="text-sm leading-none tracking-wider">•••</span>
                           <span className="flex-1 truncate">Mais</span>
-                        </div>
+                        </button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="start" className="w-56">
                         {moreCandidates.map((c) => (
@@ -7958,10 +7960,10 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
 
       {/* ── Row 2: Health Radar (full width) ── */}
       <div className="bg-white rounded-xl border shadow-sm p-6">
-        <h3 className="font-bold text-gray-700 mb-5 flex items-center gap-2 text-base">
+        <h2 className="font-bold text-gray-700 mb-5 flex items-center gap-2 text-base">
           🩺 Radar de Saúde das Tarefas
           <span className="ml-auto text-xs text-gray-400 font-normal">{total} tarefa{total !== 1 ? 's' : ''} · {period === 'all' ? 'todos os tempos' : `últimos ${period.replace('d',' dias')}`}</span>
-        </h3>
+        </h2>
         <div className="flex flex-col gap-3">
           {healthBuckets.filter(b => b.count > 0).map(b => {
             const pct = Math.round((b.count / totalWithHealth) * 100);
@@ -8010,7 +8012,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
       {/* ── Row 4: Priority breakdown + Team Ranking ── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-white p-6 rounded-xl border shadow-sm">
-          <h3 className="font-bold text-gray-700 mb-5">🔥 Distribuição por Prioridade</h3>
+          <h2 className="font-bold text-gray-700 mb-5">🔥 Distribuição por Prioridade</h2>
           <div className="flex flex-col gap-4">
             {priorityData.map(p => {
               const pct = Math.round((p.count / (total || 1)) * 100);
@@ -8035,7 +8037,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
         </div>
 
         <div className="bg-white p-6 rounded-xl border shadow-sm">
-          <h3 className="font-bold text-gray-700 mb-1">🏆 Ranking da Equipe</h3>
+          <h2 className="font-bold text-gray-700 mb-1">🏆 Ranking da Equipe</h2>
           <p className="text-[10px] text-gray-400 mb-4">Ordenado por tarefas concluídas</p>
           <div className="flex flex-col gap-2">
             {userPerformance.slice(0, 7).map((u: any, i: number) => {
@@ -8071,7 +8073,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
 
         {/* Resumo por lista/projeto */}
         <div className="bg-white p-6 rounded-xl border shadow-sm">
-          <h3 className="font-bold text-gray-700 mb-5">📁 Resumo por Lista / Projeto</h3>
+          <h2 className="font-bold text-gray-700 mb-5">📁 Resumo por Lista / Projeto</h2>
           {listSummary.length === 0 ? (
             <p className="text-sm text-gray-400 text-center py-8">Nenhuma tarefa com lista atribuída.</p>
           ) : (
@@ -8098,7 +8100,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
 
         {/* Atividade recente */}
         <div className="bg-white p-6 rounded-xl border shadow-sm">
-          <h3 className="font-bold text-gray-700 mb-5">⚡ Atividade Recente</h3>
+          <h2 className="font-bold text-gray-700 mb-5">⚡ Atividade Recente</h2>
           {recentActivity.length === 0 ? (
             <p className="text-sm text-gray-400 text-center py-8">Nenhuma atividade registrada no período.</p>
           ) : (
