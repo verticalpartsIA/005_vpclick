@@ -374,6 +374,35 @@ Os números são parâmetros iniciais e devem ser calibrados com avaliação. N�
 
 Campos de segurança e IDs ficam nos metadados e não devem ser expostos desnecessariamente no texto incorporado.
 
+### 6.6 Recuperação com janela contextual — mitigação da perda de contexto
+
+Chunks pequenos melhoram a precisão da busca, mas podem ocultar o contexto necessário para interpretar corretamente um comentário, item de checklist, trecho de reunião ou parágrafo. Esse problema é algumas vezes chamado informalmente de *Blinkered Chunk Effect*; neste documento, o requisito técnico é tratado pelos padrões verificáveis **Parent Document Retrieval** e **Sentence-Window Retrieval**.
+
+O VPClick deve separar a unidade usada para **localizar** evidência da unidade usada para **montar** o contexto:
+
+1. indexar chunks filhos pequenos e semanticamente coesos;
+2. guardar `parent_document_id`, `parent_source_type`, posição e relações de vizinhança;
+3. buscar nos chunks filhos;
+4. agrupar resultados que pertencem ao mesmo pai;
+5. expandir somente para pai, seção ou janela adjacente necessária;
+6. reaplicar ACL no pai e em cada conteúdo expandido;
+7. remover duplicações causadas por sobreposição;
+8. montar o contexto dentro do orçamento de tokens;
+9. citar o trecho recuperado e o documento-pai.
+
+| Fonte encontrada | Contexto expandido recomendado |
+|---|---|
+| Comentário | comentário anterior/seguinte, tarefa e metadados essenciais |
+| Checklist | grupo do checklist, título da tarefa e critério de aceite |
+| Documento | seção-pai e breadcrumb; documento completo somente se pequeno |
+| Reunião | tópico, decisão ou item de ação relacionado; participantes autorizados |
+| Anexo | seção/página vizinha e metadados do arquivo |
+| Pedido/ordem | cabeçalho e eventos/itens diretamente relacionados |
+
+**Não enviar automaticamente o documento-pai inteiro.** Além de custo e latência, isso pode aumentar ruído e expor dados fora da finalidade. O nível de expansão deve ser adaptativo e medido por cobertura, fidelidade e tokens utilizados.
+
+Metadados mínimos adicionais: `parent_document_id`, `chunk_start`, `chunk_end`, `section_id`, `previous_chunk_id`, `next_chunk_id`, `breadcrumb`, `expansion_policy` e `acl_version`.
+
 ## 7. Modelo de embedding: texto para vetor
 
 ### 7.1 Política de seleção
@@ -853,6 +882,61 @@ O projeto estudado usa endpoints distintos para indexação de catálogo e gera�
 }
 ```
 
+### 23.3 Interface padronizada via Model Context Protocol (MCP)
+
+Além das APIs HTTP internas, o VPClick pode expor um **MCP Server** para interoperabilidade com clientes e agentes autorizados. MCP é um protocolo aberto para conectar aplicações de IA a fontes de dados e ferramentas; não deve ser tratado como substituto do domínio transacional, do API Gateway ou das políticas RLS.
+
+#### Resources
+
+Resources oferecem contexto identificável por URI e apropriado para leitura. Exemplos:
+
+```text
+vpclick://workspaces/{workspaceId}/tasks/{taskId}
+vpclick://workspaces/{workspaceId}/documents/{documentId}
+vpclick://workspaces/{workspaceId}/meetings/{meetingId}
+vpclick://workspaces/{workspaceId}/spaces/{spaceId}/summary
+vpclick://workspaces/{workspaceId}/rag/sources/{sourceType}/{sourceId}
+```
+
+Cada Resource deve incluir conteúdo autorizado e metadados como `source_id`, tipo MIME, versão, `updated_at`, canonical URL e classificação de sensibilidade. Resource templates podem representar URIs parametrizadas, mas a expansão do template nunca contorna a autorização.
+
+#### Tools
+
+Tools encapsulam consultas ou operações com esquema de entrada/saída explícito. Conjunto inicial sugerido:
+
+| Tool MCP | Finalidade | Mutação |
+|---|---|---|
+| `search_workspace` | busca híbrida com fontes | não |
+| `get_task_context` | tarefa, contexto-pai e dependências autorizadas | não |
+| `get_meeting_context` | reunião, decisões e itens de ação | não |
+| `explain_task_impact` | expansão controlada do grafo | não |
+| `query_rag` | síntese fundamentada com citações | não |
+| `create_task_draft` | preparar proposta de tarefa | rascunho |
+| `confirm_task_creation` | criar após confirmação explícita | sim |
+
+Operações mutáveis devem ser separadas das consultas, usar confirmação humana quando aplicável e retornar resultado transacional verificável. O LLM não recebe autorização implícita apenas porque descobriu uma Tool.
+
+#### Autenticação, autorização e transporte
+
+- usar transporte HTTP autorizado conforme a especificação MCP aplicável;
+- adotar OAuth 2.1 ou mecanismo empresarial compatível para dados de usuário;
+- associar token a usuário, cliente, workspace, escopos e consentimento;
+- aplicar RLS/ACL novamente no serviço de origem;
+- limitar recursos, ferramentas e templates anunciados ao cliente;
+- registrar cliente, usuário, tool/resource, finalidade, resultado e `trace_id`;
+- aplicar rate limit, timeouts, limites de paginação e tamanho;
+- não aceitar workspace, papel ou identidade somente porque vieram como argumento do modelo;
+- proteger contra *confused deputy*, SSRF, token forwarding indevido e prompt injection;
+- revogar imediatamente acesso quando usuário, cliente ou workspace perder autorização.
+
+#### Respostas e erros MCP
+
+Resources e Tools devem indicar claramente: sucesso, ausência, acesso negado, conflito, evidência insuficiente e defasagem do índice. Erros não devem revelar a existência de recursos fora do escopo do usuário. Toda resposta RAG deve conservar as mesmas citações e data de corte oferecidas pela API HTTP.
+
+#### MCP não substitui APIs internas
+
+As APIs e eventos internos continuam sendo o contrato entre serviços. MCP é a fachada orientada a agentes. Essa separação evita acoplar regras de negócio a versões do protocolo ou a comportamentos de clientes de IA.
+
 ```json
 {
   "answer": "...",
@@ -934,6 +1018,9 @@ Além das fixtures reproduzíveis, criar os seguintes cenários:
 - avaliação online controlada;
 - painéis de qualidade, custo e atualidade;
 - promoção/reversão versionada de prompts e planos de recuperação.
+- MCP Server em produção após validação de autorização e consentimento;
+- pilotos controlados de GraphRAG e RAPTOR, condicionados a métricas;
+- avaliação de RAFT somente após existir conjunto dourado e baseline confiável.
 
 ## 27. Referência adicional analisada
 
@@ -1111,3 +1198,251 @@ Essa abordagem evita “microserviços por desenho”: as fronteiras são preser
 - [ ] Fraude possui regras e auditoria independentes do texto gerado.
 - [ ] Falhas possuem timeout, retry, circuit breaker e observabilidade.
 - [ ] A implementação começa modular e só se distribui quando necessário.
+
+## 29. GraphRAG para relações e raciocínio multi-hop
+
+Busca vetorial encontra proximidade semântica, mas não representa por si só relações como “tarefa A bloqueia B”, “B pertence à lista C”, “C integra o espaço D” ou “a pessoa E responde por todas elas”. GraphRAG combina recuperação com uma estrutura de grafo para consultas que exigem travessia, agregação e raciocínio em múltiplos passos.
+
+### 29.1 Dois grafos, duas autoridades
+
+O VPClick deve distinguir:
+
+1. **Grafo transacional explícito:** relações confirmadas no banco, como hierarquia, atribuição, dependência, comentário, reunião, pedido e produto. É a fonte principal.
+2. **Grafo semântico inferido:** entidades e relações extraídas de texto por modelos. É auxiliar, versionado, pontuado por confiança e nunca deve sobrescrever uma relação explícita.
+
+### 29.2 Modelo inicial de nós e arestas
+
+| Nós | Arestas explícitas principais |
+|---|---|
+| Workspace | `CONTAINS_SPACE` |
+| Espaço | `CONTAINS_FOLDER`, `CONTAINS_LIST` |
+| Pasta | `CONTAINS_LIST`, `CONTAINS_DOCUMENT` |
+| Lista | `CONTAINS_TASK` |
+| Tarefa | `BLOCKS`, `BLOCKED_BY`, `RELATES_TO`, `HAS_COMMENT`, `HAS_ATTACHMENT` |
+| Usuário/equipe | `ASSIGNED_TO`, `MEMBER_OF`, `OWNS` |
+| Reunião | `HAS_PARTICIPANT`, `CREATED_ACTION_ITEM`, `REFERENCES` |
+| Documento | `DESCRIBES`, `SUPERSEDES`, `REFERENCES` |
+| Produto | `APPEARS_IN_ORDER`, `RELATED_TO_TASK` |
+| Pedido/ordem | `HAS_ITEM`, `GENERATED_TASK`, `ASSIGNED_TO`, `REFERENCES` |
+
+Cada nó e aresta precisa de `workspace_id`, origem, versão, validade temporal, ACL e proveniência. Relações inferidas também exigem `confidence`, método de extração e evidência textual.
+
+### 29.3 Estratégias de consulta
+
+- **Local search:** parte de uma tarefa, pessoa, pedido ou entidade e expande vizinhança relevante.
+- **Global search:** usa comunidades e resumos hierárquicos para perguntas sobre temas do workspace.
+- **DRIFT ou busca exploratória:** combina visão comunitária e refinamento local quando a pergunta é ampla, mas exige evidências específicas.
+- **Consulta determinística de grafo:** usada para dependências, impacto, ownership e caminhos; não deve ser delegada à similaridade vetorial.
+
+### 29.4 Aplicação no Gantt
+
+Para “o que bloqueia a entrega?”:
+
+1. resolver a tarefa/marco de entrega;
+2. percorrer `BLOCKED_BY` com profundidade limitada;
+3. detectar ciclos;
+4. filtrar nós autorizados;
+5. consultar estados e datas atuais em SQL;
+6. recuperar comentários/documentos apenas para explicar causas;
+7. produzir cadeia de impacto com fontes.
+
+GraphRAG não cria caminho crítico automaticamente. O caminho crítico exige durações, dependências válidas, calendários e cálculo de planejamento.
+
+### 29.5 Atualização incremental e custo
+
+O índice GraphRAG pode ser mais caro que RAG vetorial simples, especialmente quando extrai entidades, detecta comunidades e gera resumos. Começar com o grafo explícito já disponível no banco. Adicionar extração semântica somente onde consultas reais demonstrarem ganho.
+
+### 29.6 Critérios para adoção
+
+- perguntas multi-hop apresentam baixa resposta no baseline híbrido;
+- relações explícitas cobrem parte material do domínio;
+- há avaliação de precisão de nós, arestas e proveniência;
+- atualização incremental atende ao SLA;
+- isolamento por workspace é demonstrado;
+- custo de indexação e consulta é aceitável;
+- respostas do grafo continuam citando fontes transacionais.
+
+## 30. RAPTOR para recuperação hierárquica e visão macro
+
+RAPTOR (*Recursive Abstractive Processing for Tree-Organized Retrieval*) constrói uma árvore ao incorporar, agrupar e resumir chunks recursivamente. Na consulta, o recuperador pode selecionar informações em diferentes níveis de abstração. Isso é útil quando uma pergunta ampla não compartilha termos suficientes com cada registro granular.
+
+### 30.1 Aplicação no VPClick
+
+Árvore inicial sugerida:
+
+```text
+Workspace
+├── resumos de Espaços
+│   ├── resumos de Pastas/Listas
+│   │   ├── resumos de grupos de Tarefas
+│   │   │   └── Tarefas, comentários, reuniões e documentos-fonte
+```
+
+Os agrupamentos RAPTOR não precisam repetir exatamente a hierarquia organizacional: podem formar clusters semânticos. Entretanto, os resumos devem carregar os escopos e ACLs compatíveis com todas as fontes utilizadas.
+
+### 30.2 Uso no Dashboard
+
+- perguntas específicas recuperam folhas ou seções baixas;
+- perguntas de panorama recuperam resumos intermediários;
+- perguntas corporativas podem recuperar níveis superiores e depois descer às evidências;
+- toda síntese deve apresentar data de corte e permitir expansão para fontes.
+
+### 30.3 Resumo derivado não é indicador transacional
+
+RAPTOR é apropriado para temas, riscos narrativos, decisões, obstáculos e contexto. Contagens, SLA, atraso, valores e status continuam vindo de SQL. Um resumo não deve substituir KPI calculado.
+
+### 30.4 Versionamento e invalidação
+
+Cada nó resumido precisa de:
+
+- IDs e versões dos filhos;
+- checksum do conjunto de entrada;
+- modelo e prompt de sumarização;
+- nível da árvore;
+- período e data de corte;
+- ACL resultante;
+- `generated_at` e estado de obsolescência.
+
+Quando uma folha muda, invalidar ancestrais afetados e reconstruir somente o ramo necessário. Não misturar em um mesmo resumo fontes com políticas de acesso incompatíveis.
+
+### 30.5 Critérios para adoção
+
+- corpus suficientemente grande para justificar níveis hierárquicos;
+- consultas macro são frequentes e mal atendidas pelo baseline;
+- resumos demonstram fidelidade e cobertura no conjunto de avaliação;
+- atualização incremental e custo são aceitáveis;
+- o sistema diferencia claramente fonte original e resumo gerado.
+
+## 31. RAFT para adaptação do modelo ao domínio
+
+RAFT (*Retrieval-Augmented Fine-Tuning*) é uma receita de pós-treinamento para cenários “open-book” de domínio específico. O modelo é treinado com perguntas, documentos relevantes e documentos distratores para aprender a identificar evidência útil e ignorar contexto irrelevante.
+
+### 31.1 Objetivo correto no VPClick
+
+RAFT deve ensinar **comportamento de uso de evidências**, vocabulário e formatos do VPClick. Não deve ser usado para gravar no modelo fatos operacionais mutáveis, como status atual, preço, prazo ou responsável. Esses dados permanecem no sistema transacional e no RAG.
+
+### 31.2 Construção do dataset
+
+Para cada exemplo:
+
+```json
+{
+  "question": "Quais dependências bloqueiam a tarefa X?",
+  "gold_sources": ["task:X", "dependency:Y", "comment:Z"],
+  "distractor_sources": ["task:semelhante", "documento:irrelevante"],
+  "answer": "resposta fundamentada com citações",
+  "abstain": false,
+  "workspace_template": "dados anonimizados ou sintéticos",
+  "policy_tags": ["no_invention", "cite_sources", "respect_cutoff"]
+}
+```
+
+Incluir exemplos de:
+
+- resposta correta com evidência;
+- abstenção por falta de evidência;
+- fontes conflitantes;
+- documento distrator semanticamente próximo;
+- tentativa de prompt injection;
+- dado fora da data de corte;
+- pergunta sobre outro workspace;
+- códigos, datas e valores que exigem ferramenta estruturada;
+- necessidade de citar o documento-pai e o trecho filho.
+
+### 31.3 Privacidade e preparação dos dados
+
+- preferir templates e dados sintéticos representativos;
+- anonimizar pessoas, documentos, valores e identificadores;
+- excluir segredos, credenciais e conteúdo sem base legal/finalidade;
+- documentar origem, consentimento, retenção e licença do dataset;
+- separar treino, validação e teste por entidade/tempo para evitar vazamento;
+- impedir que exemplos de teste ou dados atuais apareçam no treino;
+- manter versão e lineage de cada exemplo.
+
+### 31.4 Baseline obrigatório
+
+Não iniciar fine-tuning antes de medir:
+
+1. RAG híbrido sem RAFT;
+2. RAG com reranking;
+3. RAG com Parent Retrieval;
+4. prompt otimizado e validação pós-geração;
+5. modelo menor sem fine-tuning;
+6. custo, latência e fidelidade de cada alternativa.
+
+RAFT só deve avançar se trouxer ganho estatisticamente e operacionalmente relevante sem piorar abstenção, citações, segurança ou generalização.
+
+### 31.5 Métricas específicas
+
+- seleção de evidência relevante versus distratores;
+- precisão das citações;
+- fidelidade/grounding;
+- taxa correta de abstenção;
+- vazamento de dados;
+- robustez a prompt injection;
+- desempenho por rota e tipo de pergunta;
+- custo e latência total com retrieval;
+- degradação após mudança do corpus.
+
+### 31.6 RAFT não elimina retrieval
+
+Mesmo após RAFT, o pipeline continua recuperando fontes atuais. O modelo ajustado não vira banco de dados e não recebe permissão adicional. Toda resposta operacional segue exigindo filtros, data de corte e citações verificáveis.
+
+## 32. Estratégia modular de RAG avançado
+
+As técnicas não devem ser habilitadas simultaneamente por entusiasmo tecnológico. Cada uma resolve um padrão diferente:
+
+| Necessidade | Técnica preferencial | Não usar como substituto de |
+|---|---|---|
+| trecho pequeno sem contexto | Parent/Sentence-Window Retrieval | ACL e orçamento de tokens |
+| relações e impacto multi-hop | grafo explícito + GraphRAG | SQL, regras e cálculo de cronograma |
+| panorama de corpus extenso | RAPTOR/GraphRAG global | KPIs transacionais |
+| agentes externos interoperáveis | MCP Resources e Tools | APIs internas e autorização do domínio |
+| modelo ignora mal os distratores | RAFT após baseline | retrieval atual e citações |
+
+### 32.1 Roteador de recuperação
+
+Um classificador versionado deve selecionar o plano mínimo necessário:
+
+```text
+consulta exata/numérica ──> SQL/full-text
+consulta semântica local ──> busca híbrida + parent retrieval
+consulta de dependência ──> grafo explícito + contexto textual
+consulta temática global ──> RAPTOR ou GraphRAG global
+consulta externa por agente ──> MCP Resource/Tool autorizado
+```
+
+O roteador pode usar regras e classificação por modelo, mas deve registrar plano escolhido, confiança e fallback.
+
+### 32.2 Sequência recomendada de experimentação
+
+1. consolidar baseline híbrido, RLS e avaliação;
+2. implementar Parent Retrieval;
+3. expor MCP read-only em ambiente controlado;
+4. testar grafo explícito para dependências;
+5. pilotar GraphRAG em um workspace não crítico;
+6. pilotar RAPTOR para perguntas de panorama;
+7. comparar custo/qualidade e manter apenas ganhos comprovados;
+8. avaliar RAFT por último, com dataset governado.
+
+### 32.3 Critérios globais de promoção
+
+- ganho mensurável no conjunto dourado;
+- zero vazamento entre workspaces;
+- citações e abstenção não pioram;
+- atualização atende ao SLA;
+- custo e latência cabem no orçamento;
+- rollback é possível;
+- fonte e técnica utilizada são observáveis;
+- aprovação de segurança, dados e produto.
+
+## 33. Referências de RAG avançado e interoperabilidade
+
+- Model Context Protocol, especificação oficial: <https://modelcontextprotocol.io/specification/2026-07-28>
+- MCP Resources: <https://modelcontextprotocol.io/specification/2026-07-28/server/resources>
+- MCP Tools: <https://modelcontextprotocol.io/specification/2026-07-28/server/tools>
+- MCP Authorization: <https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/authorization>
+- Microsoft GraphRAG, documentação oficial: <https://microsoft.github.io/graphrag/>
+- GraphRAG Query Engine: <https://microsoft.github.io/graphrag/query/overview/>
+- Sarthi et al. (2024), RAPTOR: <https://arxiv.org/abs/2401.18059>
+- Zhang et al. (2024), RAFT: <https://arxiv.org/abs/2403.10131>
