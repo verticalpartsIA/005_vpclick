@@ -1567,6 +1567,13 @@ export default function App() {
                 id: l.id, name: l.name, folderId: l.folder_id, statusGroupId: l.status_group_id, ownerId: l.owner_id || undefined
               })));
           }
+          // Explícito (não via reação a `lists`/`folders` mudando de
+          // referência): no escopo global e de lista específica,
+          // `scopedListIds` fica estável (null) mesmo quando essas arrays
+          // mudam, então loadTasks não reroda sozinho aqui — sem isso, um
+          // usuário recém-liberado para um novo espaço/pasta só veria as
+          // tarefas novas após um F5 (achado de review).
+          loadTasksRef.current?.();
         }
       })
       .subscribe();
@@ -1655,6 +1662,27 @@ export default function App() {
     return () => { cancelled = true; };
   }, [selectedTaskId]);
 
+  // Resolve o escopo ativo (lista/pasta/espaço) para o conjunto de listas a
+  // buscar. Memoizado (em vez de calculado dentro de loadTasks) para que,
+  // no escopo global e no de lista específica — os dois casos abaixo em que
+  // o resultado não depende de `lists`/`folders` — o valor fique
+  // referencialmente estável (`null`) mesmo quando essas listas mudam de
+  // referência (ex.: `loadInitialData` preenchendo-as logo após o login).
+  // Sem isso, loadTasks (que tinha `lists`/`folders` cru nas deps) reiniciava
+  // no meio de uma paginação em andamento — a segunda página em voo perdia a
+  // corrida do guard de requestId e ficava descartada para sempre, deixando
+  // `tasks` travado só na 1ª página (achado de QA: Calendário em branco no
+  // 1º load global, e contagem parcial na Lista após "Atualizar agora").
+  const scopedListIds = useMemo((): string[] | null => {
+    if (!activeListId && activeScope.type === 'folder' && activeScope.id) {
+      return lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
+    }
+    if (activeScope.type === 'space' && activeScope.id) {
+      const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
+      return lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
+    }
+    return null;
+  }, [activeListId, activeScope, lists, folders]);
 
   const loadTasks = useCallback(async () => {
     if (!session) return;
@@ -1699,16 +1727,9 @@ export default function App() {
       return;
     }
 
-    // Resolve o escopo ativo (lista/pasta/espaço) para o conjunto de listas a
-    // buscar. Lista aberta usa um caminho dedicado (`list_id = X`), para não
-    // pagar o custo das leituras amplas quando o usuário só quer aquele quadro.
-    let listIds: string[] | null = null;
-    if (!activeListId && activeScope.type === 'folder' && activeScope.id) {
-      listIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
-    } else if (activeScope.type === 'space' && activeScope.id) {
-      const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
-      listIds = lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
-    }
+    // Lista aberta usa um caminho dedicado (`list_id = X`), para não pagar o
+    // custo das leituras amplas quando o usuário só quer aquele quadro.
+    const listIds = scopedListIds;
 
     // Sub-entidades NÃO são hidratadas aqui (carregadas sob demanda ao abrir a
     // tarefa) — mantém o load barato mesmo com dezenas de milhares de tarefas.
@@ -1762,7 +1783,7 @@ export default function App() {
         setIsTasksLoading(false);
       }
     }
-  }, [session, activeListId, activeScope, activeView, currentUser.id, lists, folders]);
+  }, [session, activeListId, activeScope, activeView, currentUser.id, scopedListIds]);
 
   useEffect(() => {
     loadTasks();
