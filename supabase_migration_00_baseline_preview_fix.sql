@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   extension_count INTEGER DEFAULT 0,
   list_id UUID REFERENCES lists(id) ON DELETE CASCADE,
   project_id UUID REFERENCES projects(id),
-  parent_id UUID REFERENCES tasks(id),
+  parent_id UUID REFERENCES tasks(id) ON DELETE CASCADE,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   order_index INTEGER DEFAULT 0
   -- created_by e hidden_fields são adicionados pelas migrations tracked
