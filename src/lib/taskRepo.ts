@@ -609,11 +609,40 @@ export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok:
   return { ok: true };
 }
 
-// Exclui uma tarefa por id.
-export async function deleteTask(taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
-  const { error } = await supabase.from('tasks').delete().eq('id', taskId).select();
+// Exclui uma tarefa por id. Enquanto a migration que torna parent_id CASCADE
+// não estiver aplicada em todos os ambientes, remove a árvore de subtarefas de
+// baixo para cima para não esbarrar na FK tasks_parent_id_fkey (NO ACTION).
+async function deleteTaskTree(taskId: string, visited = new Set<string>()): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (visited.has(taskId)) {
+    return { ok: false, message: 'Foi detectado um ciclo inválido entre tarefa e subtarefa.' };
+  }
+  visited.add(taskId);
+
+  const { data: children, error: childrenError } = await supabase
+    .from('tasks')
+    .select('id')
+    .eq('parent_id', taskId);
+  if (childrenError) return { ok: false, message: childrenError.message };
+
+  for (const child of children || []) {
+    const result = await deleteTaskTree(child.id, visited);
+    if (!result.ok) return result;
+  }
+
+  const { data, error } = await supabase
+    .from('tasks')
+    .delete()
+    .eq('id', taskId)
+    .select('id');
   if (error) return { ok: false, message: error.message };
+  if (!data?.length) {
+    return { ok: false, message: 'A tarefa não foi encontrada ou Você não possui permissão para excluí-la.' };
+  }
   return { ok: true };
+}
+
+export async function deleteTask(taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  return deleteTaskTree(taskId);
 }
 
 // ── Escrita de sub-entidades ────────────────────────────────────────────────
@@ -921,6 +950,9 @@ export async function bulkMove(ids: string[], listId: string): Promise<{ error: 
 }
 
 export async function bulkDelete(ids: string[]): Promise<{ error: string | null }> {
-  const { error } = await supabase.from('tasks').delete().in('id', ids).select();
-  return { error: error ? error.message : null };
+  for (const id of ids) {
+    const result = await deleteTask(id);
+    if (!result.ok) return { error: result.message };
+  }
+  return { error: null };
 }
