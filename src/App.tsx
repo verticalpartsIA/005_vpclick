@@ -20,9 +20,11 @@ import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
 import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
 import {
-  parseLocalDate, formatLocalDate, isoToBr, brToIso, maskBrDate,
+  parseLocalDate, formatLocalDate, isoToBr,
   formatDateBR, formatDateTimeLongCleanBR, formatDayMonthNumericBR,
 } from './lib/dates';
+import { ErrorSummary } from './components/ui/error-summary';
+import { DateFieldEditor } from './components/DateFieldEditor';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
 import { useDashboard } from './hooks/useDashboard';
 import { useTaskCountIndex } from './hooks/useTaskCountIndex';
@@ -8147,41 +8149,9 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
   );
 }
 
-// Padrão "Error summary" do GOV.UK Design System: em vez de um toast que some
-// sozinho e não aponta pra nenhum campo, lista todos os erros de validação
-// num único bloco focável (o foco vai pra cá quando os erros aparecem, como
-// um leitor de tela faria pra qualquer role="alert" novo) com um link por
-// erro que leva — e move o foco de verdade — direto pro campo problemático.
-function ErrorSummary({ errors }: { errors: { id: string; message: string }[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (errors.length > 0) ref.current?.focus();
-  }, [errors]);
-
-  if (errors.length === 0) return null;
-
-  return (
-    <div ref={ref} role="alert" tabIndex={-1} className="rounded-lg border-2 border-red-600 bg-red-50 p-4 outline-none focus:ring-2 focus:ring-red-300">
-      <h4 className="text-sm font-bold text-red-800 mb-2">
-        {errors.length === 1 ? 'Há um problema' : `Há ${errors.length} problemas`}
-      </h4>
-      <ul className="space-y-1 list-none">
-        {errors.map((err) => (
-          <li key={err.id}>
-            <a
-              href={`#${err.id}`}
-              className="text-sm text-red-700 underline hover:text-red-900"
-              onClick={(e) => { e.preventDefault(); document.getElementById(err.id)?.focus(); }}
-            >
-              {err.message}
-            </a>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
+// ErrorSummary agora vive em ./components/ui/error-summary (issue #102 /
+// achado 8 da auditoria: extração progressiva de componentes autocontidos
+// pra fora deste arquivo) — importado no topo.
 
 function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, initialScope, activeListId, currentUser, prefilledData, additionalTasks, statusGroups }: any) {
   const [title, setTitle] = useState('');
@@ -10704,78 +10674,9 @@ function CreateFolderModal({ onClose, onCreate }: any) {
   );
 }
 
-// Input de data para campos personalizados/tabela. Inputs nativos <input
-// type="date"> disparam onChange a cada tecla digitada, inclusive enquanto
-// a data está incompleta (ex: só o dia e mês, ou só 1-2 dígitos do ano) —
-// nesses casos `e.target.value` vem vazio. Sem tratamento isso causava dois
-// problemas: (1) cada tecla parcial disparava um upsert salvando valor
-// vazio, criando uma corrida entre requisições que podia sobrescrever a
-// data completa digitada por último com uma parcial que resolveu depois;
-// (2) como o valor exibido é controlado pela prop `value` (só atualizada
-// depois que o upsert assíncrono termina), qualquer re-render do app nesse
-// intervalo (ex: outra tarefa mudando via realtime) forçava o campo de
-// volta ao valor antigo, apagando visualmente o que o usuário tinha
-// acabado de digitar — exatamente o sintoma relatado de "a data não fica
-// gravada assim que termino de digitar o ano". Por isso: (a) mantemos um
-// valor local que não depende do round-trip de rede para continuar exibindo
-// o que foi digitado, e (b) só disparamos onCommit quando o usuário termina
-// uma data válida ou explicitamente limpa um valor que já existia.
-// isoToBr / brToIso / maskBrDate agora vivem em ./lib/dates (issue #102,
-// achado 3) — importadas no topo deste arquivo.
-
-// Editor de data para campos personalizados/tabela. Exibe e aceita entrada
-// SEMPRE em dd/mm/aaaa — o <input type="date"> nativo formatava no locale do
-// NAVEGADOR (mostrava mm/dd/aaaa para muitos usuários, apesar da página ser
-// pt-BR). Aqui o texto é um input mascarado determinístico; o calendário nativo
-// continua disponível num input oculto acionado pelo botão (showPicker). O valor
-// persistido continua ISO 'YYYY-MM-DD'. O buffer local preserva o que foi
-// digitado independentemente do round-trip do upsert (ver histórico abaixo).
-export function DateFieldEditor({ value, onCommit, className, ariaLabel }: { value: any; onCommit: (v: string) => void; className?: string; ariaLabel?: string }) {
-  const [text, setText] = useState(() => isoToBr(value ?? ''));
-  const pickerRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { setText(isoToBr(value ?? '')); }, [value]);
-
-  const commitFromText = (raw: string) => {
-    const masked = maskBrDate(raw);
-    setText(masked);
-    if (masked === '') { if (value) onCommit(''); return; }
-    const iso = brToIso(masked);
-    if (iso) onCommit(iso); // só persiste data completa e válida
-  };
-
-  return (
-    <div className="relative">
-      <input
-        type="text"
-        inputMode="numeric"
-        placeholder="dd/mm/aaaa"
-        aria-label={ariaLabel}
-        title={ariaLabel}
-        value={text}
-        onChange={(e) => commitFromText(e.target.value)}
-        className={`${className ?? ''} pr-9`}
-      />
-      <button
-        type="button"
-        tabIndex={-1}
-        aria-label="Abrir calendário"
-        onClick={() => pickerRef.current?.showPicker?.()}
-        className="absolute inset-y-0 right-0 flex items-center px-2 text-gray-400 hover:text-gray-600"
-      >
-        <Icons.Calendar className="h-4 w-4" />
-      </button>
-      <input
-        ref={pickerRef}
-        type="date"
-        value={value ?? ''}
-        onChange={(e) => { const v = e.target.value; setText(isoToBr(v)); if (v || value) onCommit(v); }}
-        tabIndex={-1}
-        aria-hidden="true"
-        className="sr-only absolute right-0 bottom-0"
-      />
-    </div>
-  );
-}
+// DateFieldEditor agora vive em ./components/DateFieldEditor (issue #102 /
+// achado 8 da auditoria: extração progressiva de componentes autocontidos
+// pra fora deste arquivo) — importado no topo.
 
 // Input de texto/número para campos personalizados/tabela. Mesmo problema do
 // DateFieldEditor, mas mais severo aqui: como o valor exibido dependia

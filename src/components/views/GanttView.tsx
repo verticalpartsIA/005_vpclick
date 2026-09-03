@@ -13,10 +13,10 @@ import {
   differenceInDays, eachDayOfInterval, isWeekend, isToday, startOfWeek
 } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-// Ver TableView.tsx para o porquê deste import de '@/App': DateFieldEditor
 // exibe/edita sempre em dd/mm/aaaa, ao contrário do <input type="date"> cru
 // (issue #102).
-import { DateFieldEditor } from '@/App';
+import { DateFieldEditor } from '@/components/DateFieldEditor';
+import { parseLocalDate, formatLocalDate } from '@/lib/dates';
 
 type GanttScale = 'day' | 'week' | 'month' | 'quarter';
 type GanttGroupBy = 'none' | 'assignee' | 'status' | 'list';
@@ -69,20 +69,8 @@ interface GanttViewProps {
   statusGroups?: StatusGroup[];
 }
 
-// `startDate`/`dueDate` são "YYYY-MM-DD" (sem hora); `new Date(string)`
-// interpreta isso como meia-noite UTC, que em fusos atrás de UTC cai no dia
-// anterior ao comparar com datas locais. Parseamos/formatamos manualmente
-// para não deslocar um dia (mesmo cuidado do resto do app, ver App.tsx).
-function parseLocalDate(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-function formatLocalDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+// parseLocalDate/formatLocalDate agora vivem em lib/dates (issue #102,
+// achado 3 — eram cópias idênticas às de App.tsx e CalendarView).
 
 type DragMode = 'move' | 'resize-left' | 'resize-right';
 

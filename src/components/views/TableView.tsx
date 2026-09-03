@@ -45,16 +45,11 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { toast } from 'sonner';
-// DateFieldEditor mora em App.tsx (não tem outro lugar hoje pra um componente
-// compartilhado fora de views/) e exibe/edita SEMPRE em dd/mm/aaaa, independente
-// do locale do navegador — ao contrário de um <input type="date"> cru, que
-// muda de formato conforme o locale (dd/mm no navegador em pt-BR, mm/dd em
-// en-US). Ver issue #102: essa mistura de formatos na mesma tela é o achado
-// #1 do bug. Import direto de '@/App' já é o padrão usado pelo próprio teste
-// desse componente (src/test/DateFieldEditor.test.tsx); seguro porque a
-// dependência é só em tempo de render (TableView é lazy-loaded a partir de
-// App.tsx, que já está totalmente inicializado quando isso roda).
-import { DateFieldEditor } from '@/App';
+// DateFieldEditor exibe/edita SEMPRE em dd/mm/aaaa, independente do locale
+// do navegador — ao contrário de um <input type="date"> cru, que muda de
+// formato conforme o locale (dd/mm no navegador em pt-BR, mm/dd em en-US).
+// Ver issue #102, achado 1.
+import { DateFieldEditor } from '@/components/DateFieldEditor';
 import { parseLocalDate, formatDateBR } from '@/lib/dates';
 
 interface TableViewProps {

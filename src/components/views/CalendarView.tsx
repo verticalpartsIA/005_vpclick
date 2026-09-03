@@ -11,10 +11,10 @@ import {
   eachDayOfInterval, getDay, differenceInDays
 } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
-// Ver TableView.tsx para o porquê deste import de '@/App': DateFieldEditor
 // exibe/edita sempre em dd/mm/aaaa, ao contrário do <input type="date"> cru
 // (issue #102).
-import { DateFieldEditor } from '@/App';
+import { DateFieldEditor } from '@/components/DateFieldEditor';
+import { parseLocalDate, formatLocalDate } from '@/lib/dates';
 
 type CalendarViewMode = 'month' | 'week' | 'day';
 
@@ -32,20 +32,8 @@ const isDoneLikeStatus = (status: string) => {
   return s.includes('conclu') || s.includes('aprovado') || s.includes('fechado') || s.includes('done') || s.includes('cancel');
 };
 
-// `startDate`/`dueDate` são "YYYY-MM-DD" (sem hora); `new Date(string)`
-// interpreta isso como meia-noite UTC, que em fusos atrás de UTC cai no dia
-// anterior ao comparar com datas locais. Parseamos/formatamos manualmente
-// para não deslocar um dia (mesmo cuidado do resto do app, ver GanttView).
-function parseLocalDate(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-function formatLocalDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+// parseLocalDate/formatLocalDate agora vivem em lib/dates (issue #102,
+// achado 3 — eram cópias idênticas às de App.tsx e GanttView).
 
 // Não tenta desenhar um intervalo de anos (dado incoerente) em centenas de
 // células — protege o grid contra travar por causa de uma data mal digitada.
