@@ -13,6 +13,10 @@ import {
   differenceInDays, eachDayOfInterval, isWeekend, isToday, startOfWeek
 } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+// Ver TableView.tsx para o porquê deste import de '@/App': DateFieldEditor
+// exibe/edita sempre em dd/mm/aaaa, ao contrário do <input type="date"> cru
+// (issue #102).
+import { DateFieldEditor } from '@/App';
 
 type GanttScale = 'day' | 'week' | 'month' | 'quarter';
 type GanttGroupBy = 'none' | 'assignee' | 'status' | 'list';
@@ -1444,20 +1448,18 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                                    </label>
                                    <div className="grid grid-cols-2 gap-2">
                                      {!quickDraft.isMilestone && (
-                                       <input
-                                         type="date"
+                                       <DateFieldEditor
                                          value={quickDraft.startDate}
-                                         onChange={(e) => setQuickDraft({ ...quickDraft, startDate: e.target.value })}
+                                         onCommit={(v) => setQuickDraft({ ...quickDraft, startDate: v })}
                                          className="h-8 text-xs border rounded-md px-2"
-                                         title="Início"
+                                         ariaLabel="Início"
                                        />
                                      )}
-                                     <input
-                                       type="date"
+                                     <DateFieldEditor
                                        value={quickDraft.dueDate}
-                                       onChange={(e) => setQuickDraft({ ...quickDraft, dueDate: e.target.value })}
+                                       onCommit={(v) => setQuickDraft({ ...quickDraft, dueDate: v })}
                                        className={`h-8 text-xs border rounded-md px-2 ${quickDraft.isMilestone ? 'col-span-2' : ''}`}
-                                       title={quickDraft.isMilestone ? 'Data do marco' : 'Fim'}
+                                       ariaLabel={quickDraft.isMilestone ? 'Data do marco' : 'Fim'}
                                      />
                                    </div>
                                    {!quickDraft.isMilestone && quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate && (

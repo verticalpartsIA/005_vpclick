@@ -7638,7 +7638,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
                               <select value={quickDraft.priority} onChange={(e) => setQuickDraft({ ...quickDraft, priority: e.target.value as TaskPriority })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs">
                                 {Object.values(TaskPriority).map(priority => <option key={priority} value={priority}>{priority}</option>)}
                               </select>
-                              <input type="date" value={quickDraft.dueDate || ''} onChange={(e) => setQuickDraft({ ...quickDraft, dueDate: e.target.value })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs" />
+                              <DateFieldEditor value={quickDraft.dueDate || ''} onCommit={(v) => setQuickDraft({ ...quickDraft, dueDate: v })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs" ariaLabel="Prazo" />
                             </div>
                             <select value={quickDraft.mainAssigneeId} onChange={(e) => setQuickDraft({ ...quickDraft, mainAssigneeId: e.target.value })} className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs">
                               {availableUsers.map((user: User) => <option key={user.id} value={user.id}>{user.name}</option>)}
@@ -10741,7 +10741,7 @@ function maskBrDate(raw: string): string {
 // continua disponível num input oculto acionado pelo botão (showPicker). O valor
 // persistido continua ISO 'YYYY-MM-DD'. O buffer local preserva o que foi
 // digitado independentemente do round-trip do upsert (ver histórico abaixo).
-export function DateFieldEditor({ value, onCommit, className }: { value: any; onCommit: (v: string) => void; className?: string }) {
+export function DateFieldEditor({ value, onCommit, className, ariaLabel }: { value: any; onCommit: (v: string) => void; className?: string; ariaLabel?: string }) {
   const [text, setText] = useState(() => isoToBr(value ?? ''));
   const pickerRef = useRef<HTMLInputElement>(null);
   useEffect(() => { setText(isoToBr(value ?? '')); }, [value]);
@@ -10760,6 +10760,8 @@ export function DateFieldEditor({ value, onCommit, className }: { value: any; on
         type="text"
         inputMode="numeric"
         placeholder="dd/mm/aaaa"
+        aria-label={ariaLabel}
+        title={ariaLabel}
         value={text}
         onChange={(e) => commitFromText(e.target.value)}
         className={`${className ?? ''} pr-9`}
