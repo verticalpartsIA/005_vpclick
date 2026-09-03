@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
 import { avatarThumb } from '../../lib/avatarUrl';
+import { formatDateTimeShortBR } from '../../lib/dates';
 import { List, Reminder, ReminderNotifyPreference, User } from '../../types';
 import {
   DropdownMenu,
@@ -53,9 +54,9 @@ function toDatetimeLocalValue(iso: string) {
   return `${y}-${m}-${day}T${h}:${min}`;
 }
 
-function formatDueAt(iso: string) {
-  return new Date(iso).toLocaleString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-}
+// formatDueAt agora vive em lib/dates como formatDateTimeShortBR (issue
+// #102, achado 3).
+const formatDueAt = formatDateTimeShortBR;
 
 function mapRow(r: any): Reminder {
   return {

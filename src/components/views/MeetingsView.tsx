@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { supabase } from '../../lib/supabase';
 import { avatarThumb } from '../../lib/avatarUrl';
+import { formatMeetingDateTimeBR, formatWeekdayShortBR, formatDayMonthNumericBR } from '../../lib/dates';
 import { Meeting, MeetingActionItem, MeetingRoom, List, User, UserRole } from '../../types';
 import {
   DropdownMenu,
@@ -76,9 +77,9 @@ function mapActionItemRow(i: any): MeetingActionItem {
   };
 }
 
-function formatMeetingDate(d: string) {
-  return new Date(d).toLocaleString('pt-BR', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
+// formatMeetingDate agora vive em lib/dates como formatMeetingDateTimeBR
+// (issue #102, achado 3).
+const formatMeetingDate = formatMeetingDateTimeBR;
 
 // Prefixo de dia pro resumo do status das salas: "" hoje, "amanhã " ou
 // "seg 11/08 " — sem isso "próxima às 10:00" não dizia se era hoje ou dias
@@ -90,9 +91,7 @@ function roomDatePrefix(dateStr: string) {
   const diffDays = Math.round((startOfDay(d) - startOfDay(now)) / 86400000);
   if (diffDays === 0) return '';
   if (diffDays === 1) return 'amanhã ';
-  const weekday = d.toLocaleDateString('pt-BR', { weekday: 'short' });
-  const dayMonth = d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
-  return `${weekday} ${dayMonth} `;
+  return `${formatWeekdayShortBR(d)} ${formatDayMonthNumericBR(d)} `;
 }
 
 /**

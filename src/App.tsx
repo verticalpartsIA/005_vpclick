@@ -19,6 +19,10 @@ import { recordRecentTaskId } from './lib/recentTasks';
 import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
 import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
+import {
+  parseLocalDate, formatLocalDate, isoToBr, brToIso, maskBrDate,
+  formatDateBR, formatDateTimeLongCleanBR, formatDayMonthNumericBR,
+} from './lib/dates';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
 import { useDashboard } from './hooks/useDashboard';
 import { useTaskCountIndex } from './hooks/useTaskCountIndex';
@@ -6170,25 +6174,8 @@ function DuplicateTaskModal({
   );
 }
 
-// Datas de tarefa (dueDate/startDate) são strings "YYYY-MM-DD" (sem hora).
-// `new Date("YYYY-MM-DD")` interpreta isso como meia-noite UTC, que em fusos
-// atrás de UTC (ex: Brasil) cai no dia anterior ao formatar/comparar em
-// horário local. Parseamos os componentes manualmente para obter a
-// meia-noite local do dia correto.
-function parseLocalDate(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-
-// Inverso de parseLocalDate: formata um Date usando os componentes locais
-// (ano/mês/dia), nunca `toISOString()` — que converte para UTC e pode
-// arredondar para o dia errado em fusos atrás de UTC (ex: Brasil, UTC-3).
-function formatLocalDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+// parseLocalDate / formatLocalDate agora vivem em ./lib/dates (issue #102,
+// achado 3) — importadas no topo deste arquivo.
 
 // Reexportado para não quebrar `import { linkifyText } from './App'` já em uso
 // (ex.: src/test/linkifyText.test.tsx). A implementação vive em ./lib/linkify
@@ -8117,7 +8104,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
                   : (a.newValue || '').toLowerCase().includes('cancel') ? '#6b7280'
                   : '#f59e0b';
                 const dt = new Date(a.createdAt);
-                const label = dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+                const label = formatDayMonthNumericBR(dt);
                 return (
                   <div key={i} className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-50 transition-colors">
                     <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
@@ -8826,17 +8813,7 @@ function TaskDetailModal(props: any) {
     return { statusChanges, priorityChanges, assigneeChanges, extensions, comments, daysOpen };
   }, [task.activities, task.extensionHistory, task.comments, task.createdAt, task.createdBy]);
 
-  const formatDate = (date: string) => {
-    if (!date) return '';
-    const d = new Date(date);
-    return d.toLocaleString('pt-BR', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).replace(' de ', ' ').replace('.', '');
-  };
+  const formatDate = formatDateTimeLongCleanBR;
 
   const taskCustomFields = useMemo(() => {
     // Respeita os campos ocultados por lista (toggles de "Adicionar um
@@ -9153,8 +9130,8 @@ function TaskDetailModal(props: any) {
             context={[
               `Título: ${task.title}`,
               `Status: ${task.status} | Prioridade: ${task.priority}`,
-              task.startDate ? `Início: ${parseLocalDate(task.startDate).toLocaleDateString('pt-BR')}` : '',
-              task.dueDate ? `Prazo: ${parseLocalDate(task.dueDate).toLocaleDateString('pt-BR')}` : '',
+              task.startDate ? `Início: ${formatDateBR(task.startDate)}` : '',
+              task.dueDate ? `Prazo: ${formatDateBR(task.dueDate)}` : '',
               `Responsável: ${users?.find((u: User) => u.id === task.mainAssigneeId)?.name || 'Sem responsável'}`,
               (task.secondaryAssigneeIds || []).length > 0
                 ? `Acompanhantes: ${(task.secondaryAssigneeIds || []).map((id: string) => users?.find((u: User) => u.id === id)?.name).filter(Boolean).join(', ')}`
@@ -9289,8 +9266,8 @@ function TaskDetailModal(props: any) {
                       <p className={`text-sm font-semibold ${h.text}`}>{name} está: {h.label}</p>
                       {task.dueDate && (
                         <p className={`text-xs mt-0.5 ${h.text} opacity-75`}>
-                          Prazo: {parseLocalDate(task.dueDate).toLocaleDateString('pt-BR')}
-                          {task.startDate && ` · Início: ${parseLocalDate(task.startDate).toLocaleDateString('pt-BR')}`}
+                          Prazo: {formatDateBR(task.dueDate)}
+                          {task.startDate && ` · Início: ${formatDateBR(task.startDate)}`}
                         </p>
                       )}
                     </div>
@@ -9694,7 +9671,7 @@ function TaskDetailModal(props: any) {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-bold text-gray-900 truncate">{linkifyText(attachment.name)}</p>
-                          <p className="text-[10px] text-gray-500">{formatFileSize(attachment.size)} • {new Date(attachment.uploadedAt).toLocaleDateString()}</p>
+                          <p className="text-[10px] text-gray-500">{formatFileSize(attachment.size)} • {formatDateBR(attachment.uploadedAt)}</p>
                         </div>
                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                           <a href={attachment.url} target="_blank" rel="noopener noreferrer" className="p-2 hover:bg-white rounded-lg text-gray-400 hover:text-gray-600 transition-colors">
@@ -10725,31 +10702,8 @@ function CreateFolderModal({ onClose, onCreate }: any) {
 // valor local que não depende do round-trip de rede para continuar exibindo
 // o que foi digitado, e (b) só disparamos onCommit quando o usuário termina
 // uma data válida ou explicitamente limpa um valor que já existia.
-// ISO 'YYYY-MM-DD' (formato de armazenamento) → 'dd/mm/aaaa' (exibição pt-BR).
-function isoToBr(iso: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
-  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
-}
-
-// 'dd/mm/aaaa' → ISO 'YYYY-MM-DD'. Retorna '' se a data estiver incompleta ou
-// for inválida (ex: 31/02) — assim só persistimos datas completas e reais.
-function brToIso(br: string): string {
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((br || '').trim());
-  if (!m) return '';
-  const dd = Number(m[1]), mo = Number(m[2]), yyyy = Number(m[3]);
-  if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return '';
-  const dt = new Date(yyyy, mo - 1, dd);
-  if (dt.getFullYear() !== yyyy || dt.getMonth() !== mo - 1 || dt.getDate() !== dd) return '';
-  return `${m[3]}-${m[2]}-${m[1]}`;
-}
-
-// Aplica a máscara dd/mm/aaaa a uma sequência crua de dígitos.
-function maskBrDate(raw: string): string {
-  const d = (raw || '').replace(/\D/g, '').slice(0, 8);
-  if (d.length > 4) return `${d.slice(0, 2)}/${d.slice(2, 4)}/${d.slice(4)}`;
-  if (d.length > 2) return `${d.slice(0, 2)}/${d.slice(2)}`;
-  return d;
-}
+// isoToBr / brToIso / maskBrDate agora vivem em ./lib/dates (issue #102,
+// achado 3) — importadas no topo deste arquivo.
 
 // Editor de data para campos personalizados/tabela. Exibe e aceita entrada
 // SEMPRE em dd/mm/aaaa — o <input type="date"> nativo formatava no locale do

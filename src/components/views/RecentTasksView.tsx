@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { PRIORITY_COLORS } from '../../constants';
 import { avatarThumb } from '../../lib/avatarUrl';
+import { formatShortDateBR } from '../../lib/dates';
 import { Task, User } from '../../types';
 import { readRecentTaskIds } from '../../lib/recentTasks';
 
@@ -81,7 +82,7 @@ export function RecentTasksView({ currentUser, users, tasks, onOpenTask }: Recen
                   <PriorityBadge priority={t.priority} />
                   {t.dueDate && (
                     <span className="text-[10px] text-gray-400 shrink-0">
-                      {new Date(t.dueDate + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}
+                      {formatShortDateBR(t.dueDate)}
                     </span>
                   )}
                 </button>

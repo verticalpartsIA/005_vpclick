@@ -55,6 +55,7 @@ import { toast } from 'sonner';
 // dependência é só em tempo de render (TableView é lazy-loaded a partir de
 // App.tsx, que já está totalmente inicializado quando isso roda).
 import { DateFieldEditor } from '@/App';
+import { parseLocalDate, formatDateBR } from '@/lib/dates';
 
 interface TableViewProps {
   tasks: Task[];
@@ -119,19 +120,12 @@ const PRIORITY_ORDER: Record<string, number> = {
   [TaskPriority.BAIXA]: 3,
 };
 
-const parseDate = (value?: string) => {
-  if (!value) return null;
-  const [datePart] = value.split('T');
-  const [year, month, day] = datePart.split('-').map(Number);
-  if (!year || !month || !day) return null;
-  return new Date(year, month - 1, day);
-};
+// parseLocalDate/formatDateBR agora vivem em lib/dates (issue #102, achado
+// 3) — mantemos aqui só o wrapper com guarda de nulo que isOverdue e o
+// filtro "próximos 7 dias" abaixo já esperam.
+const parseDate = (value?: string) => (value ? parseLocalDate(value) : null);
 
-const formatDate = (value?: string) => {
-  const date = parseDate(value);
-  if (!date) return '-';
-  return date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-};
+const formatDate = (value?: string) => formatDateBR(value) || '-';
 
 const toInputDate = (value?: string) => value?.split('T')[0] || '';
 
