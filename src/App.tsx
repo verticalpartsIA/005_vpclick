@@ -28,7 +28,8 @@ import { useDashboard } from './hooks/useDashboard';
 import { useTaskCountIndex } from './hooks/useTaskCountIndex';
 import { useUsers } from './hooks/useUsers';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
-import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
+import { startVersionCheck, formatBuildTimeShort, type UpdateNotice } from './lib/versionCheck';
+import { NotificationBanner } from './components/ui/notification-banner';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
 import { avatarThumb } from './lib/avatarUrl';
@@ -782,8 +783,11 @@ export default function App() {
 
   // Avisa quando uma nova versão foi publicada (deploy é um build estático,
   // sem invalidação — uma aba deixada aberta pode ficar rodando código
-  // antigo por muito tempo). Ver src/lib/versionCheck.ts.
-  useEffect(() => startVersionCheck(), []);
+  // antigo por muito tempo). Exibido como NotificationBanner (persistente,
+  // no fluxo do layout) em vez de toast — ver comentário em
+  // src/lib/versionCheck.ts sobre o bug que isso corrigiu.
+  const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null);
+  useEffect(() => startVersionCheck(setUpdateNotice), []);
 
   // App montou com sucesso: libera um novo reload automático caso um chunk de
   // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
@@ -3347,6 +3351,20 @@ export default function App() {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col min-w-0 bg-muted">
+          {updateNotice && (
+            <NotificationBanner className="shrink-0" onDismiss={() => setUpdateNotice(null)}>
+              <span className="font-semibold">{updateNotice.message}</span>
+              <span className="mx-2 text-gray-400">·</span>
+              {updateNotice.description}
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="ml-3 font-semibold underline hover:no-underline"
+              >
+                Atualizar agora
+              </button>
+            </NotificationBanner>
+          )}
           {/* Header */}
           <header className="h-14 border-b bg-card flex items-center justify-between px-6 shrink-0 z-10">
             <div className="flex items-center gap-4">
