@@ -8765,7 +8765,15 @@ function TaskDetailModal(props: any) {
         id: 'creation',
         unifiedType: 'CREATION',
         date: task.createdAt,
-        text: creator ? `${creator} criou esta tarefa` : 'Tarefa criada'
+        text: creator ? `${creator} criou esta tarefa` : 'Tarefa importada',
+        // Tarefas sem created_by não passaram pelo fluxo normal de criação do
+        // app — foram inseridas direto no banco por uma migração/import.
+        // Confirmado por auditoria em 2026-09-03 (issue #102, achado 2): o
+        // created_at delas bate com o horário do import (picos de milhares de
+        // tarefas no mesmo minuto, timestamps redondos), não com a criação
+        // real. Mostrar essa data como "criada em" seria inventar precisão
+        // que não existe — o timeline mostra o rótulo sem data nesse caso.
+        dateUnreliable: !creator,
       });
     }
     return all.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
@@ -8809,11 +8817,14 @@ function TaskDetailModal(props: any) {
     ).length;
     const extensions = (task.extensionHistory || []).length;
     const comments = (task.comments || []).length;
-    const daysOpen = task.createdAt
+    // Tarefas importadas (sem created_by, ver comentário na timeline acima)
+    // têm created_at igual à data do import, não da criação real — "aberta
+    // há N dias" contado a partir daí mentiria sobre a idade da tarefa.
+    const daysOpen = task.createdAt && task.createdBy
       ? Math.max(0, Math.floor((Date.now() - new Date(task.createdAt).getTime()) / 86400000))
       : null;
     return { statusChanges, priorityChanges, assigneeChanges, extensions, comments, daysOpen };
-  }, [task.activities, task.extensionHistory, task.comments, task.createdAt]);
+  }, [task.activities, task.extensionHistory, task.comments, task.createdAt, task.createdBy]);
 
   const formatDate = (date: string) => {
     if (!date) return '';
@@ -9836,7 +9847,13 @@ function TaskDetailModal(props: any) {
                         <div className="absolute -left-[22px] top-1.5 w-2 h-2 rounded-full bg-gray-200 border-2 border-white shadow-sm"></div>
                         <div className="text-xs">
                           <span className="text-gray-500">{item.text}</span>
-                          <span className="text-gray-300 ml-2">{formatDate(item.date)}</span>
+                          {item.dateUnreliable ? (
+                            <span className="text-gray-300 ml-2" title="Tarefa migrada de outro sistema — a data de criação original não está disponível.">
+                              (data de criação original indisponível)
+                            </span>
+                          ) : (
+                            <span className="text-gray-300 ml-2">{formatDate(item.date)}</span>
+                          )}
                         </div>
                       </div>
                     );
