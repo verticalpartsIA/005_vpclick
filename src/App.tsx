@@ -3284,6 +3284,12 @@ export default function App() {
   return (
     <SSOHandler>
       <Toaster richColors position="top-right" />
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:rounded-md focus:bg-[var(--primary-color)] focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white focus:shadow-lg"
+      >
+        Pular para o conteúdo principal
+      </a>
       <div
         className={`flex h-screen bg-background text-foreground font-sans selection:bg-[var(--primary-color)]/30 ${uiScaleClass}`}
         onClick={() => setIsUserMenuOpen(false)}
@@ -3647,7 +3653,7 @@ export default function App() {
               tem efeito e a barra horizontal só aparece depois de milhares de linhas,
               lá no rodapé real da página). As outras views continuam usando o scroll
               de página normal do <main>. */}
-          <main className={`flex-1 custom-scrollbar ${activeView === 'Table' ? 'overflow-hidden flex flex-col' : 'overflow-auto p-4 sm:p-6'}`}>
+          <main id="main-content" tabIndex={-1} className={`flex-1 custom-scrollbar focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--primary-color)] ${activeView === 'Table' ? 'overflow-hidden flex flex-col' : 'overflow-auto p-4 sm:p-6'}`}>
           <div key={activeView} className={`animate-in fade-in slide-in-from-bottom-1 duration-200 ${activeView === 'Table' ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
           <React.Suspense
             fallback={
@@ -8136,6 +8142,42 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
   );
 }
 
+// Padrão "Error summary" do GOV.UK Design System: em vez de um toast que some
+// sozinho e não aponta pra nenhum campo, lista todos os erros de validação
+// num único bloco focável (o foco vai pra cá quando os erros aparecem, como
+// um leitor de tela faria pra qualquer role="alert" novo) com um link por
+// erro que leva — e move o foco de verdade — direto pro campo problemático.
+function ErrorSummary({ errors }: { errors: { id: string; message: string }[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (errors.length > 0) ref.current?.focus();
+  }, [errors]);
+
+  if (errors.length === 0) return null;
+
+  return (
+    <div ref={ref} role="alert" tabIndex={-1} className="rounded-lg border-2 border-red-600 bg-red-50 p-4 outline-none focus:ring-2 focus:ring-red-300">
+      <h4 className="text-sm font-bold text-red-800 mb-2">
+        {errors.length === 1 ? 'Há um problema' : `Há ${errors.length} problemas`}
+      </h4>
+      <ul className="space-y-1 list-none">
+        {errors.map((err) => (
+          <li key={err.id}>
+            <a
+              href={`#${err.id}`}
+              className="text-sm text-red-700 underline hover:text-red-900"
+              onClick={(e) => { e.preventDefault(); document.getElementById(err.id)?.focus(); }}
+            >
+              {err.message}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, initialScope, activeListId, currentUser, prefilledData, additionalTasks, statusGroups }: any) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -8148,6 +8190,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [duration, setDuration] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitErrors, setSubmitErrors] = useState<{ id: string; message: string }[]>([]);
   const todayLabel = new Date().toLocaleDateString('pt-BR');
 
   // Esc fecha este modal (não tinha nenhum jeito de fechar por teclado antes).
@@ -8302,26 +8345,23 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
     // cliques são ignorados (evita criar a mesma tarefa várias vezes).
     if (isSubmitting) return;
 
-    if (!title.trim()) {
-      toast.error('Informe o nome da tarefa.');
-      return;
-    }
-
-    if (durationError) {
-      toast.error(durationError);
-      return;
-    }
-
+    // Junta todos os erros de uma vez (em vez de parar no primeiro) para
+    // alimentar o Error Summary — o usuário vê e corrige tudo numa só volta.
+    const errors: { id: string; message: string }[] = [];
+    if (!title.trim()) errors.push({ id: 'task-title', message: 'Informe o nome da tarefa.' });
+    if (durationError) errors.push({ id: 'task-duration', message: durationError });
     // Se uma pasta foi escolhida mas não existe lista, direcionamos o usuário a criar uma lista primeiro.
     if (selectedFolderId && availableLists.length === 0) {
-      toast.error('Esta pasta ainda não tem listas. Crie uma lista na sidebar e depois crie a tarefa.');
-      return;
+      errors.push({ id: 'task-folder', message: 'Esta pasta ainda não tem listas. Crie uma lista na sidebar e depois crie a tarefa.' });
+    } else if (!selectedListId) {
+      errors.push({ id: 'task-list', message: 'Selecione um Espaço, Pasta e Lista antes de criar a tarefa.' });
     }
 
-    if (!selectedListId) {
-      toast.error('Selecione um Espaço, Pasta e Lista antes de criar a tarefa.');
+    if (errors.length > 0) {
+      setSubmitErrors(errors);
       return;
     }
+    setSubmitErrors([]);
 
     setIsSubmitting(true);
     try {
@@ -8364,6 +8404,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 custom-scrollbar space-y-6">
+          <ErrorSummary errors={submitErrors} />
           {/* Hierarchy Selection */}
           <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-xl border ${!selectedListId ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-100'}`}>
             {!selectedListId && (
@@ -8388,6 +8429,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className={`text-xs font-bold uppercase ${selectedSpaceId && !selectedFolderId ? 'text-amber-600' : 'text-gray-400'}`}>Pasta *</label>
               <select
+                id="task-folder"
                 required
                 aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedSpaceId && !selectedFolderId ? 'border-amber-300' : ''}`}
@@ -8402,6 +8444,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div className="sm:col-span-2">
               <label className={`text-xs font-bold uppercase ${selectedFolderId && !selectedListId ? 'text-amber-600' : 'text-gray-400'}`}>Lista *</label>
               <select
+                id="task-list"
                 required
                 aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedFolderId && !selectedListId ? 'border-amber-300' : ''}`}
@@ -8419,6 +8462,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className="text-xs font-bold text-gray-400 uppercase">Nome da Tarefa *</label>
               <input
+                id="task-title"
                 type="text"
                 required
                 aria-required="true"
@@ -8512,6 +8556,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                 <div>
                   <label className="text-xs font-bold text-gray-400 uppercase">Duração (dias ou horas)</label>
                   <input
+                    id="task-duration"
                     type="text"
                     placeholder="Ex: 5 ou 3h"
                     aria-invalid={!!durationError}
