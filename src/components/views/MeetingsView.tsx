@@ -406,7 +406,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 mb-4">
           <div className="flex items-start justify-between gap-2">
-            <h1 className="text-xl font-bold text-gray-800">{selected.title}</h1>
+            <h2 className="text-xl font-bold text-gray-800">{selected.title}</h2>
             {canCancelMeeting(selected) && (
               <button
                 onClick={() => cancelMeeting(selected)}
@@ -517,7 +517,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
       <RoomStatusPanel rooms={rooms} users={users} onSelectMeeting={selectMeetingById} />
       <div className="w-full md:flex-1 md:max-w-2xl">
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-bold text-gray-800">Reuniões</h1>
+        <h2 className="text-xl font-bold text-gray-800">Reuniões</h2>
         <button
           onClick={() => setShowCreateForm((v) => !v)}
           className="text-xs font-bold bg-orange-500 text-white px-3 py-1.5 rounded-lg hover:brightness-110"

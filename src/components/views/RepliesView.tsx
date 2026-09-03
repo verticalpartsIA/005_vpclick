@@ -161,7 +161,7 @@ export function RepliesView({ currentUser, users, onOpenTask }: RepliesViewProps
     <div className="max-w-2xl mx-auto">
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <h1 className="text-xl font-bold text-gray-800">Respostas</h1>
+          <h2 className="text-xl font-bold text-gray-800">Respostas</h2>
           {unreadCount > 0 && (
             <span className="bg-orange-100 text-orange-600 text-xs font-bold px-2 py-0.5 rounded-full">{unreadCount} não lida{unreadCount === 1 ? '' : 's'}</span>
           )}

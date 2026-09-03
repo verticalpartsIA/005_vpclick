@@ -4272,7 +4272,7 @@ function SpaceOverview({ space, folders, lists, listProgressMap, tasks, onNaviga
           </div>
         )}
         <div>
-          <h1 className="text-2xl font-bold text-foreground">{space.name}</h1>
+          <h2 className="text-2xl font-bold text-foreground">{space.name}</h2>
           <p className="text-sm text-muted-foreground">{folders.length} pasta{folders.length !== 1 ? 's' : ''} · {spaceLists.length} lista{spaceLists.length !== 1 ? 's' : ''} · {totalTasks} tarefa{totalTasks !== 1 ? 's' : ''}</p>
         </div>
       </div>
@@ -4706,7 +4706,7 @@ function DocView({ doc, allDocs = [], onUpdate, onSelectDoc, onCreateSubpage, cu
           onPaste={handlePaste}
           onClick={handleContentClick}
           dangerouslySetInnerHTML={{ __html: linkifyHtml(doc.content) }}
-          className="w-full min-h-[300px] text-xl text-gray-700 leading-relaxed outline-none prose prose-orange max-w-none focus:prose-orange [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer hover:[&_a]:text-blue-800"
+          className="w-full min-h-[300px] text-xl text-gray-700 leading-relaxed outline-none prose prose-orange max-w-none rounded-lg focus:prose-orange focus:ring-2 focus:ring-orange-300 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer hover:[&_a]:text-blue-800"
         />
 
         {/* Subpáginas */}
@@ -5914,7 +5914,7 @@ function AllSpacesModal({ spaces, hiddenSpaceIds, onToggleHidden, onCreateSpace,
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as any)}
-            className="text-xs border rounded-md px-2 py-1.5 bg-gray-50 text-gray-600 focus:outline-none"
+            className="text-xs border rounded-md px-2 py-1.5 bg-gray-50 text-gray-600 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
           >
             <option value="recommended">Recomendado</option>
             <option value="created">Data de criação</option>
@@ -7399,7 +7399,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
             className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-8 pr-3 text-xs outline-none transition focus:border-blue-300 focus:bg-white focus:ring-2 focus:ring-blue-100"
           />
         </div>
-        <select value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 outline-none">
+        <select value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100">
           <option value="">Prioridade</option>
           {Object.values(TaskPriority).map(priority => <option key={priority} value={priority}>{priority}</option>)}
         </select>

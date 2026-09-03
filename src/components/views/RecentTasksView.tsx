@@ -47,7 +47,7 @@ export function RecentTasksView({ currentUser, users, tasks, onOpenTask }: Recen
   return (
     <div className="max-w-4xl mx-auto">
       <div className="flex items-center justify-between mb-4">
-        <h1 className="text-2xl font-bold text-gray-800">Todas as tarefas</h1>
+        <h2 className="text-2xl font-bold text-gray-800">Todas as tarefas</h2>
         <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
           {([['all', 'Todas'], ['assigned', 'Atribuídas a mim'], ['created', 'Criadas por mim']] as const).map(([key, label]) => (
             <button
