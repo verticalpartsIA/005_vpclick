@@ -897,11 +897,18 @@ interface DashboardRow {
 
 // Carrega os dados do Dashboard: tarefas (projeção enxuta, paginadas) com as
 // atividades recentes já anexadas, mais a lista de listas para os rótulos.
-export async function fetchDashboardData(): Promise<{ tasks: Task[]; lists: { id: string; name: string }[] }> {
+// Filtra por `listIds` (listas acessíveis ao usuário, já restritas pela RLS em
+// `lists`): sem esse filtro, o Postgres varre a tabela `tasks` inteira
+// avaliando a política de RLS linha a linha antes do LIMIT — 3-8s por
+// chamada em produção (visto em pg_stat_statements) e cresce com o volume
+// total de tarefas, não com o que o usuário realmente vê.
+export async function fetchDashboardData(listIds: string[]): Promise<{ tasks: Task[]; lists: { id: string; name: string }[] }> {
+  if (listIds.length === 0) return { tasks: [], lists: [] };
   const rows = await fetchAllPages<DashboardRow>(
     (from, to) => supabase
       .from('tasks')
       .select('id, title, status, priority, main_assignee_id, start_date, due_date, extension_count, list_id, created_at')
+      .in('list_id', listIds)
       .order('created_at', { ascending: false })
       .order('id', { ascending: true })
       .range(from, to),

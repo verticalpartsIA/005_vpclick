@@ -1384,8 +1384,13 @@ export default function App() {
     handleAdminCreateUser,
   } = useUsers({ session, currentUser, setCurrentUser, setUserAccess });
 
-  // Tarefas globais para o Dashboard (sempre todas, sem filtro de escopo)
-  const { dashboardTasks, dashboardLists, isDashboardLoading, loadDashboardTasks } = useDashboard(session, activeView);
+  // Listas acessíveis ao usuário (RLS já restringe `lists`): usadas para filtrar
+  // o Dashboard e os contadores por lista no servidor, em vez de varrer todas
+  // as tarefas avaliando a RLS linha a linha.
+  const countListIds = useMemo(() => lists.map((l) => l.id), [lists]);
+
+  // Tarefas do Dashboard, filtradas pelas listas acessíveis ao usuário.
+  const { dashboardTasks, dashboardLists, isDashboardLoading, loadDashboardTasks } = useDashboard(session, activeView, countListIds);
 
   const loadInitialData = useCallback(async () => {
     try {
@@ -1623,10 +1628,8 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   // Contadores exatos por lista (badges da sidebar + progresso da SpaceOverview),
   // independentes do escopo carregado. `refreshTaskCountIndex` é religado no
-  // realtime abaixo.
-  // Filtra os contadores pelas listas acessíveis (RLS restringe `lists`): usa o
-  // índice em vez de varrer todas as ~7k tarefas avaliando a RLS por linha.
-  const countListIds = useMemo(() => lists.map((l) => l.id), [lists]);
+  // realtime abaixo. `countListIds` é calculado mais acima (reaproveitado
+  // também pelo Dashboard).
   const { listTaskCounts, listProgressMap, refreshTaskCountIndex } = useTaskCountIndex(session, countListIds);
 
   // `?taskId=` na carga inicial (deep link) já é lido pelo inicializador de
