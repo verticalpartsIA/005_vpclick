@@ -6,7 +6,7 @@ import {
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
   CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification, DuplicateTaskOptions,
   TaskRecurrenceRule, RecurrenceFrequencyType, RecurrenceWeekendShift, RecurrenceEndMode, RecurrenceOverlapPolicy, RecurrenceMisfirePolicy, RecurrenceInheritOptions,
-  Goal, GoalTarget, GoalTargetType, Portfolio
+  Goal, GoalTarget, GoalTargetType, Portfolio, FormDef, FormQuestion, FormQuestionType, FormMapsTo, FormSubmission
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -143,7 +143,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -4577,6 +4577,18 @@ export default function App() {
                 }}
               />
             )}
+            {activeView === 'Forms' && (
+              <FormsView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                folders={folders}
+                spaces={spaces}
+                customFields={customFields}
+                statusGroups={statusGroups}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Doc' && activeDocId && (
               <DocView
                 doc={docs.find(d => d.id === activeDocId)!}
@@ -5745,6 +5757,15 @@ function Sidebar({
       icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
       onSelect: () => { onNavigate('global', null, 'Portfolios'); onViewChange('Portfolios'); },
       isActive: activeView === 'Portfolios',
+    },
+    {
+      // Formulários no ClickUp real É acessível no plano Free (testado ao
+      // vivo em app.clickup.com — issue #190). Mesmo "Mais", consistência.
+      key: 'forms',
+      label: 'Formulários',
+      icon: <Icons.FileText className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Formulários'); onViewChange('Forms'); },
+      isActive: activeView === 'Forms',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -10199,6 +10220,634 @@ function PortfolioFormModal({ portfolio, users, lists, folders, spaces, currentU
           <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
           <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium disabled:opacity-50">
             {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const FORM_MAPS_TO_LABELS: Record<string, string> = {
+  title: 'Nome da tarefa', description: 'Descrição da tarefa', assignee: 'Responsável',
+  priority: 'Prioridade', start_date: 'Data Inicial', due_date: 'Data Final', custom_field: 'Campo personalizado',
+};
+const FORM_TYPE_LABELS: Record<FormQuestionType, string> = {
+  short_text: 'Texto curto', long_text: 'Texto longo', number: 'Número', date: 'Data',
+  single_choice: 'Opção única', multiple_choice: 'Múltipla escolha', custom_field: 'Campo personalizado',
+};
+
+function FormsView({ currentUser, users, lists, folders, spaces, customFields, statusGroups, onOpenTask }: any) {
+  const [forms, setForms] = useState<FormDef[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isBuilderOpen, setIsBuilderOpen] = useState(false);
+  const [editingForm, setEditingForm] = useState<FormDef | null>(null);
+  const [fillingForm, setFillingForm] = useState<FormDef | null>(null);
+  const [questionModalForm, setQuestionModalForm] = useState<FormDef | null>(null);
+  const [editingQuestion, setEditingQuestion] = useState<FormQuestion | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [submissionsByForm, setSubmissionsByForm] = useState<Record<string, FormSubmission[]>>({});
+  const [showArchived, setShowArchived] = useState(false);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try { setForms(await taskRepo.fetchForms(showArchived)); }
+    catch (err) { console.error('FormsView: erro ao carregar', err); toast.error('Não foi possível carregar os Formulários.'); }
+    finally { setIsLoading(false); }
+  }, [showArchived]);
+  useEffect(() => { load(); }, [load]);
+
+  const listById = useMemo(() => new Map(lists.map((l: List) => [l.id, l])), [lists]);
+
+  const loadSubmissions = async (formId: string) => {
+    try { setSubmissionsByForm(prev => ({ ...prev, [formId]: [] })); const rows = await taskRepo.fetchFormSubmissions(formId); setSubmissionsByForm(prev => ({ ...prev, [formId]: rows })); }
+    catch (err) { console.error('FormsView: erro ao carregar respostas', err); }
+  };
+
+  const toggleExpand = (form: FormDef) => {
+    const next = expandedId === form.id ? null : form.id;
+    setExpandedId(next);
+    if (next) loadSubmissions(form.id);
+  };
+
+  const canEdit = (f: FormDef) => f.createdBy === currentUser.id || currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR;
+
+  const handleDelete = async (f: FormDef) => {
+    if (!window.confirm(`Excluir o formulário "${f.name}"? As respostas e tarefas já criadas não são apagadas, só o formulário em si.`)) return;
+    const res = await taskRepo.deleteForm(f.id);
+    if (!res.ok) { toast.error('Erro ao excluir: ' + res.message); return; }
+    toast.success('Formulário excluído.');
+    load();
+  };
+
+  const handleToggleActive = async (f: FormDef) => {
+    const res = await taskRepo.updateForm(f.id, { isActive: !f.isActive });
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    toast.success(f.isActive ? 'Formulário desativado.' : 'Formulário ativado.');
+    load();
+  };
+
+  const handleToggleArchive = async (f: FormDef) => {
+    const res = await taskRepo.updateForm(f.id, { archivedAt: f.archivedAt ? null : new Date().toISOString() });
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    toast.success(f.archivedAt ? 'Formulário reativado.' : 'Formulário arquivado.');
+    load();
+  };
+
+  const handleDeleteQuestion = async (q: FormQuestion) => {
+    if (!window.confirm(`Excluir a pergunta "${q.label}"?`)) return;
+    const res = await taskRepo.deleteFormQuestion(q.id);
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    toast.success('Pergunta excluída.');
+    load();
+  };
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.FileText className="w-5 h-5 text-teal-600" />Formulários</h2>
+          <p className="text-xs text-gray-500 mt-0.5">Cada envio cria uma tarefa direto na lista de destino — inspirado no ClickUp Forms. Formulário interno (usuário logado); versão pública é um próximo incremento.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowArchived(v => !v)}
+            className={`px-3 py-1.5 text-xs rounded-lg border font-medium transition-colors ${showArchived ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+          >
+            {showArchived ? 'Mostrando arquivados' : 'Mostrar arquivados'}
+          </button>
+          <button
+            onClick={() => { setEditingForm(null); setIsBuilderOpen(true); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-medium transition-colors"
+          >
+            <Icons.Plus className="w-4 h-4" />Novo Formulário
+          </button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-24">
+          <div className="w-8 h-8 border-2 border-gray-200 border-t-teal-500 rounded-full animate-spin" />
+        </div>
+      ) : forms.length === 0 ? (
+        <p className="text-sm text-gray-500 text-center py-24">
+          {showArchived ? 'Nenhum formulário arquivado.' : 'Nenhum formulário criado ainda. Clique em "Novo Formulário" pra começar.'}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {forms.map((f: FormDef) => {
+            const isExpanded = expandedId === f.id;
+            const editable = canEdit(f);
+            const list: any = listById.get(f.listId);
+            const submissions = submissionsByForm[f.id] || [];
+            return (
+              <div key={f.id} className="border rounded-xl bg-white overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-3 cursor-pointer" onClick={() => toggleExpand(f)}>
+                  <div className={`w-2.5 h-2.5 rounded-full shrink-0 ${f.isActive ? 'bg-teal-500' : 'bg-gray-300'}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-gray-800 text-sm truncate">{f.name}</span>
+                      {f.archivedAt && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">Arquivado</span>}
+                      {!f.isActive && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 font-medium">Inativo</span>}
+                    </div>
+                    <span className="text-xs text-gray-400">{list?.name || 'Lista removida'} · {f.questions.length} pergunta{f.questions.length !== 1 ? 's' : ''} · {f.submissionCount ?? 0} resposta{(f.submissionCount ?? 0) !== 1 ? 's' : ''}</span>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setFillingForm(f); }}
+                    disabled={!f.isActive}
+                    className="px-3 py-1.5 text-xs rounded-lg bg-teal-50 text-teal-700 hover:bg-teal-100 font-medium disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                  >
+                    Preencher
+                  </button>
+                  {editable && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button onClick={(e) => e.stopPropagation()} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                          <Icons.Settings className="w-4 h-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => { setEditingForm(f); setIsBuilderOpen(true); }}><Icons.Edit className="w-3.5 h-3.5 mr-2" />Editar</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleToggleActive(f)}>{f.isActive ? 'Desativar' : 'Ativar'}</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleToggleArchive(f)}>{f.archivedAt ? 'Reativar' : 'Arquivar'}</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => handleDelete(f)} className="text-red-600"><Icons.Trash className="w-3.5 h-3.5 mr-2" />Excluir</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
+
+                {isExpanded && (
+                  <div className="border-t bg-gray-50/50 px-4 py-3 flex flex-col gap-4">
+                    {f.description && <p className="text-xs text-gray-600 whitespace-pre-wrap">{f.description}</p>}
+
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 mb-1.5">Perguntas</p>
+                      <div className="flex flex-col gap-1.5">
+                        {f.questions.length === 0 && <p className="text-xs text-gray-400">Nenhuma pergunta ainda.</p>}
+                        {f.questions.map((q: FormQuestion) => (
+                          <div key={q.id} className="flex items-center gap-2 bg-white border rounded-lg px-3 py-2">
+                            <span className="text-[10px] uppercase font-bold text-gray-400 w-20 shrink-0">{FORM_TYPE_LABELS[q.type]}</span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-gray-700 truncate">{q.label}{q.isRequired && <span className="text-red-500">*</span>}</p>
+                              {q.mapsTo && <span className="text-[10px] text-teal-600">→ {FORM_MAPS_TO_LABELS[q.mapsTo]}</span>}
+                            </div>
+                            {editable && (
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button onClick={() => { setQuestionModalForm(f); setEditingQuestion(q); }} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                                  <Icons.Edit className="w-3.5 h-3.5" />
+                                </button>
+                                <button onClick={() => handleDeleteQuestion(q)} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-red-600">
+                                  <Icons.Trash className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      {editable && (
+                        <button
+                          onClick={() => { setQuestionModalForm(f); setEditingQuestion(null); }}
+                          className="mt-2 flex items-center gap-1 text-xs text-teal-600 hover:text-teal-800 font-medium"
+                        >
+                          <Icons.Plus className="w-3.5 h-3.5" />Adicionar pergunta
+                        </button>
+                      )}
+                    </div>
+
+                    {editable && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 mb-1.5">Respostas recentes</p>
+                        {submissions.length === 0 ? (
+                          <p className="text-xs text-gray-400">Nenhuma resposta ainda.</p>
+                        ) : (
+                          <div className="flex flex-col gap-1">
+                            {submissions.slice(0, 10).map((s: FormSubmission) => {
+                              const submitter = users.find((u: any) => u.id === s.submittedBy);
+                              return (
+                                <div key={s.id} className="flex items-center justify-between text-xs bg-white border rounded-lg px-3 py-1.5">
+                                  <span className="text-gray-600">{submitter?.name || 'Alguém'} · {new Date(s.createdAt).toLocaleString('pt-BR')}</span>
+                                  {s.taskId && (
+                                    <button onClick={() => onOpenTask(s.taskId)} className="text-teal-600 hover:underline font-medium">Ver tarefa</button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {isBuilderOpen && (
+        <FormBuilderModal
+          form={editingForm}
+          lists={lists}
+          folders={folders}
+          spaces={spaces}
+          users={users}
+          statusGroups={statusGroups}
+          currentUser={currentUser}
+          onClose={() => setIsBuilderOpen(false)}
+          onSaved={() => { setIsBuilderOpen(false); load(); }}
+        />
+      )}
+      {questionModalForm && (
+        <FormQuestionModal
+          form={questionModalForm}
+          question={editingQuestion}
+          customFields={customFields}
+          onClose={() => { setQuestionModalForm(null); setEditingQuestion(null); }}
+          onSaved={() => { setQuestionModalForm(null); setEditingQuestion(null); load(); }}
+        />
+      )}
+      {fillingForm && (
+        <FormFillModal
+          form={fillingForm}
+          lists={lists}
+          statusGroups={statusGroups}
+          users={users}
+          currentUser={currentUser}
+          onClose={() => setFillingForm(null)}
+          onSubmitted={() => { setFillingForm(null); load(); if (expandedId === fillingForm.id) loadSubmissions(fillingForm.id); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function FormBuilderModal({ form, lists, folders, spaces, users, statusGroups, currentUser, onClose, onSaved }: any) {
+  const [name, setName] = useState(form?.name ?? '');
+  const [description, setDescription] = useState(form?.description ?? '');
+  const [listId, setListId] = useState(form?.listId ?? '');
+  const [listSearch, setListSearch] = useState('');
+  const [defaultAssigneeId, setDefaultAssigneeId] = useState(form?.defaultAssigneeId ?? '');
+  const [defaultStatus, setDefaultStatus] = useState(form?.defaultStatus ?? '');
+  const [defaultPriority, setDefaultPriority] = useState(form?.defaultPriority ?? TaskPriority.MEDIA);
+  const [submitLabel, setSubmitLabel] = useState(form?.submitLabel ?? 'Enviar');
+  const [redirectUrl, setRedirectUrl] = useState(form?.redirectUrl ?? '');
+  const [allowResubmit, setAllowResubmit] = useState(form?.allowResubmit ?? true);
+  const [requireConsent, setRequireConsent] = useState(form?.requireConsent ?? false);
+  const [consentText, setConsentText] = useState(form?.consentText ?? '');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const folderById = useMemo(() => new Map(folders.map((f: any) => [f.id, f])), [folders]);
+  const spaceById = useMemo(() => new Map(spaces.map((s: any) => [s.id, s])), [spaces]);
+  const pathFor = (list: any) => {
+    const folder: any = folderById.get(list.folderId);
+    const space: any = folder ? spaceById.get(folder.spaceId) : undefined;
+    return [space?.name, folder?.name].filter(Boolean).join(' / ');
+  };
+
+  const filteredLists = useMemo(() => {
+    const q = listSearch.trim().toLowerCase();
+    const base = q ? lists.filter((l: any) => l.name.toLowerCase().includes(q)) : lists;
+    return base.slice(0, 60);
+  }, [lists, listSearch]);
+
+  const selectedList = lists.find((l: any) => l.id === listId);
+  const statusOptionsForList = useMemo(() => {
+    if (!selectedList) return [];
+    const group = statusGroups.find((g: any) => g.id === selectedList.statusGroupId) || statusGroups[0];
+    return group?.options || [];
+  }, [selectedList, statusGroups]);
+
+  const handleSave = async () => {
+    if (!name.trim()) { toast.error('Dê um nome pro formulário.'); return; }
+    if (!listId) { toast.error('Escolha a lista de destino.'); return; }
+    setIsSaving(true);
+    const payload = {
+      name: name.trim(), description: description.trim() || null,
+      defaultAssigneeId: defaultAssigneeId || null, defaultStatus: defaultStatus || null,
+      defaultPriority: defaultPriority || null, submitLabel: submitLabel.trim() || 'Enviar',
+      redirectUrl: redirectUrl.trim() || null, allowResubmit, requireConsent,
+      consentText: requireConsent ? (consentText.trim() || null) : null,
+    };
+    if (form) {
+      const res = await taskRepo.updateForm(form.id, payload);
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Formulário atualizado.');
+    } else {
+      const res = await taskRepo.createForm({ ...payload, listId, createdBy: currentUser.id });
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Formulário criado.');
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">{form ? 'Editar formulário' : 'Novo formulário'}</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Nome</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-teal-200" placeholder="Ex: Solicitação de material" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Descrição (opcional)</label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-teal-200 resize-none" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Lista de destino {form && <span className="text-gray-400 font-normal">(não pode trocar depois de criado)</span>}</label>
+            {form ? (
+              <div className="text-sm bg-gray-50 border rounded-lg px-3 py-2 text-gray-600">{selectedList?.name || 'Lista removida'}</div>
+            ) : (
+              <>
+                {listId && <div className="text-sm bg-teal-50 border border-teal-200 rounded-lg px-3 py-2 text-teal-700 mb-1.5 flex items-center justify-between">
+                  <span>{selectedList?.name}</span>
+                  <button onClick={() => setListId('')} className="text-teal-400 hover:text-teal-700"><X className="w-3.5 h-3.5" /></button>
+                </div>}
+                {!listId && (
+                  <>
+                    <input value={listSearch} onChange={(e) => setListSearch(e.target.value)} placeholder="Buscar lista por nome..." className="w-full text-sm border rounded-lg px-3 py-2 outline-none mb-1.5" />
+                    <div className="border rounded-lg max-h-32 overflow-y-auto custom-scrollbar">
+                      {filteredLists.map((l: any) => (
+                        <button key={l.id} onClick={() => setListId(l.id)} className="w-full text-left px-3 py-2 hover:bg-gray-50 border-b last:border-b-0">
+                          <span className="text-sm text-gray-700 truncate block">{l.name}</span>
+                          <span className="text-[10px] text-gray-400 truncate block">{pathFor(l)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Responsável padrão</label>
+              <select value={defaultAssigneeId} onChange={(e) => setDefaultAssigneeId(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                <option value="">Quem preencher</option>
+                {users.map((u: any) => <option key={u.id} value={u.id}>{u.name}</option>)}
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Status padrão</label>
+              <select value={defaultStatus} onChange={(e) => setDefaultStatus(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" disabled={!selectedList}>
+                <option value="">Primeiro status da lista</option>
+                {statusOptionsForList.map((o: any) => <option key={o.id} value={o.label}>{o.label}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="flex gap-3">
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Prioridade padrão</label>
+              <select value={defaultPriority} onChange={(e) => setDefaultPriority(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                {Object.values(TaskPriority).map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Rótulo do botão</label>
+              <input value={submitLabel} onChange={(e) => setSubmitLabel(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">URL de redirecionamento após envio (opcional)</label>
+            <input value={redirectUrl} onChange={(e) => setRedirectUrl(e.target.value)} placeholder="https://..." className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={allowResubmit} onChange={(e) => setAllowResubmit(e.target.checked)} className="w-4 h-4" />
+            Permitir enviar de novo (cria outra tarefa)
+          </label>
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={requireConsent} onChange={(e) => setRequireConsent(e.target.checked)} className="w-4 h-4" />
+            Exigir aceite de consentimento (LGPD) antes de enviar
+          </label>
+          {requireConsent && (
+            <textarea value={consentText} onChange={(e) => setConsentText(e.target.value)} rows={2} placeholder="Ex: Concordo que meus dados sejam usados para criar e acompanhar esta tarefa." className="w-full text-sm border rounded-lg px-3 py-2 outline-none resize-none" />
+          )}
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-medium disabled:opacity-50">
+            {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FormQuestionModal({ form, question, customFields, onClose, onSaved }: any) {
+  const [type, setType] = useState<FormQuestionType>(question?.type ?? 'short_text');
+  const [label, setLabel] = useState(question?.label ?? '');
+  const [helpText, setHelpText] = useState(question?.helpText ?? '');
+  const [isRequired, setIsRequired] = useState(question?.isRequired ?? false);
+  const [mapsTo, setMapsTo] = useState<FormMapsTo | ''>(question?.mapsTo ?? '');
+  const [customFieldId, setCustomFieldId] = useState(question?.customFieldId ?? '');
+  const [optionsText, setOptionsText] = useState((question?.options || []).join('\n'));
+  const [isSaving, setIsSaving] = useState(false);
+
+  const listCustomFields = useMemo(() => customFields.filter((f: CustomField) => f.target === 'TASK'), [customFields]);
+  const isChoiceType = type === 'single_choice' || type === 'multiple_choice';
+
+  const handleSave = async () => {
+    if (!label.trim()) { toast.error('Dê um nome pra pergunta.'); return; }
+    if (mapsTo === 'custom_field' && !customFieldId) { toast.error('Escolha o campo personalizado.'); return; }
+    setIsSaving(true);
+    const options = isChoiceType ? optionsText.split('\n').map((s) => s.trim()).filter(Boolean) : null;
+    const payload = {
+      label: label.trim(), helpText: helpText.trim() || null, isRequired,
+      mapsTo: (mapsTo || null) as FormMapsTo | null, customFieldId: mapsTo === 'custom_field' ? customFieldId : null, options,
+    };
+    if (question) {
+      const res = await taskRepo.updateFormQuestion(question.id, payload);
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Pergunta atualizada.');
+    } else {
+      const res = await taskRepo.createFormQuestion(form.id, { ...payload, type, orderIndex: form.questions.length });
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Pergunta criada.');
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">{question ? 'Editar pergunta' : `Nova pergunta — ${form.name}`}</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          {!question && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Tipo</label>
+              <select value={type} onChange={(e) => setType(e.target.value as FormQuestionType)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                {(Object.keys(FORM_TYPE_LABELS) as FormQuestionType[]).filter((t) => t !== 'custom_field').map((t) => <option key={t} value={t}>{FORM_TYPE_LABELS[t]}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Pergunta / rótulo</label>
+            <input autoFocus value={label} onChange={(e) => setLabel(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-teal-200" placeholder="Ex: Qual o item solicitado?" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Texto de ajuda (opcional)</label>
+            <input value={helpText} onChange={(e) => setHelpText(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+          </div>
+          {isChoiceType && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Opções (uma por linha)</label>
+              <textarea value={optionsText} onChange={(e) => setOptionsText(e.target.value)} rows={4} className="w-full text-sm border rounded-lg px-3 py-2 outline-none resize-none" placeholder={'Opção A\nOpção B'} />
+            </div>
+          )}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Mapear resposta para (opcional)</label>
+            <select value={mapsTo} onChange={(e) => setMapsTo(e.target.value as FormMapsTo | '')} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+              <option value="">Só guardar a resposta</option>
+              <option value="title">Nome da tarefa</option>
+              <option value="description">Descrição da tarefa</option>
+              <option value="assignee">Responsável</option>
+              <option value="priority">Prioridade</option>
+              <option value="start_date">Data Inicial</option>
+              <option value="due_date">Data Final</option>
+              <option value="custom_field">Campo personalizado...</option>
+            </select>
+          </div>
+          {mapsTo === 'custom_field' && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Qual campo personalizado</label>
+              <select value={customFieldId} onChange={(e) => setCustomFieldId(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                <option value="">Escolha...</option>
+                {listCustomFields.map((f: CustomField) => <option key={f.id} value={f.id}>{f.name}</option>)}
+              </select>
+            </div>
+          )}
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input type="checkbox" checked={isRequired} onChange={(e) => setIsRequired(e.target.checked)} className="w-4 h-4" />
+            Pergunta obrigatória
+          </label>
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-medium disabled:opacity-50">
+            {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose, onSubmitted }: any) {
+  const [answers, setAnswers] = useState<Record<string, any>>({});
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const setAnswer = (qId: string, value: any) => setAnswers((prev) => ({ ...prev, [qId]: value }));
+
+  const resolvedStatus = useMemo(() => {
+    if (form.defaultStatus) return form.defaultStatus;
+    const list = lists.find((l: any) => l.id === form.listId);
+    const group = statusGroups.find((g: any) => g.id === list?.statusGroupId) || statusGroups[0];
+    return group?.options?.[0]?.label || 'A fazer';
+  }, [form, lists, statusGroups]);
+
+  const handleSubmit = async () => {
+    for (const q of form.questions as FormQuestion[]) {
+      const v = answers[q.id];
+      if (q.isRequired && (v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0))) {
+        toast.error(`Preencha: ${q.label}`);
+        return;
+      }
+    }
+    if (form.requireConsent && !consentChecked) { toast.error('Confirme o consentimento pra continuar.'); return; }
+    setIsSubmitting(true);
+    const res = await taskRepo.submitForm({
+      formId: form.id, listId: form.listId, questions: form.questions, answers,
+      defaultAssigneeId: form.defaultAssigneeId || currentUser.id,
+      defaultStatus: resolvedStatus,
+      defaultPriority: (form.defaultPriority || TaskPriority.MEDIA) as TaskPriority,
+      currentUserId: currentUser.id,
+    });
+    setIsSubmitting(false);
+    if (!res.ok) { toast.error('Erro ao enviar: ' + res.message); return; }
+    toast.success('Formulário enviado — tarefa criada!');
+    onSubmitted();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <div>
+            <p className="font-semibold text-gray-800 text-sm">{form.name}</p>
+            {form.description && <p className="text-xs text-gray-500 mt-0.5">{form.description}</p>}
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          {form.questions.map((q: FormQuestion) => (
+            <div key={q.id}>
+              <label className="text-xs font-semibold text-gray-600 mb-1 block">{q.label}{q.isRequired && <span className="text-red-500">*</span>}</label>
+              {q.helpText && <p className="text-[11px] text-gray-400 mb-1">{q.helpText}</p>}
+              {q.type === 'short_text' && (
+                <input value={answers[q.id] ?? ''} onChange={(e) => setAnswer(q.id, e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-teal-200" />
+              )}
+              {q.type === 'long_text' && (
+                <textarea value={answers[q.id] ?? ''} onChange={(e) => setAnswer(q.id, e.target.value)} rows={3} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-teal-200 resize-none" />
+              )}
+              {q.type === 'number' && (
+                <input type="number" value={answers[q.id] ?? ''} onChange={(e) => setAnswer(q.id, e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+              )}
+              {q.type === 'date' && (
+                <input type="date" value={answers[q.id] ?? ''} onChange={(e) => setAnswer(q.id, e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+              )}
+              {q.type === 'single_choice' && (
+                <div className="flex flex-col gap-1.5">
+                  {(q.options || []).map((opt) => (
+                    <label key={opt} className="flex items-center gap-2 text-sm text-gray-700">
+                      <input type="radio" name={q.id} checked={answers[q.id] === opt} onChange={() => setAnswer(q.id, opt)} className="w-4 h-4" />
+                      {opt}
+                    </label>
+                  ))}
+                </div>
+              )}
+              {q.type === 'multiple_choice' && (
+                <div className="flex flex-col gap-1.5">
+                  {(q.options || []).map((opt) => {
+                    const arr: string[] = answers[q.id] || [];
+                    return (
+                      <label key={opt} className="flex items-center gap-2 text-sm text-gray-700">
+                        <input
+                          type="checkbox"
+                          checked={arr.includes(opt)}
+                          onChange={(e) => setAnswer(q.id, e.target.checked ? [...arr, opt] : arr.filter((o) => o !== opt))}
+                          className="w-4 h-4"
+                        />
+                        {opt}
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+          {form.requireConsent && (
+            <label className="flex items-start gap-2 text-xs text-gray-600 bg-gray-50 border rounded-lg p-2.5">
+              <input type="checkbox" checked={consentChecked} onChange={(e) => setConsentChecked(e.target.checked)} className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{form.consentText || 'Concordo com o uso dos meus dados para esta solicitação.'}</span>
+            </label>
+          )}
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSubmit} disabled={isSubmitting} className="px-3 py-1.5 text-sm rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-medium disabled:opacity-50">
+            {isSubmitting ? 'Enviando...' : (form.submitLabel || 'Enviar')}
           </button>
         </div>
       </div>

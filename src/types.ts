@@ -532,6 +532,59 @@ export interface Portfolio {
   listIds: string[];
 }
 
+// ── Forms (issue #190) ──────────────────────────────────────
+// Formulário interno (usuário logado com acesso à Lista) cujo envio cria
+// UMA tarefa. Escopo desta fase não inclui formulário público/anônimo (ver
+// nota na migration) — a coluna access já suporta isso pro futuro.
+
+export type FormQuestionType = 'short_text' | 'long_text' | 'number' | 'date' | 'single_choice' | 'multiple_choice' | 'custom_field';
+export type FormMapsTo = 'title' | 'description' | 'assignee' | 'priority' | 'start_date' | 'due_date' | 'custom_field';
+export type FormAccess = 'internal' | 'public';
+
+export interface FormQuestion {
+  id: string;
+  formId: string;
+  orderIndex: number;
+  type: FormQuestionType;
+  mapsTo?: FormMapsTo | null;
+  customFieldId?: string | null;
+  label: string;
+  helpText?: string | null;
+  isRequired: boolean;
+  options?: string[] | null;
+}
+
+export interface FormDef {
+  id: string;
+  name: string;
+  description?: string | null;
+  listId: string;
+  access: FormAccess;
+  defaultAssigneeId?: string | null;
+  defaultStatus?: string | null;
+  defaultPriority?: string | null;
+  submitLabel: string;
+  redirectUrl?: string | null;
+  allowResubmit: boolean;
+  requireConsent: boolean;
+  consentText?: string | null;
+  isActive: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  archivedAt?: string | null;
+  questions: FormQuestion[];
+  submissionCount?: number;
+}
+
+export interface FormSubmission {
+  id: string;
+  formId: string;
+  taskId: string | null;
+  answers: Record<string, any>;
+  submittedBy: string | null;
+  createdAt: string;
+}
+
 // ── Automations ───────────────────────────────────────────
 
 export type AutomationTriggerType =

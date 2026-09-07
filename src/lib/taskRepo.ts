@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { CustomFieldValue, Goal, GoalTarget, GoalTargetType, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
+import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -1885,4 +1885,229 @@ export async function deletePortfolio(portfolioId: string): Promise<{ ok: true }
   const { error } = await supabase.from('portfolios').delete().eq('id', portfolioId);
   if (error) return { ok: false, message: error.message };
   return { ok: true };
+}
+
+// ── Forms (issue #190) ───────────────────────────────────────────────────────
+
+function mapFormQuestionRow(r: any): FormQuestion {
+  return {
+    id: r.id,
+    formId: r.form_id,
+    orderIndex: r.order_index,
+    type: r.type,
+    mapsTo: r.maps_to,
+    customFieldId: r.custom_field_id,
+    label: r.label,
+    helpText: r.help_text,
+    isRequired: r.is_required,
+    options: r.options,
+  };
+}
+
+function mapFormRow(r: any): FormDef {
+  return {
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    listId: r.list_id,
+    access: r.access,
+    defaultAssigneeId: r.default_assignee_id,
+    defaultStatus: r.default_status,
+    defaultPriority: r.default_priority,
+    submitLabel: r.submit_label,
+    redirectUrl: r.redirect_url,
+    allowResubmit: r.allow_resubmit,
+    requireConsent: r.require_consent,
+    consentText: r.consent_text,
+    isActive: r.is_active,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    archivedAt: r.archived_at,
+    questions: (r.form_questions || []).map(mapFormQuestionRow).sort((a: FormQuestion, b: FormQuestion) => a.orderIndex - b.orderIndex),
+    // PostgREST sempre devolve um agregado `(count)` como [{ count: N }],
+    // mesmo select embedado — não confundir com a lista de linhas em si.
+    submissionCount: r.form_submissions?.[0]?.count ?? 0,
+  };
+}
+
+export async function fetchForms(includeArchived = false): Promise<FormDef[]> {
+  let q = supabase
+    .from('forms')
+    .select('*, form_questions(*), form_submissions(count)')
+    .order('created_at', { ascending: false });
+  if (!includeArchived) q = q.is('archived_at', null);
+  const { data, error } = await q;
+  if (error) { console.error('taskRepo.fetchForms:', error); throw error; }
+  return (data ?? []).map(mapFormRow);
+}
+
+export async function fetchFormById(formId: string): Promise<FormDef | null> {
+  const { data, error } = await supabase
+    .from('forms')
+    .select('*, form_questions(*), form_submissions(count)')
+    .eq('id', formId)
+    .maybeSingle();
+  if (error) { console.error('taskRepo.fetchFormById:', error); throw error; }
+  return data ? mapFormRow(data) : null;
+}
+
+export async function createForm(input: {
+  name: string; description?: string | null; listId: string;
+  defaultAssigneeId?: string | null; defaultStatus?: string | null; defaultPriority?: string | null;
+  submitLabel: string; redirectUrl?: string | null; allowResubmit: boolean;
+  requireConsent: boolean; consentText?: string | null; createdBy: string;
+}): Promise<{ ok: true; form: FormDef } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('forms')
+    .insert({
+      name: input.name, description: input.description ?? null, list_id: input.listId,
+      default_assignee_id: input.defaultAssigneeId ?? null, default_status: input.defaultStatus ?? null,
+      default_priority: input.defaultPriority ?? null, submit_label: input.submitLabel,
+      redirect_url: input.redirectUrl ?? null, allow_resubmit: input.allowResubmit,
+      require_consent: input.requireConsent, consent_text: input.consentText ?? null,
+      created_by: input.createdBy,
+    })
+    .select()
+    .single();
+  if (error || !data) return { ok: false, message: error?.message ?? 'Erro ao criar formulário' };
+  return { ok: true, form: mapFormRow({ ...data, form_questions: [], form_submissions: [{ count: 0 }] }) };
+}
+
+export async function updateForm(formId: string, updates: {
+  name?: string; description?: string | null; defaultAssigneeId?: string | null;
+  defaultStatus?: string | null; defaultPriority?: string | null; submitLabel?: string;
+  redirectUrl?: string | null; allowResubmit?: boolean; requireConsent?: boolean;
+  consentText?: string | null; isActive?: boolean; archivedAt?: string | null;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const payload: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (updates.name !== undefined) payload.name = updates.name;
+  if (updates.description !== undefined) payload.description = updates.description;
+  if (updates.defaultAssigneeId !== undefined) payload.default_assignee_id = updates.defaultAssigneeId;
+  if (updates.defaultStatus !== undefined) payload.default_status = updates.defaultStatus;
+  if (updates.defaultPriority !== undefined) payload.default_priority = updates.defaultPriority;
+  if (updates.submitLabel !== undefined) payload.submit_label = updates.submitLabel;
+  if (updates.redirectUrl !== undefined) payload.redirect_url = updates.redirectUrl;
+  if (updates.allowResubmit !== undefined) payload.allow_resubmit = updates.allowResubmit;
+  if (updates.requireConsent !== undefined) payload.require_consent = updates.requireConsent;
+  if (updates.consentText !== undefined) payload.consent_text = updates.consentText;
+  if (updates.isActive !== undefined) payload.is_active = updates.isActive;
+  if (updates.archivedAt !== undefined) payload.archived_at = updates.archivedAt;
+  const { error } = await supabase.from('forms').update(payload).eq('id', formId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function deleteForm(formId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('forms').delete().eq('id', formId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function createFormQuestion(formId: string, input: {
+  orderIndex: number; type: FormQuestionType; mapsTo?: FormMapsTo | null;
+  customFieldId?: string | null; label: string; helpText?: string | null;
+  isRequired: boolean; options?: string[] | null;
+}): Promise<{ ok: true; question: FormQuestion } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('form_questions')
+    .insert({
+      form_id: formId, order_index: input.orderIndex, type: input.type, maps_to: input.mapsTo ?? null,
+      custom_field_id: input.customFieldId ?? null, label: input.label, help_text: input.helpText ?? null,
+      is_required: input.isRequired, options: input.options ?? null,
+    })
+    .select()
+    .single();
+  if (error || !data) return { ok: false, message: error?.message ?? 'Erro ao criar pergunta' };
+  return { ok: true, question: mapFormQuestionRow(data) };
+}
+
+export async function updateFormQuestion(questionId: string, updates: {
+  label?: string; helpText?: string | null; isRequired?: boolean; options?: string[] | null;
+  mapsTo?: FormMapsTo | null; customFieldId?: string | null; orderIndex?: number;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const payload: Record<string, any> = {};
+  if (updates.label !== undefined) payload.label = updates.label;
+  if (updates.helpText !== undefined) payload.help_text = updates.helpText;
+  if (updates.isRequired !== undefined) payload.is_required = updates.isRequired;
+  if (updates.options !== undefined) payload.options = updates.options;
+  if (updates.mapsTo !== undefined) payload.maps_to = updates.mapsTo;
+  if (updates.customFieldId !== undefined) payload.custom_field_id = updates.customFieldId;
+  if (updates.orderIndex !== undefined) payload.order_index = updates.orderIndex;
+  const { error } = await supabase.from('form_questions').update(payload).eq('id', questionId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function deleteFormQuestion(questionId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('form_questions').delete().eq('id', questionId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function fetchFormSubmissions(formId: string): Promise<FormSubmission[]> {
+  const { data, error } = await supabase
+    .from('form_submissions')
+    .select('id, form_id, task_id, answers, submitted_by, created_at')
+    .eq('form_id', formId)
+    .order('created_at', { ascending: false });
+  if (error) { console.error('taskRepo.fetchFormSubmissions:', error); throw error; }
+  return (data ?? []).map((r: any) => ({
+    id: r.id, formId: r.form_id, taskId: r.task_id, answers: r.answers || {},
+    submittedBy: r.submitted_by, createdAt: r.created_at,
+  }));
+}
+
+// Envio de formulário: monta a tarefa a partir das respostas mapeadas,
+// cria a tarefa (mesma insertTask usada em qualquer outro lugar do app —
+// RLS normal, nada de bypass), grava os campos personalizados mapeados e
+// registra a resposta com o task_id resultante (rastreabilidade).
+export async function submitForm(input: {
+  formId: string; listId: string; questions: FormQuestion[]; answers: Record<string, any>;
+  defaultAssigneeId: string; defaultStatus: string; defaultPriority: TaskPriority;
+  currentUserId: string;
+}): Promise<{ ok: true; taskId: string } | { ok: false; message: string }> {
+  let title = '';
+  let description = '';
+  let assigneeId = input.defaultAssigneeId;
+  let priority = input.defaultPriority;
+  let startDate = '';
+  let dueDate = '';
+  const customFieldAnswers: { fieldId: string; value: any }[] = [];
+
+  for (const q of input.questions) {
+    const value = input.answers[q.id];
+    if (value === undefined || value === null || value === '') continue;
+    switch (q.mapsTo) {
+      case 'title': title = String(value); break;
+      case 'description': description = String(value); break;
+      case 'assignee': assigneeId = String(value); break;
+      case 'priority': priority = value as TaskPriority; break;
+      case 'start_date': startDate = String(value); break;
+      case 'due_date': dueDate = String(value); break;
+      case 'custom_field': if (q.customFieldId) customFieldAnswers.push({ fieldId: q.customFieldId, value }); break;
+      default: break;
+    }
+  }
+  if (!title.trim()) title = 'Nova tarefa via formulário';
+
+  const result = await insertTask({
+    title, description, status: input.defaultStatus, priority,
+    mainAssigneeId: assigneeId, startDate, dueDate, listId: input.listId, createdBy: input.currentUserId,
+  });
+  if ('error' in result) return { ok: false, message: result.error };
+  const taskId = result.task.id;
+
+  for (const cf of customFieldAnswers) {
+    const { error: cfError } = await supabase
+      .from('custom_field_values')
+      .upsert({ field_id: cf.fieldId, entity_id: taskId, value: cf.value }, { onConflict: 'field_id,entity_id' });
+    if (cfError) console.error('taskRepo.submitForm: erro ao salvar campo personalizado', cfError);
+  }
+
+  const { error: subError } = await supabase
+    .from('form_submissions')
+    .insert({ form_id: input.formId, task_id: taskId, answers: input.answers, submitted_by: input.currentUserId });
+  if (subError) return { ok: false, message: 'Tarefa criada, mas falha ao registrar a resposta: ' + subError.message };
+
+  return { ok: true, taskId };
 }
