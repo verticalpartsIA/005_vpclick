@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { CustomFieldValue, Task, TaskPriority, TaskRecurrenceRule } from '../types';
+import { CustomFieldValue, Task, TaskPriority, TaskRecurrenceRule, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -49,6 +49,7 @@ const TASK_ROW_SELECT = [
   'purge_after',
   'deletion_reason_code',
   'deletion_reason_text',
+  'estimated_hours',
 ].join(',');
 
 // ── Formato cru das linhas do banco (snake_case) ────────────────────────────
@@ -81,6 +82,7 @@ export interface TaskRow {
   purge_after: string | null;
   deletion_reason_code: string | null;
   deletion_reason_text: string | null;
+  estimated_hours: number | string | null;
 }
 interface AttachmentRow { id: string; task_id: string; name: string; url: string; type: string; size: number; uploaded_at: string; }
 interface CommentRow {
@@ -169,6 +171,7 @@ const mapTaskCore = (d: TaskRow) => ({
   purgeAfter: d.purge_after || undefined,
   deletionReasonCode: d.deletion_reason_code || undefined,
   deletionReasonText: d.deletion_reason_text || undefined,
+  estimatedHours: d.estimated_hours != null ? Number(d.estimated_hours) : undefined,
 });
 
 // Task "shell": campos preenchidos, sub-entidades vazias. Usado nas listagens,
@@ -510,6 +513,72 @@ export async function fetchDashboardSummary(period: DashboardPeriod): Promise<Da
   }));
 }
 
+// Issue #187 (Workload/Capacidade), gota 2/3. Mesmo padrão de
+// fetchDashboardSummary: agregação feita no Postgres (get_workload_summary,
+// SECURITY INVOKER — respeita RLS de tasks linha a linha), nunca traz
+// tarefa por tarefa pro cliente.
+export async function fetchWorkloadSummary(
+  listIds: string[] | null,
+  periodStart: string,
+  periodEnd: string,
+): Promise<WorkloadBucket[]> {
+  const { data, error } = await supabase.rpc('get_workload_summary', {
+    p_list_ids: listIds,
+    p_period_start: periodStart,
+    p_period_end: periodEnd,
+  });
+  if (error) {
+    console.error('taskRepo.fetchWorkloadSummary:', error);
+    throw error;
+  }
+  return ((data ?? []) as { user_id: string; bucket_date: string; planned_hours: number | string; task_count: number | string }[]).map((row) => ({
+    userId: row.user_id,
+    bucketDate: row.bucket_date,
+    plannedHours: Number(row.planned_hours) || 0,
+    taskCount: Number(row.task_count) || 0,
+  }));
+}
+
+export async function fetchUserCapacities(): Promise<UserCapacity[]> {
+  const { data, error } = await supabase.from('user_capacity').select('user_id, weekly_hours');
+  if (error) { console.error('taskRepo.fetchUserCapacities:', error); throw error; }
+  return (data ?? []).map((r: any) => ({ userId: r.user_id, weeklyHours: Number(r.weekly_hours) }));
+}
+
+export async function upsertUserCapacity(userId: string, weeklyHours: number): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase
+    .from('user_capacity')
+    .upsert({ user_id: userId, weekly_hours: weeklyHours, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function fetchUserTimeOff(userIds?: string[]): Promise<UserTimeOff[]> {
+  let q = supabase.from('user_time_off').select('id, user_id, start_date, end_date, reason').order('start_date', { ascending: false });
+  if (userIds && userIds.length > 0) q = q.in('user_id', userIds);
+  const { data, error } = await q;
+  if (error) { console.error('taskRepo.fetchUserTimeOff:', error); throw error; }
+  return (data ?? []).map((r: any) => ({ id: r.id, userId: r.user_id, startDate: r.start_date, endDate: r.end_date, reason: r.reason || undefined }));
+}
+
+export async function addUserTimeOff(userId: string, startDate: string, endDate: string, reason: string | null, createdBy: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('user_time_off').insert({ user_id: userId, start_date: startDate, end_date: endDate, reason, created_by: createdBy });
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function deleteUserTimeOff(id: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('user_time_off').delete().eq('id', id);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function updateTaskEstimatedHours(taskId: string, hours: number | null): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('tasks').update({ estimated_hours: hours }).eq('id', taskId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
 export async function fetchCustomFieldValuesByEntityIds(entityIds: string[]): Promise<CustomFieldValue[]> {
   const uniqueIds = Array.from(new Set(entityIds.filter(Boolean)));
   if (uniqueIds.length === 0) return [];
@@ -746,6 +815,7 @@ export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok:
       parent_id: task.parentId ?? null,
       extension_count: task.extensionCount,
       is_milestone: task.isMilestone ?? false,
+      estimated_hours: task.estimatedHours ?? null,
     })
     .eq('id', task.id);
   if (error) return { ok: false, message: error.message };

@@ -142,7 +142,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -4196,6 +4196,7 @@ export default function App() {
                 <ViewTab active={activeView === 'Calendar'} onClick={() => setActiveView('Calendar')} label="Calendário" />
                 <ViewTab active={activeView === 'Gantt'} onClick={() => setActiveView('Gantt')} label="Gantt" />
                 <ViewTab active={activeView === 'Table'} onClick={() => setActiveView('Table')} label="Tabela" />
+                <ViewTab active={activeView === 'Workload'} onClick={() => setActiveView('Workload')} label="Workload" />
                 {activeScope.type !== 'space' && (
                   <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Dashboards" />
                 )}
@@ -4495,6 +4496,13 @@ export default function App() {
                 onBulkMove={handleBulkMove}
                 onBulkDelete={handleBulkDelete}
                 workspaceTags={workspaceTags}
+              />
+            )}
+            {activeView === 'Workload' && (
+              <WorkloadView
+                listIds={scopedListIds}
+                users={adminUsers}
+                currentUser={currentUser}
               />
             )}
             {activeView === 'Doc' && activeDocId && (
@@ -8736,6 +8744,312 @@ function ListView({
   );
 }
 
+// Issue #187 (Workload/Capacidade) — MVP inspirado no ClickUp. Mesmo padrão
+// arquitetural do Dashboard: agregação vem pronta do banco
+// (get_workload_summary), a view só monta a matriz visual. Fica dentro de
+// App.tsx (não é lazy-loaded como TableView/CalendarView/GanttView) seguindo
+// o mesmo precedente do DashboardView — que também busca seus próprios dados
+// via useEffect em vez de depender do array `tasks` compartilhado.
+function WorkloadView({ listIds, users, currentUser }: any) {
+  const [periodOffset, setPeriodOffset] = useState(0);
+  const [buckets, setBuckets] = useState<WorkloadBucket[]>([]);
+  const [capacities, setCapacities] = useState<UserCapacity[]>([]);
+  const [timeOffs, setTimeOffs] = useState<UserTimeOff[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isCapacityModalOpen, setIsCapacityModalOpen] = useState(false);
+
+  const canManageCapacity = currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR;
+
+  // Janela de 14 dias começando na segunda-feira da semana atual + offset.
+  const { periodStart, periodEnd, days } = useMemo(() => {
+    const today = new Date();
+    const dow = today.getDay();
+    const mondayOffset = (dow === 0 ? -6 : 1 - dow) + periodOffset * 14;
+    const monday = new Date(today.getFullYear(), today.getMonth(), today.getDate() + mondayOffset);
+    const list: Date[] = [];
+    for (let i = 0; i < 14; i++) list.push(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i));
+    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { periodStart: fmt(list[0]), periodEnd: fmt(list[list.length - 1]), days: list };
+  }, [periodOffset]);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [b, c, t] = await Promise.all([
+        taskRepo.fetchWorkloadSummary(listIds, periodStart, periodEnd),
+        taskRepo.fetchUserCapacities(),
+        taskRepo.fetchUserTimeOff(),
+      ]);
+      setBuckets(b);
+      setCapacities(c);
+      setTimeOffs(t);
+    } catch (err) {
+      console.error('WorkloadView: erro ao carregar', err);
+      toast.error('Não foi possível carregar o Workload.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [listIds, periodStart, periodEnd]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const capacityByUser = useMemo(() => {
+    const m = new Map<string, number>();
+    capacities.forEach((c: UserCapacity) => m.set(c.userId, c.weeklyHours));
+    return m;
+  }, [capacities]);
+
+  const bucketsByUserDay = useMemo(() => {
+    const m = new Map<string, WorkloadBucket>();
+    buckets.forEach((b: WorkloadBucket) => m.set(`${b.userId}|${b.bucketDate}`, b));
+    return m;
+  }, [buckets]);
+
+  const rows = useMemo(() => {
+    const ids = new Set<string>();
+    buckets.forEach((b: WorkloadBucket) => ids.add(b.userId));
+    capacities.forEach((c: UserCapacity) => ids.add(c.userId));
+    return users
+      .filter((u: any) => ids.has(u.id))
+      .sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [users, buckets, capacities]);
+
+  const isTimeOff = (userId: string, dateStr: string) =>
+    timeOffs.some((t: UserTimeOff) => t.userId === userId && dateStr >= t.startDate && dateStr <= t.endDate);
+
+  const weekdayFmt = new Intl.DateTimeFormat('pt-BR', { weekday: 'short' });
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <button onClick={() => setPeriodOffset((p: number) => p - 1)} className="p-1.5 rounded-lg border hover:bg-gray-50" title="Período anterior">
+            <Icons.ChevronRight className="w-4 h-4 rotate-180" />
+          </button>
+          <span className="text-sm font-semibold text-gray-700">
+            {new Date(periodStart + 'T00:00:00').toLocaleDateString('pt-BR')} — {new Date(periodEnd + 'T00:00:00').toLocaleDateString('pt-BR')}
+          </span>
+          <button onClick={() => setPeriodOffset((p: number) => p + 1)} className="p-1.5 rounded-lg border hover:bg-gray-50" title="Próximo período">
+            <Icons.ChevronRight className="w-4 h-4" />
+          </button>
+          {periodOffset !== 0 && (
+            <button onClick={() => setPeriodOffset(0)} className="text-xs text-blue-600 hover:underline font-medium">Hoje</button>
+          )}
+        </div>
+        {canManageCapacity && (
+          <button
+            onClick={() => setIsCapacityModalOpen(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-gray-200 bg-white hover:bg-gray-50 text-gray-600 hover:text-gray-900 transition-colors font-medium"
+          >
+            Configurar capacidade
+          </button>
+        )}
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-24">
+          <div className="w-8 h-8 border-2 border-gray-200 border-t-orange-500 rounded-full animate-spin" />
+        </div>
+      ) : rows.length === 0 ? (
+        <p className="text-sm text-gray-500 text-center py-24">Nenhuma tarefa com estimativa de horas (campo "Horas estimadas") neste período/escopo.</p>
+      ) : (
+        <div className="overflow-x-auto custom-scrollbar border rounded-xl">
+          <table className="w-full text-sm border-collapse">
+            <thead>
+              <tr className="bg-gray-50">
+                <th className="text-left px-3 py-2 font-semibold text-gray-600 sticky left-0 bg-gray-50 min-w-[160px] z-10">Pessoa</th>
+                {days.map((d: Date) => (
+                  <th key={d.toISOString()} className="px-2 py-2 font-semibold text-gray-500 text-center min-w-[64px]">
+                    <div className="uppercase text-[10px]">{weekdayFmt.format(d)}</div>
+                    <div>{d.getDate()}/{d.getMonth() + 1}</div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((u: any) => {
+                const weeklyHours = capacityByUser.get(u.id) ?? 40;
+                const dailyCapacity = weeklyHours / 5;
+                return (
+                  <tr key={u.id} className="border-t">
+                    <td className="px-3 py-2 sticky left-0 bg-white font-medium text-gray-800 whitespace-nowrap z-10">
+                      {u.name}
+                    </td>
+                    {days.map((d: Date) => {
+                      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                      const dow = d.getDay();
+                      const isWeekend = dow === 0 || dow === 6;
+                      const off = !isWeekend && isTimeOff(u.id, dateStr);
+                      const bucket = bucketsByUserDay.get(`${u.id}|${dateStr}`);
+                      const hours = bucket?.plannedHours ?? 0;
+                      const ratio = dailyCapacity > 0 ? hours / dailyCapacity : 0;
+                      let cls = 'bg-gray-50 text-gray-300';
+                      if (isWeekend || off) cls = 'bg-gray-100 text-gray-300';
+                      else if (hours === 0) cls = 'bg-gray-50 text-gray-400';
+                      else if (ratio <= 0.8) cls = 'bg-emerald-50 text-emerald-700';
+                      else if (ratio <= 1.05) cls = 'bg-amber-50 text-amber-700';
+                      else cls = 'bg-red-50 text-red-700';
+                      return (
+                        <td
+                          key={dateStr}
+                          className={`px-2 py-2 text-center text-xs font-semibold ${cls}`}
+                          title={bucket ? `${bucket.taskCount} tarefa(s) · ${hours.toFixed(1)}h planejadas` : undefined}
+                        >
+                          {isWeekend ? '' : off ? 'Ausente' : hours > 0 ? `${hours.toFixed(1)}h` : '—'}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {isCapacityModalOpen && (
+        <WorkloadCapacityModal
+          users={users}
+          capacities={capacities}
+          timeOffs={timeOffs}
+          currentUser={currentUser}
+          onClose={() => setIsCapacityModalOpen(false)}
+          onSaved={load}
+        />
+      )}
+    </div>
+  );
+}
+
+function WorkloadCapacityModal({ users, capacities, timeOffs, currentUser, onClose, onSaved }: any) {
+  const [localHours, setLocalHours] = useState<Record<string, string>>(() => {
+    const m: Record<string, string> = {};
+    users.forEach((u: any) => { m[u.id] = String(capacities.find((c: UserCapacity) => c.userId === u.id)?.weeklyHours ?? 40); });
+    return m;
+  });
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [newTimeOff, setNewTimeOff] = useState<{ userId: string; start: string; end: string; reason: string }>({
+    userId: users[0]?.id || '', start: '', end: '', reason: '',
+  });
+  const [isAddingTimeOff, setIsAddingTimeOff] = useState(false);
+
+  const saveHours = async (userId: string) => {
+    const val = Number(localHours[userId]);
+    if (!Number.isFinite(val) || val < 0) { toast.error('Horas semanais inválidas.'); return; }
+    setSavingId(userId);
+    const res = await taskRepo.upsertUserCapacity(userId, val);
+    setSavingId(null);
+    if (!res.ok) { toast.error('Erro ao salvar capacidade: ' + res.message); return; }
+    toast.success('Capacidade salva.');
+    onSaved();
+  };
+
+  const addTimeOff = async () => {
+    if (!newTimeOff.userId || !newTimeOff.start || !newTimeOff.end) { toast.error('Preencha pessoa, início e fim.'); return; }
+    if (newTimeOff.end < newTimeOff.start) { toast.error('Data final não pode ser antes da inicial.'); return; }
+    setIsAddingTimeOff(true);
+    const res = await taskRepo.addUserTimeOff(newTimeOff.userId, newTimeOff.start, newTimeOff.end, newTimeOff.reason || null, currentUser.id);
+    setIsAddingTimeOff(false);
+    if (!res.ok) { toast.error('Erro ao registrar ausência: ' + res.message); return; }
+    setNewTimeOff({ userId: users[0]?.id || '', start: '', end: '', reason: '' });
+    toast.success('Ausência registrada.');
+    onSaved();
+  };
+
+  const removeTimeOff = async (id: string) => {
+    const res = await taskRepo.deleteUserTimeOff(id);
+    if (!res.ok) { toast.error('Erro ao remover ausência: ' + res.message); return; }
+    toast.success('Ausência removida.');
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">Configurar capacidade</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-6">
+          <div>
+            <p className="text-xs font-semibold text-gray-500 mb-2">Jornada semanal por pessoa</p>
+            <div className="flex flex-col gap-1.5">
+              {users.map((u: any) => (
+                <div key={u.id} className="flex items-center gap-2">
+                  <span className="text-sm text-gray-700 flex-1 truncate">{u.name}</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={0.5}
+                    value={localHours[u.id] ?? ''}
+                    onChange={(e) => setLocalHours(prev => ({ ...prev, [u.id]: e.target.value }))}
+                    className="w-20 text-sm border rounded px-2 py-1 outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                  <span className="text-xs text-gray-400">h/sem</span>
+                  <button
+                    onClick={() => saveHours(u.id)}
+                    disabled={savingId === u.id}
+                    className="px-2 py-1 text-xs rounded-md bg-blue-500 hover:bg-blue-600 text-white font-medium disabled:opacity-50"
+                  >
+                    Salvar
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div>
+            <p className="text-xs font-semibold text-gray-500 mb-2">Ausências (férias, licença)</p>
+            <div className="flex flex-col gap-1.5 mb-3">
+              {timeOffs.length === 0 && <p className="text-xs text-gray-400">Nenhuma ausência registrada.</p>}
+              {timeOffs.map((t: UserTimeOff) => (
+                <div key={t.id} className="flex items-center justify-between gap-2 text-xs bg-gray-50 rounded px-2 py-1.5">
+                  <span className="truncate">
+                    {users.find((u: any) => u.id === t.userId)?.name || 'alguém'} · {new Date(t.startDate + 'T00:00:00').toLocaleDateString('pt-BR')} - {new Date(t.endDate + 'T00:00:00').toLocaleDateString('pt-BR')}
+                    {t.reason ? ` · ${t.reason}` : ''}
+                  </span>
+                  <button onClick={() => removeTimeOff(t.id)} className="text-red-400 hover:text-red-600 shrink-0">
+                    <Icons.Trash className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-col gap-2 border-t pt-3">
+              <select
+                value={newTimeOff.userId}
+                onChange={(e) => setNewTimeOff(prev => ({ ...prev, userId: e.target.value }))}
+                className="text-sm border rounded px-2 py-1.5 outline-none"
+              >
+                {users.map((u: any) => <option key={u.id} value={u.id}>{u.name}</option>)}
+              </select>
+              <div className="flex items-center gap-2">
+                <input type="date" value={newTimeOff.start} onChange={(e) => setNewTimeOff(prev => ({ ...prev, start: e.target.value }))} className="flex-1 text-sm border rounded px-2 py-1.5 outline-none" />
+                <span className="text-gray-400 text-xs">até</span>
+                <input type="date" value={newTimeOff.end} onChange={(e) => setNewTimeOff(prev => ({ ...prev, end: e.target.value }))} className="flex-1 text-sm border rounded px-2 py-1.5 outline-none" />
+              </div>
+              <input
+                type="text"
+                placeholder="Motivo (opcional)"
+                value={newTimeOff.reason}
+                onChange={(e) => setNewTimeOff(prev => ({ ...prev, reason: e.target.value }))}
+                className="text-sm border rounded px-2 py-1.5 outline-none"
+              />
+              <button
+                onClick={addTimeOff}
+                disabled={isAddingTimeOff}
+                className="px-3 py-1.5 text-sm rounded-lg bg-blue-500 hover:bg-blue-600 text-white font-medium disabled:opacity-50 self-start"
+              >
+                Adicionar ausência
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, onDeleteTask, onDuplicateTask, onCreateTask, onQuickCreate, users, lists, statusGroups, activeListId, currentUser, workspaceTags }: any) {
   const draggingTaskIdRef = useRef<string | null>(null);
   const draggedColumnRef = useRef<string | null>(null);
@@ -10519,6 +10833,21 @@ function TaskDetailModal(props: any) {
     logActivitySafe(task.id, 'PRIORITY_CHANGE', task.priority, priority);
   };
 
+  // Issue #187 (Workload/Capacidade) — alimenta get_workload_summary.
+  const [estimatedHoursDraft, setEstimatedHoursDraft] = useState(task.estimatedHours != null ? String(task.estimatedHours) : '');
+  useEffect(() => { setEstimatedHoursDraft(task.estimatedHours != null ? String(task.estimatedHours) : ''); }, [task.id, task.estimatedHours]);
+  const handleCommitEstimatedHours = () => {
+    const trimmed = estimatedHoursDraft.trim();
+    const parsed = trimmed === '' ? null : Number(trimmed.replace(',', '.'));
+    if (trimmed !== '' && (!Number.isFinite(parsed) || (parsed as number) < 0)) {
+      toast.error('Horas estimadas inválidas.');
+      setEstimatedHoursDraft(task.estimatedHours != null ? String(task.estimatedHours) : '');
+      return;
+    }
+    if ((parsed ?? undefined) === task.estimatedHours) return;
+    onUpdate({ ...task, estimatedHours: parsed ?? undefined });
+  };
+
   const handleToggleSecondaryAssignee = async (userId: string) => {
     const isMain = task.mainAssigneeId === userId;
     if (isMain) return; // Can't remove main this way
@@ -11158,6 +11487,25 @@ function TaskDetailModal(props: any) {
                       ))}
                     </DropdownMenuContent>
                   </DropdownMenu>
+                </div>
+                <div className="flex items-center gap-8">
+                  <span className="w-24 text-sm font-medium text-gray-400">Horas estimadas</span>
+                  {isReadOnly ? (
+                    <span className="text-sm text-gray-600">{task.estimatedHours != null ? `${task.estimatedHours}h` : '—'}</span>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={estimatedHoursDraft}
+                        onChange={(e) => setEstimatedHoursDraft(e.target.value)}
+                        onBlur={handleCommitEstimatedHours}
+                        placeholder="—"
+                        className="w-20 text-sm font-bold text-gray-700 px-2 py-1 -ml-2 rounded-xl border-2 border-transparent hover:border-orange-100 focus:border-orange-200 focus:bg-orange-50/30 outline-none transition-all"
+                      />
+                      <span className="text-xs text-gray-400">h (Workload)</span>
+                    </div>
+                  )}
                 </div>
               </div>
 

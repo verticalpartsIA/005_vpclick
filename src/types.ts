@@ -232,6 +232,36 @@ export interface Task {
   purgeAfter?: string;
   deletionReasonCode?: string;
   deletionReasonText?: string;
+  // Issue #187 — Workload/Capacidade, gota 1 (schema). Esforço estimado da
+  // tarefa, em horas — distribuído nos dias úteis entre startDate/dueDate
+  // pela RPC get_workload_summary. Ausente = tarefa não entra no cálculo de
+  // horas planejadas (só na contagem de tarefas).
+  estimatedHours?: number;
+}
+
+// Issue #187 — Workload/Capacidade. Jornada semanal configurável por
+// usuário (default 40h no banco) e ausências (férias/licença) que reduzem
+// a capacidade disponível nos dias afetados, junto com company_holidays.
+export interface UserCapacity {
+  userId: string;
+  weeklyHours: number;
+}
+
+export interface UserTimeOff {
+  id: string;
+  userId: string;
+  startDate: string;
+  endDate: string;
+  reason?: string;
+}
+
+// Uma linha agregada retornada por get_workload_summary — já vem do
+// servidor, nunca é montada tarefa por tarefa no cliente.
+export interface WorkloadBucket {
+  userId: string;
+  bucketDate: string;
+  plannedHours: number;
+  taskCount: number;
 }
 
 // ── Tarefas recorrentes (issue #184) ──────────────────────────────────────
