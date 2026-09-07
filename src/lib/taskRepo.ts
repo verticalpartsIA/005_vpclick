@@ -579,6 +579,48 @@ export async function updateTaskEstimatedHours(taskId: string, hours: number | n
   return { ok: true };
 }
 
+export interface ListColumnPrefs {
+  listId: string;
+  hiddenFieldIds: string[];
+  hiddenStandardKeys: string[];
+}
+
+export async function fetchListColumnPrefs(listIds: string[]): Promise<ListColumnPrefs[]> {
+  if (listIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from('list_column_prefs')
+    .select('list_id, hidden_field_ids, hidden_standard_keys')
+    .in('list_id', listIds);
+  if (error) { console.error('taskRepo.fetchListColumnPrefs:', error); throw error; }
+  return (data ?? []).map((r: any) => ({
+    listId: r.list_id,
+    hiddenFieldIds: Array.isArray(r.hidden_field_ids) ? r.hidden_field_ids : [],
+    hiddenStandardKeys: Array.isArray(r.hidden_standard_keys) ? r.hidden_standard_keys : [],
+  }));
+}
+
+export async function upsertListColumnPrefs(
+  listId: string,
+  hiddenFieldIds: string[],
+  hiddenStandardKeys: string[],
+  updatedBy: string
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase
+    .from('list_column_prefs')
+    .upsert(
+      {
+        list_id: listId,
+        hidden_field_ids: hiddenFieldIds,
+        hidden_standard_keys: hiddenStandardKeys,
+        updated_at: new Date().toISOString(),
+        updated_by: updatedBy,
+      },
+      { onConflict: 'list_id' }
+    );
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
 // Issue #186 (Time Tracking) — MVP: cronômetro + lançamento manual por
 // tarefa. `startTimer`/`addManualTimeEntry` deixam o banco garantir a regra
 // "no máximo um cronômetro rodando por usuário" (índice único parcial em

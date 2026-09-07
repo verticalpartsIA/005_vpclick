@@ -70,6 +70,8 @@ interface TableViewProps {
   onBulkMove?: (taskIds: string[], listId: string) => void | Promise<void>;
   onBulkDelete?: (taskIds: string[]) => void;
   workspaceTags?: WorkspaceTag[];
+  hiddenTaskFieldIdsByList?: Record<string, string[]>;
+  onHideTaskFieldForList?: (listId: string, fieldId: string) => void;
 }
 
 type ColumnDef = {
@@ -164,6 +166,8 @@ export const TableView: React.FC<TableViewProps> = ({
   onBulkMove,
   onBulkDelete,
   workspaceTags = [],
+  hiddenTaskFieldIdsByList = {},
+  onHideTaskFieldForList,
 }) => {
   const scopeOptions = useMemo(() => {
     const source = allTasks || tasks;
@@ -327,6 +331,14 @@ export const TableView: React.FC<TableViewProps> = ({
     return Array.from(new Set([...fromWorkspace, ...fromTasks])).filter(Boolean);
   }, [scopedTasks, workspaceTags]);
 
+  // Visibilidade de colunas de campo personalizado é compartilhada entre todos
+  // os usuários da lista (list_column_prefs), não mais um "protótipo local"
+  // por navegador — é essa a fonte que evita a tabela quase infinita.
+  const hiddenFieldIdsForList = useMemo(
+    () => (activeListId && hiddenTaskFieldIdsByList[activeListId]) || [],
+    [activeListId, hiddenTaskFieldIdsByList]
+  );
+
   const visibleColumns = useMemo(() => {
     const available = new Set(allColumns.map((column) => column.id));
     const orderedIds = [
@@ -336,8 +348,12 @@ export const TableView: React.FC<TableViewProps> = ({
     return orderedIds
       .map((id) => allColumns.find((column) => column.id === id))
       .filter((column): column is ColumnDef => Boolean(column))
-      .filter((column) => column.required || prefs.visibleColumns.includes(column.id));
-  }, [allColumns, prefs.columnOrder, prefs.visibleColumns]);
+      .filter((column) => {
+        if (column.required) return true;
+        if (column.kind === 'custom') return !hiddenFieldIdsForList.includes(column.id.slice(3));
+        return prefs.visibleColumns.includes(column.id);
+      });
+  }, [allColumns, prefs.columnOrder, prefs.visibleColumns, hiddenFieldIdsForList]);
 
   const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag || filterDue || (customFilterFieldId && customFilterValue));
 
@@ -536,6 +552,12 @@ export const TableView: React.FC<TableViewProps> = ({
   };
 
   const toggleColumn = (columnId: string) => {
+    if (columnId.startsWith('cf_')) {
+      // Campo personalizado: visibilidade é compartilhada (list_column_prefs),
+      // não local — todo mundo que abre essa lista vê a mesma coisa.
+      if (activeListId && onHideTaskFieldForList) onHideTaskFieldForList(activeListId, columnId.slice(3));
+      return;
+    }
     setPrefs((prev) => ({
       ...prev,
       visibleColumns: prev.visibleColumns.includes(columnId)
@@ -775,7 +797,17 @@ export const TableView: React.FC<TableViewProps> = ({
             <DropdownMenuContent align="end" className="max-h-96 w-64 overflow-y-auto">
               <DropdownMenuItem onClick={() => setPrefs((prev) => ({ ...prev, stickyTitle: !prev.stickyTitle }))}><Columns3 className="mr-2 h-4 w-4" /><span className="flex-1">Fixar nome</span>{prefs.stickyTitle && <CheckCircle2 className="h-4 w-4 text-primary" />}</DropdownMenuItem>
               <DropdownMenuSeparator />
-              {allColumns.filter((column) => !column.required).map((column) => <DropdownMenuItem key={column.id} onClick={() => toggleColumn(column.id)}><span className="flex-1 truncate">{column.label}</span>{prefs.visibleColumns.includes(column.id) && <CheckCircle2 className="h-4 w-4 text-primary" />}</DropdownMenuItem>)}
+              {allColumns.filter((column) => !column.required).map((column) => {
+                const isVisible = column.kind === 'custom'
+                  ? !hiddenFieldIdsForList.includes(column.id.slice(3))
+                  : prefs.visibleColumns.includes(column.id);
+                return (
+                  <DropdownMenuItem key={column.id} onClick={() => toggleColumn(column.id)}>
+                    <span className="flex-1 truncate">{column.label}</span>
+                    {isVisible && <CheckCircle2 className="h-4 w-4 text-primary" />}
+                  </DropdownMenuItem>
+                );
+              })}
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => setPrefs(defaultPrefs)}><RotateCcw className="mr-2 h-4 w-4" />Restaurar padrão</DropdownMenuItem>
             </DropdownMenuContent>

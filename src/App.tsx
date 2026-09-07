@@ -1511,12 +1511,34 @@ export default function App() {
     // localStorage.removeItem("vp_docs"); // Clean up old mock data if needed
   }, []);
 
-  // Campos personalizados visíveis por Lista (protótipo local)
+  // Campos personalizados ocultos por Lista — persistido em list_column_prefs
+  // (compartilhado entre todos os usuários da lista, ver useEffect abaixo).
   const [hiddenTaskFieldIdsByList, setHiddenTaskFieldIdsByList] = useState<Record<string, string[]>>({});
 
-  // Colunas padrão visíveis por Lista (protótipo local)
+  // Colunas padrão ocultas por Lista — mesma persistência acima.
   type StandardColumnKey = "status" | "priority" | "assignee" | "extensions" | "dueDate";
   const [hiddenStandardColumnKeysByList, setHiddenStandardColumnKeysByList] = useState<Record<string, StandardColumnKey[]>>({});
+
+  // Carrega as preferências de coluna persistidas sempre que o conjunto de
+  // listas conhecidas muda (login inicial, nova lista criada).
+  useEffect(() => {
+    if (lists.length === 0) return;
+    taskRepo.fetchListColumnPrefs(lists.map(l => l.id))
+      .then((prefs) => {
+        if (prefs.length === 0) return;
+        setHiddenTaskFieldIdsByList(prev => {
+          const next = { ...prev };
+          prefs.forEach(p => { next[p.listId] = p.hiddenFieldIds; });
+          return next;
+        });
+        setHiddenStandardColumnKeysByList(prev => {
+          const next = { ...prev };
+          prefs.forEach(p => { next[p.listId] = p.hiddenStandardKeys as StandardColumnKey[]; });
+          return next;
+        });
+      })
+      .catch((err) => console.error('Erro ao carregar preferências de coluna:', err));
+  }, [lists]);
 
   // Ordem das colunas por Lista (protótipo local)
   const [columnOrderByList, setColumnOrderByList] = useState<Record<string, string[]>>(() => {
@@ -3076,10 +3098,26 @@ export default function App() {
         createdAt: data.created_at
       };
       setCustomFields(prev => [...prev, field]);
+
+      // Campo novo nasce oculto em todas as listas conhecidas (opt-in em vez
+      // de opt-out) — evita repetir a tabela quase infinita na horizontal.
+      setHiddenTaskFieldIdsByList(prev => {
+        const next = { ...prev };
+        lists.forEach(l => {
+          const current = next[l.id] ?? [];
+          if (!current.includes(field.id)) next[l.id] = [...current, field.id];
+        });
+        return next;
+      });
+      await Promise.all(lists.map(l => {
+        const hiddenFieldIds = [...(hiddenTaskFieldIdsByList[l.id] ?? []), field.id];
+        const hiddenStandardKeys = hiddenStandardColumnKeysByList[l.id] ?? [];
+        return taskRepo.upsertListColumnPrefs(l.id, hiddenFieldIds, hiddenStandardKeys, currentUser.id);
+      })).catch((err) => console.error('Erro ao salvar preferência de coluna do campo novo:', err));
     } else {
       console.error('Erro ao criar campo personalizado:', error);
     }
-  }, [currentUser.id]);
+  }, [currentUser.id, lists, hiddenTaskFieldIdsByList, hiddenStandardColumnKeysByList]);
 
   const handleReorderField = useCallback((index: number, direction: 'up' | 'down') => {
     // Para simplificar o protótipo, mantemos a reordenação local por enquanto.
@@ -3131,14 +3169,26 @@ export default function App() {
   const handleToggleTaskFieldForList = useCallback((listId: string, fieldId: string) => {
     setHiddenTaskFieldIdsByList((prev) => {
       const current = prev[listId] ?? [];
-      if (current.includes(fieldId)) {
-        // Campo está oculto → remover da lista (habilitar novamente)
-        return { ...prev, [listId]: current.filter(id => id !== fieldId) };
-      }
-      // Campo está visível → adicionar à lista (ocultar)
-      return { ...prev, [listId]: [...current, fieldId] };
+      // Campo está oculto → remover da lista (habilitar novamente); campo está
+      // visível → adicionar à lista (ocultar).
+      const next = current.includes(fieldId) ? current.filter(id => id !== fieldId) : [...current, fieldId];
+      const hiddenStandardKeys = hiddenStandardColumnKeysByList[listId] ?? [];
+      taskRepo.upsertListColumnPrefs(listId, next, hiddenStandardKeys, currentUser.id)
+        .catch((err) => console.error('Erro ao salvar preferência de coluna:', err));
+      return { ...prev, [listId]: next };
     });
-  }, []);
+  }, [hiddenStandardColumnKeysByList, currentUser.id]);
+
+  const handleToggleStandardColumnForList = useCallback((listId: string, key: StandardColumnKey) => {
+    setHiddenStandardColumnKeysByList((prev) => {
+      const current = prev[listId] ?? [];
+      const next = current.includes(key) ? current.filter(k => k !== key) : [...current, key];
+      const hiddenFieldIds = hiddenTaskFieldIdsByList[listId] ?? [];
+      taskRepo.upsertListColumnPrefs(listId, hiddenFieldIds, next, currentUser.id)
+        .catch((err) => console.error('Erro ao salvar preferência de coluna:', err));
+      return { ...prev, [listId]: next };
+    });
+  }, [hiddenTaskFieldIdsByList, currentUser.id]);
 
   // Creation Handlers
   // Gera um UUID no cliente (com fallback caso crypto.randomUUID não exista).
@@ -4302,11 +4352,7 @@ export default function App() {
                 activeListId={activeListId}
                 hiddenStandardColumnKeysByList={hiddenStandardColumnKeysByList}
                 onToggleStandardColumn={(listId: string, key: any) => {
-                  setHiddenStandardColumnKeysByList((prev) => {
-                    const current = prev[listId] ?? [];
-                    const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
-                    return { ...prev, [listId]: next };
-                  });
+                  handleToggleStandardColumnForList(listId, key);
                 }}
                 customFields={customFields}
                 fieldValues={fieldValues}
@@ -4496,6 +4542,8 @@ export default function App() {
                 onBulkMove={handleBulkMove}
                 onBulkDelete={handleBulkDelete}
                 workspaceTags={workspaceTags}
+                hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
+                onHideTaskFieldForList={handleToggleTaskFieldForList}
               />
             )}
             {activeView === 'Workload' && (
@@ -4672,11 +4720,7 @@ export default function App() {
             activeListId={fieldManagerListIdOverride ?? fieldManagerListId}
             hiddenStandardColumnKeysByList={hiddenStandardColumnKeysByList}
             onToggleStandardColumn={(listId: string, key: any) => {
-              setHiddenStandardColumnKeysByList((prev) => {
-                const current = prev[listId] ?? [];
-                const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
-                return { ...prev, [listId]: next };
-              });
+              handleToggleStandardColumnForList(listId, key);
             }}
             hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
             onHideTaskFieldForList={handleToggleTaskFieldForList}
@@ -11020,7 +11064,7 @@ function TaskDetailModal(props: any) {
   const taskCustomFields = useMemo(() => {
     // Respeita os campos ocultados por lista (toggles de "Adicionar um
     // existente" no gerenciador): um campo desligado para a lista desta tarefa
-    // some também daqui, não só da tabela — senão a aba Detalhes fica enorme.
+    // some também daqui, não só da tabela — senão a aba Campos fica enorme.
     const hiddenForList: string[] = (task.listId && hiddenTaskFieldIdsByList?.[task.listId]) || [];
     return (customFields || []).filter((f: CustomField) =>
       f.target === 'TASK' &&
@@ -11776,7 +11820,7 @@ function TaskDetailModal(props: any) {
 
             <div className="flex border-b text-sm font-bold bg-white sticky top-0 z-10 px-8">
               {[
-                { id: 'info', label: 'Detalhes' },
+                { id: 'info', label: 'Campos' },
                 { id: 'subtasks', label: 'Subtarefas' },
                 { id: 'dependencies', label: 'Dependências' },
                 { id: 'watchers', label: 'Observadores' },
