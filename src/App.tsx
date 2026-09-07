@@ -1513,6 +1513,7 @@ export default function App() {
   const [showClosedInMyTasks, setShowClosedInMyTasks] = useState(false);
   const [teams, setTeams] = useState<Team[]>([]);
   const [isTeamsModalOpen, setIsTeamsModalOpen] = useState(false);
+  const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
 
   useEffect(() => {
     // localStorage.removeItem("vp_docs"); // Clean up old mock data if needed
@@ -3956,6 +3957,7 @@ export default function App() {
           onSetActiveListId={setActiveListId}
           onEnsurePersonalList={ensurePersonalList}
           onOpenAdminPanel={openAdminPanel}
+          onOpenInvite={() => setIsInviteModalOpen(true)}
           onNavigate={handleNavigate}
           onViewChange={setActiveView}
           isCollapsed={isSidebarCollapsed}
@@ -4718,6 +4720,14 @@ export default function App() {
           users={adminUsers}
           currentUser={currentUser}
         />
+
+        {isInviteModalOpen && (
+          <InviteModal
+            onClose={() => setIsInviteModalOpen(false)}
+            teams={teams}
+            onCreateUser={handleAdminCreateUser}
+          />
+        )}
 
         {/* Create Task Modal */}
         {isTaskModalOpen && (
@@ -5723,7 +5733,7 @@ function SidebarDocItem({ doc, allDocs, depth, activeDocId, folder, onSetActiveD
 
 function Sidebar({
   themePreset,
-  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onEnsurePersonalList, onOpenAdminPanel, onNavigate, onViewChange, isCollapsed, onToggle,
+  spaces, folders, lists, activeView, activeScope, activeListId, onSetActiveListId, onEnsurePersonalList, onOpenAdminPanel, onOpenInvite, onNavigate, onViewChange, isCollapsed, onToggle,
   onOpenFields, onOpenCreateSpace, onOpenCreateFolder, onCreateList, userRole,
   onRenameSpace, onDeleteSpace, onRenameFolder, onDeleteFolder, onBulkDeleteFolders,
   onDeleteList, onRenameList, onDuplicateList,
@@ -5802,20 +5812,6 @@ function Sidebar({
       icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
       onSelect: () => { onNavigate('global', null, 'Quadros Brancos'); onViewChange('Whiteboards'); },
       isActive: activeView === 'Whiteboards',
-    },
-    {
-      // No ClickUp real "Equipes" tem ícone próprio e em destaque na barra
-      // lateral, com Central de Equipes (todas as equipes, todas as pessoas,
-      // gráfico organizacional) — testado ao vivo em app.clickup.com. O VP
-      // Click já tinha "Equipes" funcional só como modal no menu do avatar
-      // (atribuir/mencionar equipe em tarefas); isso vira também um destino
-      // de página própria, com o gráfico organizacional que faltava, mantido
-      // aqui em "Mais" por consistência com o resto do VP Click nesta fase.
-      key: 'teams',
-      label: 'Equipes',
-      icon: <Icons.Users className="w-3.5 h-3.5 shrink-0" />,
-      onSelect: () => { onNavigate('global', null, 'Equipes'); onViewChange('Teams'); },
-      isActive: activeView === 'Teams',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -5928,7 +5924,25 @@ function Sidebar({
     { id: 'calendar', label: 'Calendário', icon: <Icons.Calendar />, action: () => { if (isCollapsed) onToggle(); onViewChange('Calendar'); }, active: activeView === 'Calendar' },
     { id: 'gantt', label: 'Gantt', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="3" width="8" height="2" rx="1"/><rect x="1" y="7" width="6" height="2" rx="1"/><rect x="4" y="11" width="10" height="2" rx="1"/></svg>, action: () => { if (isCollapsed) onToggle(); onViewChange('Gantt'); }, active: activeView === 'Gantt' },
     { id: 'dashboard', label: 'Dashboards', icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><rect x="1" y="8" width="4" height="6" rx="0.5"/><rect x="6" y="4" width="4" height="10" rx="0.5"/><rect x="11" y="2" width="4" height="12" rx="0.5"/></svg>, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Dashboard'); onViewChange('Dashboard'); }, active: false },
+    // "Equipes" ganhou ícone fixo na faixa (pedido do usuário) — antes só
+    // vivia dentro do "Mais". No ClickUp real também é ícone próprio, em
+    // destaque, não escondido — confirmado ao vivo em app.clickup.com.
+    { id: 'teams', label: 'Equipes', icon: <Icons.Users className="w-4 h-4" />, action: () => { if (isCollapsed) onToggle(); onNavigate('global', null, 'Equipes'); onViewChange('Teams'); }, active: activeView === 'Teams' },
   ];
+  // "Convidar" (pedido do usuário, estilo ClickUp) — abre um modal rápido de
+  // convite em vez de navegar, igual ao comportamento real do ClickUp. Só
+  // pra ADMIN: a Edge Function admin-user-management (que de fato cria a
+  // conta) já rejeita GESTOR com 403 — mostrar o ícone pra quem não pode
+  // usá-lo seria um botão quebrado.
+  if (userRole === UserRole.ADMIN) {
+    navItems.push({
+      id: 'invite',
+      label: 'Convidar',
+      icon: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><circle cx="6" cy="5" r="2.5"/><path d="M1 14c0-2.5 2-4 5-4s5 1.5 5 4"/><path d="M12 4v4M10 6h4"/></svg>,
+      action: () => { onOpenInvite(); },
+      active: false,
+    });
+  }
 
   return (
     <div className="flex h-full shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -11271,6 +11285,117 @@ function WhiteboardCanvas({ whiteboard, onClose }: { whiteboard: WhiteboardDef; 
       </div>
       <div className="flex-1 relative">
         <Tldraw onMount={handleMount} />
+      </div>
+    </div>
+  );
+}
+
+function generateInviteTempPassword(length = 10) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789@#$%';
+  let out = '';
+  for (let i = 0; i < length; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+/**
+ * "Convidar" (ícone próprio na faixa, pedido do usuário — estilo ClickUp):
+ * versão rápida em modal do mesmo "Novo usuário" do Painel Admin (mesma
+ * função onCreateUser), com o "Adicionar como" (Equipe) igual ao convite do
+ * ClickUp real. Não duplica a criação de conta — só oferece um atalho pra
+ * não precisar abrir o Painel Admin inteiro.
+ */
+function InviteModal({ onClose, teams, onCreateUser }: any) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [role, setRole] = useState<UserRole>(UserRole.COLABORADOR);
+  const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([]);
+  const [tempPassword, setTempPassword] = useState(() => generateInviteTempPassword());
+  const [isCreating, setIsCreating] = useState(false);
+  const [createdUser, setCreatedUser] = useState<{ name: string; email: string } | null>(null);
+
+  const toggleTeam = (id: string) => setSelectedTeamIds((prev) => prev.includes(id) ? prev.filter((t) => t !== id) : [...prev, id]);
+
+  const handleInvite = async () => {
+    if (name.trim().length < 2) { toast.error('Informe um nome.'); return; }
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) { toast.error('Email inválido.'); return; }
+    setIsCreating(true);
+    try {
+      await onCreateUser({ name: name.trim(), email: email.trim(), avatar: `https://picsum.photos/seed/${email.trim()}/100`, role }, tempPassword, selectedTeamIds);
+      setCreatedUser({ name: name.trim(), email: email.trim() });
+      toast.success(`${name.trim()} convidado(a) com sucesso.`);
+    } catch (err: any) {
+      toast.error('Erro ao convidar: ' + (err.message || 'erro desconhecido'));
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">Convidar pessoa</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+
+        {createdUser ? (
+          <div className="p-6 flex flex-col gap-3">
+            <p className="text-sm text-gray-700"><span className="font-semibold">{createdUser.name}</span> foi convidado(a) com sucesso.</p>
+            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
+              <p className="text-xs font-semibold text-blue-700">Senha para primeiro acesso</p>
+              <code className="mt-1.5 block rounded bg-white px-2 py-1 text-xs text-blue-900 font-bold tracking-wider border border-blue-100">{tempPassword}</code>
+              <p className="text-[11px] text-blue-600 mt-1.5">Compartilhe essa senha com {createdUser.name.split(' ')[0]} — ela pode trocá-la depois de entrar.</p>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button onClick={() => { setCreatedUser(null); setName(''); setEmail(''); setRole(UserRole.COLABORADOR); setSelectedTeamIds([]); setTempPassword(generateInviteTempPassword()); }} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Convidar outra pessoa</button>
+              <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium">Fechar</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+              <div>
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Nome</label>
+                <input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-200" placeholder="Ex: João Silva" />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Email</label>
+                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-200" placeholder="joao@empresa.com" />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Adicionar como</label>
+                <select value={role} onChange={(e) => setRole(e.target.value as UserRole)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                  <option value={UserRole.COLABORADOR}>Colaborador</option>
+                  <option value={UserRole.GESTOR}>Gestor</option>
+                  <option value={UserRole.ADMIN}>Admin</option>
+                </select>
+              </div>
+              {teams.length > 0 && (
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 mb-1 block">Equipe(s) (opcional)</label>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-auto custom-scrollbar border rounded-lg p-2">
+                    {teams.map((t: Team) => (
+                      <button
+                        key={t.id}
+                        onClick={() => toggleTeam(t.id)}
+                        className={`text-xs px-2 py-1 rounded-full border font-medium transition-colors ${selectedTeamIds.includes(t.id) ? 'text-white border-transparent' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                        style={selectedTeamIds.includes(t.id) ? { backgroundColor: t.color } : undefined}
+                      >
+                        {t.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t flex justify-end gap-2">
+              <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+              <button onClick={handleInvite} disabled={isCreating} className="px-3 py-1.5 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium disabled:opacity-50">
+                {isCreating ? 'Convidando...' : 'Convidar'}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
