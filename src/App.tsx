@@ -5,7 +5,8 @@ import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
   CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification, DuplicateTaskOptions,
-  TaskRecurrenceRule, RecurrenceFrequencyType, RecurrenceWeekendShift, RecurrenceEndMode, RecurrenceOverlapPolicy, RecurrenceMisfirePolicy, RecurrenceInheritOptions
+  TaskRecurrenceRule, RecurrenceFrequencyType, RecurrenceWeekendShift, RecurrenceEndMode, RecurrenceOverlapPolicy, RecurrenceMisfirePolicy, RecurrenceInheritOptions,
+  Goal, GoalTarget, GoalTargetType
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -142,7 +143,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -4553,6 +4554,16 @@ export default function App() {
                 currentUser={currentUser}
               />
             )}
+            {activeView === 'Goals' && (
+              <GoalsView
+                users={adminUsers}
+                currentUser={currentUser}
+                tasks={tasks}
+                lists={lists}
+                statusGroups={statusGroups}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Doc' && activeDocId && (
               <DocView
                 doc={docs.find(d => d.id === activeDocId)!}
@@ -5705,6 +5716,15 @@ function Sidebar({
       icon: <Icons.List className="w-3.5 h-3.5 shrink-0" />,
       onSelect: () => { onNavigate('global', null, 'Todas as tarefas'); onViewChange('RecentTasks'); },
       isActive: activeView === 'RecentTasks',
+    },
+    {
+      // "Metas" no ClickUp real fica exatamente aqui: dentro de "Mais" da
+      // sidebar Início (confirmado comparando com app.clickup.com — issue #188).
+      key: 'goals',
+      label: 'Metas',
+      icon: <Icons.Target className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Metas'); onViewChange('Goals'); },
+      isActive: activeView === 'Goals',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -9309,6 +9329,494 @@ function WorkloadCapacityModal({ users, capacities, timeOffs, currentUser, onClo
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const GOAL_COLORS = ['#7c3aed', '#2563eb', '#059669', '#d97706', '#dc2626', '#0891b2', '#db2777'];
+
+function goalTargetProgressRatio(target: GoalTarget, isTaskDone: (taskId: string | null | undefined) => boolean): number {
+  switch (target.type) {
+    case 'boolean':
+      return target.isDone ? 1 : 0;
+    case 'task':
+      return isTaskDone(target.taskId) ? 1 : 0;
+    case 'number':
+    case 'currency': {
+      const start = target.startValue ?? 0;
+      const end = target.targetValue ?? 0;
+      const current = target.currentValue ?? start;
+      if (end === start) return current >= end ? 1 : 0;
+      const ratio = (current - start) / (end - start);
+      return Math.max(0, Math.min(1, ratio));
+    }
+    default:
+      return 0;
+  }
+}
+
+function goalProgressRatio(goal: Goal, isTaskDone: (taskId: string | null | undefined) => boolean): number {
+  if (goal.targets.length === 0) return 0;
+  const sum = goal.targets.reduce((acc, t) => acc + goalTargetProgressRatio(t, isTaskDone), 0);
+  return sum / goal.targets.length;
+}
+
+function GoalsView({ users, currentUser, tasks, lists, statusGroups, onOpenTask }: any) {
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingGoal, setEditingGoal] = useState<Goal | null>(null);
+  const [expandedGoalId, setExpandedGoalId] = useState<string | null>(null);
+  const [targetModalGoal, setTargetModalGoal] = useState<Goal | null>(null);
+  const [editingTarget, setEditingTarget] = useState<GoalTarget | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      setGoals(await taskRepo.fetchGoals(showArchived));
+    } catch (err) {
+      console.error('GoalsView: erro ao carregar', err);
+      toast.error('Não foi possível carregar as Metas.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [showArchived]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const isTaskDone = useCallback((taskId: string | null | undefined) => {
+    if (!taskId) return false;
+    const task = tasks.find((t: Task) => t.id === taskId);
+    if (!task) return false;
+    const list = lists.find((l: List) => l.id === task.listId);
+    const group = statusGroups.find((g: StatusGroup) => g.id === list?.statusGroupId);
+    const opt = group?.options.find((o: StatusOption) => o.label?.toLowerCase() === task.status?.toLowerCase());
+    return opt?.type === 'DONE';
+  }, [tasks, lists, statusGroups]);
+
+  const handleDeleteGoal = async (goal: Goal) => {
+    if (!window.confirm(`Excluir a meta "${goal.name}" e todos os seus targets? Essa ação não pode ser desfeita.`)) return;
+    const res = await taskRepo.deleteGoal(goal.id);
+    if (!res.ok) { toast.error('Erro ao excluir meta: ' + res.message); return; }
+    toast.success('Meta excluída.');
+    load();
+  };
+
+  const handleToggleArchive = async (goal: Goal) => {
+    const res = await taskRepo.updateGoal(goal.id, { archivedAt: goal.archivedAt ? null : new Date().toISOString() });
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    toast.success(goal.archivedAt ? 'Meta reativada.' : 'Meta arquivada.');
+    load();
+  };
+
+  const handleDeleteTarget = async (target: GoalTarget) => {
+    if (!window.confirm(`Excluir o target "${target.name}"?`)) return;
+    const res = await taskRepo.deleteGoalTarget(target.id);
+    if (!res.ok) { toast.error('Erro ao excluir target: ' + res.message); return; }
+    toast.success('Target excluído.');
+    load();
+  };
+
+  const canEditGoal = (goal: Goal) =>
+    goal.createdBy === currentUser.id || goal.ownerIds.includes(currentUser.id) || currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.Target className="w-5 h-5 text-purple-600" />Metas</h2>
+          <p className="text-xs text-gray-500 mt-0.5">Objetivos de alto nível divididos em targets mensuráveis — inspirado no ClickUp Goals.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowArchived(v => !v)}
+            className={`px-3 py-1.5 text-xs rounded-lg border font-medium transition-colors ${showArchived ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+          >
+            {showArchived ? 'Mostrando arquivadas' : 'Mostrar arquivadas'}
+          </button>
+          <button
+            onClick={() => { setEditingGoal(null); setIsFormOpen(true); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium transition-colors"
+          >
+            <Icons.Plus className="w-4 h-4" />Nova Meta
+          </button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-24">
+          <div className="w-8 h-8 border-2 border-gray-200 border-t-purple-500 rounded-full animate-spin" />
+        </div>
+      ) : goals.length === 0 ? (
+        <p className="text-sm text-gray-500 text-center py-24">
+          {showArchived ? 'Nenhuma meta arquivada.' : 'Nenhuma meta criada ainda. Clique em "Nova Meta" para começar.'}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {goals.map((goal: Goal) => {
+            const ratio = goalProgressRatio(goal, isTaskDone);
+            const isExpanded = expandedGoalId === goal.id;
+            const editable = canEditGoal(goal);
+            return (
+              <div key={goal.id} className="border rounded-xl bg-white overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-3 cursor-pointer" onClick={() => setExpandedGoalId(isExpanded ? null : goal.id)}>
+                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: goal.color }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-gray-800 text-sm truncate">{goal.name}</span>
+                      {goal.archivedAt && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">Arquivada</span>}
+                      {goal.access === 'private' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 font-medium">Privada</span>}
+                    </div>
+                    {goal.dueDate && <span className="text-xs text-gray-400">Prazo: {new Date(goal.dueDate + 'T00:00:00').toLocaleDateString('pt-BR')}</span>}
+                  </div>
+                  <div className="flex items-center gap-2 w-40 shrink-0">
+                    <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${Math.round(ratio * 100)}%`, backgroundColor: goal.color }} />
+                    </div>
+                    <span className="text-xs font-semibold text-gray-600 w-9 text-right">{Math.round(ratio * 100)}%</span>
+                  </div>
+                  {editable && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button onClick={(e) => e.stopPropagation()} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                          <Icons.Settings className="w-4 h-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => { setEditingGoal(goal); setIsFormOpen(true); }}><Icons.Edit className="w-3.5 h-3.5 mr-2" />Editar</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleToggleArchive(goal)}>{goal.archivedAt ? 'Reativar' : 'Arquivar'}</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => handleDeleteGoal(goal)} className="text-red-600"><Icons.Trash className="w-3.5 h-3.5 mr-2" />Excluir</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
+
+                {isExpanded && (
+                  <div className="border-t bg-gray-50/50 px-4 py-3">
+                    {goal.description && <p className="text-xs text-gray-600 mb-3 whitespace-pre-wrap">{goal.description}</p>}
+                    {goal.ownerIds.length > 0 && (
+                      <div className="flex items-center gap-1.5 mb-3">
+                        <Icons.Users className="w-3.5 h-3.5 text-gray-400" />
+                        <span className="text-xs text-gray-500">{goal.ownerIds.map((id: string) => users.find((u: any) => u.id === id)?.name || '—').join(', ')}</span>
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-1.5">
+                      {goal.targets.length === 0 && <p className="text-xs text-gray-400">Nenhum target ainda.</p>}
+                      {goal.targets.map((target: GoalTarget) => {
+                        const tRatio = goalTargetProgressRatio(target, isTaskDone);
+                        const linkedTask = target.type === 'task' ? tasks.find((t: Task) => t.id === target.taskId) : null;
+                        return (
+                          <div key={target.id} className="flex items-center gap-2 bg-white border rounded-lg px-3 py-2">
+                            <span className="text-[10px] uppercase font-bold text-gray-400 w-16 shrink-0">
+                              {target.type === 'number' ? 'Número' : target.type === 'currency' ? 'Moeda' : target.type === 'boolean' ? 'V/F' : 'Tarefa'}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-gray-700 truncate">{target.name}</p>
+                              {target.type === 'task' && (
+                                linkedTask
+                                  ? <button onClick={() => onOpenTask(linkedTask.id)} className="text-xs text-blue-600 hover:underline truncate block">{linkedTask.title}</button>
+                                  : <span className="text-xs text-gray-400">Tarefa não encontrada</span>
+                              )}
+                              {(target.type === 'number' || target.type === 'currency') && (
+                                <span className="text-xs text-gray-400">
+                                  {target.unit && target.type === 'currency' ? target.unit + ' ' : ''}{target.currentValue ?? target.startValue ?? 0} / {target.targetValue ?? 0}{target.unit && target.type === 'number' ? ' ' + target.unit : ''}
+                                </span>
+                              )}
+                            </div>
+                            {target.type === 'boolean' && editable && (
+                              <input
+                                type="checkbox"
+                                checked={target.isDone}
+                                onChange={async (e) => {
+                                  const res = await taskRepo.updateGoalTarget(target.id, { isDone: e.target.checked });
+                                  if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+                                  load();
+                                }}
+                                className="w-4 h-4"
+                              />
+                            )}
+                            <div className="w-16 shrink-0 text-right">
+                              <span className="text-xs font-semibold text-gray-500">{Math.round(tRatio * 100)}%</span>
+                            </div>
+                            {editable && (
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button onClick={() => { setTargetModalGoal(goal); setEditingTarget(target); }} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                                  <Icons.Edit className="w-3.5 h-3.5" />
+                                </button>
+                                <button onClick={() => handleDeleteTarget(target)} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-red-600">
+                                  <Icons.Trash className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {editable && (
+                      <button
+                        onClick={() => { setTargetModalGoal(goal); setEditingTarget(null); }}
+                        className="mt-2 flex items-center gap-1 text-xs text-purple-600 hover:text-purple-800 font-medium"
+                      >
+                        <Icons.Plus className="w-3.5 h-3.5" />Adicionar target
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {isFormOpen && (
+        <GoalFormModal
+          goal={editingGoal}
+          users={users}
+          currentUser={currentUser}
+          onClose={() => setIsFormOpen(false)}
+          onSaved={() => { setIsFormOpen(false); load(); }}
+        />
+      )}
+      {targetModalGoal && (
+        <GoalTargetFormModal
+          goal={targetModalGoal}
+          target={editingTarget}
+          onClose={() => { setTargetModalGoal(null); setEditingTarget(null); }}
+          onSaved={() => { setTargetModalGoal(null); setEditingTarget(null); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function GoalFormModal({ goal, users, currentUser, onClose, onSaved }: any) {
+  const [name, setName] = useState(goal?.name ?? '');
+  const [description, setDescription] = useState(goal?.description ?? '');
+  const [color, setColor] = useState(goal?.color ?? GOAL_COLORS[0]);
+  const [dueDate, setDueDate] = useState(goal?.dueDate ?? '');
+  const [access, setAccess] = useState<'workspace' | 'private'>(goal?.access ?? 'workspace');
+  const [ownerIds, setOwnerIds] = useState<string[]>(goal?.ownerIds ?? []);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const toggleOwner = (id: string) => setOwnerIds((prev) => prev.includes(id) ? prev.filter((o) => o !== id) : [...prev, id]);
+
+  const handleSave = async () => {
+    if (!name.trim()) { toast.error('Dê um nome pra meta.'); return; }
+    setIsSaving(true);
+    if (goal) {
+      const res = await taskRepo.updateGoal(goal.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
+      if (res.ok) await taskRepo.updateGoalOwners(goal.id, ownerIds);
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Meta atualizada.');
+    } else {
+      const res = await taskRepo.createGoal({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds });
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Meta criada.');
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">{goal ? 'Editar meta' : 'Nova meta'}</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Nome</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-purple-200" placeholder="Ex: Faturamento Q3" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Descrição (opcional)</label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-purple-200 resize-none" />
+          </div>
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Prazo (opcional)</label>
+              <input type="date" value={dueDate ?? ''} onChange={(e) => setDueDate(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Acesso</label>
+              <select value={access} onChange={(e) => setAccess(e.target.value as 'workspace' | 'private')} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                <option value="workspace">Workspace</option>
+                <option value="private">Privada</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Cor</label>
+            <div className="flex gap-2">
+              {GOAL_COLORS.map((c) => (
+                <button key={c} onClick={() => setColor(c)} className={`w-6 h-6 rounded-full ${color === c ? 'ring-2 ring-offset-2 ring-gray-400' : ''}`} style={{ backgroundColor: c }} />
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Dono(s) (opcional)</label>
+            <div className="flex flex-wrap gap-1.5 max-h-32 overflow-auto custom-scrollbar border rounded-lg p-2">
+              {users.map((u: any) => (
+                <button
+                  key={u.id}
+                  onClick={() => toggleOwner(u.id)}
+                  className={`text-xs px-2 py-1 rounded-full border font-medium transition-colors ${ownerIds.includes(u.id) ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                >
+                  {u.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium disabled:opacity-50">
+            {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GoalTargetFormModal({ goal, target, onClose, onSaved }: any) {
+  const [type, setType] = useState<GoalTargetType>(target?.type ?? 'number');
+  const [name, setName] = useState(target?.name ?? '');
+  const [unit, setUnit] = useState(target?.unit ?? '');
+  const [startValue, setStartValue] = useState(String(target?.startValue ?? 0));
+  const [targetValue, setTargetValue] = useState(String(target?.targetValue ?? ''));
+  const [currentValue, setCurrentValue] = useState(String(target?.currentValue ?? target?.startValue ?? 0));
+  const [taskQuery, setTaskQuery] = useState('');
+  const [taskResults, setTaskResults] = useState<{ id: string; title: string }[]>([]);
+  const [selectedTask, setSelectedTask] = useState<{ id: string; title: string } | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    if (type !== 'task' || taskQuery.trim().length < 2) { setTaskResults([]); return; }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const rows = await taskRepo.searchTaskRowsByTitle(taskQuery.trim(), 15);
+      if (!cancelled) setTaskResults(rows.map((r: any) => ({ id: r.id, title: r.title })));
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [taskQuery, type]);
+
+  const handleSave = async () => {
+    if (!name.trim()) { toast.error('Dê um nome pro target.'); return; }
+    if (type === 'task' && !selectedTask && !target?.taskId) { toast.error('Escolha uma tarefa.'); return; }
+    setIsSaving(true);
+    const payload = {
+      name: name.trim(),
+      unit: (type === 'number' || type === 'currency') ? (unit.trim() || null) : null,
+      startValue: (type === 'number' || type === 'currency') ? Number(startValue) || 0 : null,
+      targetValue: (type === 'number' || type === 'currency') ? Number(targetValue) || 0 : null,
+      currentValue: (type === 'number' || type === 'currency') ? Number(currentValue) || 0 : null,
+      taskId: type === 'task' ? (selectedTask?.id ?? target?.taskId ?? null) : null,
+    };
+    if (target) {
+      const res = await taskRepo.updateGoalTarget(target.id, payload);
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Target atualizado.');
+    } else {
+      const res = await taskRepo.createGoalTarget(goal.id, { type, ...payload, orderIndex: goal.targets.length });
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Target criado.');
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">{target ? 'Editar target' : `Novo target — ${goal.name}`}</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          {!target && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Tipo</label>
+              <select value={type} onChange={(e) => setType(e.target.value as GoalTargetType)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                <option value="number">Número</option>
+                <option value="currency">Moeda</option>
+                <option value="boolean">Verdadeiro/Falso</option>
+                <option value="task">Tarefa</option>
+              </select>
+            </div>
+          )}
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Nome</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-purple-200" placeholder="Ex: Fechar 20 novos clientes" />
+          </div>
+          {(type === 'number' || type === 'currency') && (
+            <div className="flex gap-3">
+              <div className="flex-1">
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Início</label>
+                <input type="number" value={startValue} onChange={(e) => setStartValue(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+              </div>
+              <div className="flex-1">
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Meta</label>
+                <input type="number" value={targetValue} onChange={(e) => setTargetValue(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+              </div>
+              <div className="flex-1">
+                <label className="text-xs font-semibold text-gray-500 mb-1 block">Atual</label>
+                <input type="number" value={currentValue} onChange={(e) => setCurrentValue(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+              </div>
+            </div>
+          )}
+          {(type === 'number' || type === 'currency') && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Unidade (opcional)</label>
+              <input value={unit} onChange={(e) => setUnit(e.target.value)} placeholder={type === 'currency' ? 'R$' : 'un.'} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+            </div>
+          )}
+          {type === 'boolean' && <p className="text-xs text-gray-500">Progresso é 0% ou 100%, marcado direto na lista de targets.</p>}
+          {type === 'task' && (
+            <div>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Tarefa vinculada</label>
+              {selectedTask ? (
+                <div className="flex items-center justify-between text-sm bg-purple-50 border border-purple-200 rounded-lg px-3 py-2">
+                  <span className="truncate">{selectedTask.title}</span>
+                  <button onClick={() => setSelectedTask(null)} className="text-gray-400 hover:text-gray-600 shrink-0 ml-2"><X className="w-3.5 h-3.5" /></button>
+                </div>
+              ) : target?.taskId ? (
+                <p className="text-xs text-gray-500">Tarefa atual mantida (deixe em branco pra não trocar).</p>
+              ) : null}
+              <input
+                value={taskQuery}
+                onChange={(e) => setTaskQuery(e.target.value)}
+                placeholder="Buscar tarefa por título..."
+                className="w-full text-sm border rounded-lg px-3 py-2 outline-none mt-1.5"
+              />
+              {taskResults.length > 0 && (
+                <div className="mt-1 border rounded-lg overflow-hidden max-h-40 overflow-y-auto custom-scrollbar">
+                  {taskResults.map((t) => (
+                    <button
+                      key={t.id}
+                      onClick={() => { setSelectedTask(t); setTaskQuery(''); setTaskResults([]); }}
+                      className="w-full text-left text-sm px-3 py-2 hover:bg-gray-50 border-b last:border-b-0 truncate"
+                    >
+                      {t.title}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium disabled:opacity-50">
+            {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
         </div>
       </div>
     </div>

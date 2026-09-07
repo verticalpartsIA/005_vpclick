@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { CustomFieldValue, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
+import { CustomFieldValue, Goal, GoalTarget, GoalTargetType, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -1623,4 +1623,148 @@ export async function bulkDelete(ids: string[]): Promise<{ error: string | null 
     if (!result.ok) return { error: result.message };
   }
   return { error: null };
+}
+
+// ── Goals / OKRs (issue #188) ────────────────────────────────────────────────
+
+function mapGoalTargetRow(r: any): GoalTarget {
+  return {
+    id: r.id,
+    goalId: r.goal_id,
+    type: r.type as GoalTargetType,
+    name: r.name,
+    unit: r.unit,
+    startValue: r.start_value === null ? null : Number(r.start_value),
+    targetValue: r.target_value === null ? null : Number(r.target_value),
+    currentValue: r.current_value === null ? null : Number(r.current_value),
+    isDone: r.is_done,
+    taskId: r.task_id,
+    orderIndex: r.order_index,
+  };
+}
+
+function mapGoalRow(r: any): Goal {
+  return {
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    color: r.color,
+    dueDate: r.due_date,
+    access: r.access,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    archivedAt: r.archived_at,
+    ownerIds: (r.goal_owners || []).map((o: any) => o.user_id),
+    targets: (r.goal_targets || []).map(mapGoalTargetRow).sort((a: GoalTarget, b: GoalTarget) => a.orderIndex - b.orderIndex),
+  };
+}
+
+export async function fetchGoals(includeArchived = false): Promise<Goal[]> {
+  let q = supabase
+    .from('goals')
+    .select('*, goal_owners(user_id), goal_targets(*)')
+    .order('created_at', { ascending: false });
+  if (!includeArchived) q = q.is('archived_at', null);
+  const { data, error } = await q;
+  if (error) { console.error('taskRepo.fetchGoals:', error); throw error; }
+  return (data ?? []).map(mapGoalRow);
+}
+
+export async function createGoal(input: {
+  name: string; description?: string | null; color: string; dueDate?: string | null;
+  access: 'workspace' | 'private'; createdBy: string; ownerIds: string[];
+}): Promise<{ ok: true; goal: Goal } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('goals')
+    .insert({
+      name: input.name, description: input.description ?? null, color: input.color,
+      due_date: input.dueDate ?? null, access: input.access, created_by: input.createdBy,
+    })
+    .select()
+    .single();
+  if (error || !data) return { ok: false, message: error?.message ?? 'Erro ao criar meta' };
+
+  const ownerIds = Array.from(new Set(input.ownerIds));
+  if (ownerIds.length > 0) {
+    const { error: ownersError } = await supabase
+      .from('goal_owners')
+      .insert(ownerIds.map((userId) => ({ goal_id: data.id, user_id: userId })));
+    if (ownersError) return { ok: false, message: ownersError.message };
+  }
+
+  return { ok: true, goal: mapGoalRow({ ...data, goal_owners: ownerIds.map((user_id) => ({ user_id })), goal_targets: [] }) };
+}
+
+export async function updateGoal(goalId: string, updates: {
+  name?: string; description?: string | null; color?: string; dueDate?: string | null;
+  access?: 'workspace' | 'private'; archivedAt?: string | null;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const payload: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (updates.name !== undefined) payload.name = updates.name;
+  if (updates.description !== undefined) payload.description = updates.description;
+  if (updates.color !== undefined) payload.color = updates.color;
+  if (updates.dueDate !== undefined) payload.due_date = updates.dueDate;
+  if (updates.access !== undefined) payload.access = updates.access;
+  if (updates.archivedAt !== undefined) payload.archived_at = updates.archivedAt;
+  const { error } = await supabase.from('goals').update(payload).eq('id', goalId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function updateGoalOwners(goalId: string, ownerIds: string[]): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error: delError } = await supabase.from('goal_owners').delete().eq('goal_id', goalId);
+  if (delError) return { ok: false, message: delError.message };
+  const uniqueIds = Array.from(new Set(ownerIds));
+  if (uniqueIds.length === 0) return { ok: true };
+  const { error: insError } = await supabase
+    .from('goal_owners')
+    .insert(uniqueIds.map((userId) => ({ goal_id: goalId, user_id: userId })));
+  if (insError) return { ok: false, message: insError.message };
+  return { ok: true };
+}
+
+export async function deleteGoal(goalId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('goals').delete().eq('id', goalId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function createGoalTarget(goalId: string, input: {
+  type: GoalTargetType; name: string; unit?: string | null; startValue?: number | null;
+  targetValue?: number | null; currentValue?: number | null; taskId?: string | null; orderIndex: number;
+}): Promise<{ ok: true; target: GoalTarget } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('goal_targets')
+    .insert({
+      goal_id: goalId, type: input.type, name: input.name, unit: input.unit ?? null,
+      start_value: input.startValue ?? null, target_value: input.targetValue ?? null,
+      current_value: input.currentValue ?? null, task_id: input.taskId ?? null, order_index: input.orderIndex,
+    })
+    .select()
+    .single();
+  if (error || !data) return { ok: false, message: error?.message ?? 'Erro ao criar target' };
+  return { ok: true, target: mapGoalTargetRow(data) };
+}
+
+export async function updateGoalTarget(targetId: string, updates: {
+  name?: string; unit?: string | null; startValue?: number | null; targetValue?: number | null;
+  currentValue?: number | null; isDone?: boolean; taskId?: string | null;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const payload: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (updates.name !== undefined) payload.name = updates.name;
+  if (updates.unit !== undefined) payload.unit = updates.unit;
+  if (updates.startValue !== undefined) payload.start_value = updates.startValue;
+  if (updates.targetValue !== undefined) payload.target_value = updates.targetValue;
+  if (updates.currentValue !== undefined) payload.current_value = updates.currentValue;
+  if (updates.isDone !== undefined) payload.is_done = updates.isDone;
+  if (updates.taskId !== undefined) payload.task_id = updates.taskId;
+  const { error } = await supabase.from('goal_targets').update(payload).eq('id', targetId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function deleteGoalTarget(targetId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('goal_targets').delete().eq('id', targetId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
 }

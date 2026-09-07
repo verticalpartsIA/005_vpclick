@@ -480,6 +480,39 @@ export interface WorkspaceTag {
   created_at: string;
 }
 
+// ── Goals / OKRs (issue #188) ───────────────────────────────
+
+export type GoalTargetType = 'number' | 'currency' | 'boolean' | 'task';
+export type GoalAccess = 'workspace' | 'private';
+
+export interface GoalTarget {
+  id: string;
+  goalId: string;
+  type: GoalTargetType;
+  name: string;
+  unit?: string | null;
+  startValue?: number | null;
+  targetValue?: number | null;
+  currentValue?: number | null;
+  isDone: boolean;
+  taskId?: string | null;
+  orderIndex: number;
+}
+
+export interface Goal {
+  id: string;
+  name: string;
+  description?: string | null;
+  color: string;
+  dueDate?: string | null;
+  access: GoalAccess;
+  createdBy: string | null;
+  createdAt: string;
+  archivedAt?: string | null;
+  ownerIds: string[];
+  targets: GoalTarget[];
+}
+
 // ── Automations ───────────────────────────────────────────
 
 export type AutomationTriggerType =
