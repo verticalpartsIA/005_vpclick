@@ -264,6 +264,34 @@ export interface WorkloadBucket {
   taskCount: number;
 }
 
+// Issue #186 — Time Tracking. Um lançamento de tempo por tarefa: cronômetro
+// (source='timer', endedAt ausente = rodando) ou entrada manual
+// (source='manual', duração informada direto). No máximo um cronômetro
+// rodando por usuário — garantido no banco (índice único parcial), não só
+// aqui no tipo.
+export interface TimeEntry {
+  id: string;
+  taskId: string;
+  userId: string;
+  startedAt: string;
+  endedAt?: string;
+  durationMinutes?: number;
+  isBillable: boolean;
+  description?: string;
+  source: 'timer' | 'manual';
+}
+
+// Uma linha agregada retornada por get_time_tracking_summary — mesmo
+// formato (userId, data) de WorkloadBucket de propósito, pra alimentar
+// "realizado" ao lado de "planejado" quando a integração com Workload
+// (#187) for conectada na UI.
+export interface TimeTrackingBucket {
+  userId: string;
+  entryDate: string;
+  actualMinutes: number;
+  billableMinutes: number;
+}
+
 // ── Tarefas recorrentes (issue #184) ──────────────────────────────────────
 // Fase 1: schema + RLS só. Motor de cálculo da próxima ocorrência e
 // scheduler server-side (Fase 2) e UI de configuração (Fase 3) ainda não

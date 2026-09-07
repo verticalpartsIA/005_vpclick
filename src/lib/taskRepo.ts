@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { CustomFieldValue, Task, TaskPriority, TaskRecurrenceRule, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
+import { CustomFieldValue, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -577,6 +577,120 @@ export async function updateTaskEstimatedHours(taskId: string, hours: number | n
   const { error } = await supabase.from('tasks').update({ estimated_hours: hours }).eq('id', taskId);
   if (error) return { ok: false, message: error.message };
   return { ok: true };
+}
+
+// Issue #186 (Time Tracking) — MVP: cronômetro + lançamento manual por
+// tarefa. `startTimer`/`addManualTimeEntry` deixam o banco garantir a regra
+// "no máximo um cronômetro rodando por usuário" (índice único parcial em
+// task_time_entries) — o erro de constraint vira mensagem amigável aqui.
+const mapTimeEntryRow = (r: any): TimeEntry => ({
+  id: r.id,
+  taskId: r.task_id,
+  userId: r.user_id,
+  startedAt: r.started_at,
+  endedAt: r.ended_at || undefined,
+  durationMinutes: r.duration_minutes ?? undefined,
+  isBillable: r.is_billable,
+  description: r.description || undefined,
+  source: r.source,
+});
+const TIME_ENTRY_SELECT = 'id, task_id, user_id, started_at, ended_at, duration_minutes, is_billable, description, source';
+
+export async function fetchTimeEntriesForTask(taskId: string): Promise<TimeEntry[]> {
+  const { data, error } = await supabase
+    .from('task_time_entries')
+    .select(TIME_ENTRY_SELECT)
+    .eq('task_id', taskId)
+    .order('started_at', { ascending: false });
+  if (error) { console.error('taskRepo.fetchTimeEntriesForTask:', error); throw error; }
+  return (data ?? []).map(mapTimeEntryRow);
+}
+
+// A tarefa em que o usuário tem um cronômetro rodando agora (se houver) —
+// usada pro indicador "você já tem um cronômetro rodando em outra tarefa".
+export async function fetchRunningTimer(userId: string): Promise<TimeEntry | null> {
+  const { data, error } = await supabase
+    .from('task_time_entries')
+    .select(TIME_ENTRY_SELECT)
+    .eq('user_id', userId)
+    .is('ended_at', null)
+    .maybeSingle();
+  if (error) { console.error('taskRepo.fetchRunningTimer:', error); throw error; }
+  return data ? mapTimeEntryRow(data) : null;
+}
+
+export async function startTimer(taskId: string, userId: string, isBillable: boolean, description?: string): Promise<{ ok: true; entry: TimeEntry } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('task_time_entries')
+    .insert({ task_id: taskId, user_id: userId, source: 'timer', is_billable: isBillable, description: description || null })
+    .select(TIME_ENTRY_SELECT)
+    .single();
+  if (error) {
+    if (error.code === '23505') return { ok: false, message: 'Você já tem um cronômetro rodando em outra tarefa. Pare-o antes de iniciar um novo.' };
+    return { ok: false, message: error.message };
+  }
+  return { ok: true, entry: mapTimeEntryRow(data) };
+}
+
+export async function stopTimer(entryId: string): Promise<{ ok: true; entry: TimeEntry } | { ok: false; message: string }> {
+  const { data: current, error: fetchError } = await supabase.from('task_time_entries').select('started_at').eq('id', entryId).single();
+  if (fetchError || !current) return { ok: false, message: fetchError?.message || 'Cronômetro não encontrado.' };
+  const endedAt = new Date();
+  const durationMinutes = Math.max(0, Math.round((endedAt.getTime() - new Date(current.started_at).getTime()) / 60000));
+  const { data, error } = await supabase
+    .from('task_time_entries')
+    .update({ ended_at: endedAt.toISOString(), duration_minutes: durationMinutes, updated_at: endedAt.toISOString() })
+    .eq('id', entryId)
+    .select(TIME_ENTRY_SELECT)
+    .single();
+  if (error) return { ok: false, message: error.message };
+  return { ok: true, entry: mapTimeEntryRow(data) };
+}
+
+export async function addManualTimeEntry(
+  taskId: string,
+  userId: string,
+  startedAt: string,
+  durationMinutes: number,
+  isBillable: boolean,
+  description: string | null,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const endedAt = new Date(new Date(startedAt).getTime() + durationMinutes * 60000).toISOString();
+  const { error } = await supabase
+    .from('task_time_entries')
+    .insert({ task_id: taskId, user_id: userId, source: 'manual', started_at: startedAt, ended_at: endedAt, duration_minutes: durationMinutes, is_billable: isBillable, description });
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function updateTimeEntry(
+  entryId: string,
+  updates: { durationMinutes?: number; isBillable?: boolean; description?: string | null },
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (updates.durationMinutes !== undefined) patch.duration_minutes = updates.durationMinutes;
+  if (updates.isBillable !== undefined) patch.is_billable = updates.isBillable;
+  if (updates.description !== undefined) patch.description = updates.description;
+  const { error } = await supabase.from('task_time_entries').update(patch).eq('id', entryId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function deleteTimeEntry(entryId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('task_time_entries').delete().eq('id', entryId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function fetchTimeTrackingSummary(listIds: string[] | null, periodStart: string, periodEnd: string): Promise<TimeTrackingBucket[]> {
+  const { data, error } = await supabase.rpc('get_time_tracking_summary', { p_list_ids: listIds, p_period_start: periodStart, p_period_end: periodEnd });
+  if (error) { console.error('taskRepo.fetchTimeTrackingSummary:', error); throw error; }
+  return ((data ?? []) as any[]).map((r) => ({
+    userId: r.user_id,
+    entryDate: r.entry_date,
+    actualMinutes: Number(r.actual_minutes) || 0,
+    billableMinutes: Number(r.billable_minutes) || 0,
+  }));
 }
 
 export async function fetchCustomFieldValuesByEntityIds(entityIds: string[]): Promise<CustomFieldValue[]> {

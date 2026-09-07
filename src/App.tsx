@@ -8744,6 +8744,227 @@ function ListView({
   );
 }
 
+// Issue #186 (Time Tracking) — MVP: cronômetro + lançamento manual, dentro da
+// aba "Tempo" do TaskDetailModal. Auto-contido (busca os próprios dados via
+// useEffect), mesmo precedente do WorkloadView/DashboardView logo abaixo.
+function TaskTimeTracking({ taskId, currentUser, isReadOnly, estimatedHours, users }: any) {
+  const [entries, setEntries] = useState<TimeEntry[]>([]);
+  const [runningTimer, setRunningTimer] = useState<TimeEntry | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [showManualForm, setShowManualForm] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [taskEntries, running] = await Promise.all([
+        taskRepo.fetchTimeEntriesForTask(taskId),
+        taskRepo.fetchRunningTimer(currentUser.id),
+      ]);
+      setEntries(taskEntries);
+      setRunningTimer(running);
+    } catch (err) {
+      console.error('TaskTimeTracking: erro ao carregar', err);
+      toast.error('Não foi possível carregar o tempo registrado.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [taskId, currentUser.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const runningHere = !!(runningTimer && runningTimer.taskId === taskId);
+  const runningElsewhere = !!(runningTimer && runningTimer.taskId !== taskId);
+
+  // Atualiza o cronômetro visível a cada segundo enquanto roda nesta tarefa.
+  useEffect(() => {
+    if (!runningHere) return;
+    const interval = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [runningHere]);
+
+  const handleStart = async () => {
+    setIsStarting(true);
+    const res = await taskRepo.startTimer(taskId, currentUser.id, true);
+    setIsStarting(false);
+    if (!res.ok) { toast.error(res.message); return; }
+    setRunningTimer(res.entry);
+    setEntries(prev => [res.entry, ...prev]);
+  };
+
+  const handleStop = async () => {
+    if (!runningTimer) return;
+    setIsStopping(true);
+    const res = await taskRepo.stopTimer(runningTimer.id);
+    setIsStopping(false);
+    if (!res.ok) { toast.error(res.message); return; }
+    setRunningTimer(null);
+    setEntries(prev => prev.map(e => e.id === res.entry.id ? res.entry : e));
+    toast.success('Cronômetro parado.');
+  };
+
+  const handleDelete = async (entryId: string) => {
+    const res = await taskRepo.deleteTimeEntry(entryId);
+    if (!res.ok) { toast.error('Erro ao excluir: ' + res.message); return; }
+    setEntries(prev => prev.filter(e => e.id !== entryId));
+    toast.success('Lançamento excluído.');
+  };
+
+  const totalMinutes = entries.reduce((sum: number, e: TimeEntry) => sum + (e.durationMinutes || 0), 0);
+  const fmtDuration = (min: number) => `${Math.floor(min / 60)}h${String(min % 60).padStart(2, '0')}`;
+
+  const elapsedLabel = useMemo(() => {
+    if (!runningHere || !runningTimer) return '';
+    const secs = Math.max(0, Math.floor((Date.now() - new Date(runningTimer.startedAt).getTime()) / 1000));
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    const s = secs % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runningHere, runningTimer, tick]);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between bg-gray-50/50 p-4 rounded-2xl border border-gray-100">
+        <div className="flex items-center gap-3">
+          {runningHere ? (
+            <>
+              <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-lg font-bold text-gray-800 tabular-nums">{elapsedLabel}</span>
+            </>
+          ) : (
+            <span className="text-sm text-gray-500">
+              Total registrado: <strong className="text-gray-800">{fmtDuration(totalMinutes)}</strong>
+              {estimatedHours != null && <> · Estimado: <strong className="text-gray-800">{estimatedHours}h</strong></>}
+            </span>
+          )}
+        </div>
+        {!isReadOnly && (
+          runningHere ? (
+            <button onClick={handleStop} disabled={isStopping} className="px-4 py-2 text-sm rounded-lg bg-red-500 hover:bg-red-600 text-white font-bold disabled:opacity-50">
+              Parar
+            </button>
+          ) : (
+            <div className="flex items-center gap-2">
+              {runningElsewhere && <span className="text-xs text-amber-600">Cronômetro rodando em outra tarefa</span>}
+              <button onClick={handleStart} disabled={isStarting} className="px-4 py-2 text-sm rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white font-bold disabled:opacity-50">
+                Iniciar cronômetro
+              </button>
+              <button onClick={() => setShowManualForm((v: boolean) => !v)} className="px-3 py-2 text-sm rounded-lg border text-gray-600 hover:bg-gray-50 font-medium">
+                + Lançar manualmente
+              </button>
+            </div>
+          )
+        )}
+      </div>
+
+      {showManualForm && (
+        <ManualTimeEntryForm
+          taskId={taskId}
+          currentUser={currentUser}
+          onClose={() => setShowManualForm(false)}
+          onAdded={() => { setShowManualForm(false); load(); }}
+        />
+      )}
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-12">
+          <div className="w-6 h-6 border-2 border-gray-200 border-t-orange-500 rounded-full animate-spin" />
+        </div>
+      ) : entries.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-12">Nenhum tempo registrado nesta tarefa ainda.</p>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {entries.map((e: TimeEntry) => {
+            const user = users?.find((u: any) => u.id === e.userId);
+            const canEdit = !isReadOnly && (e.userId === currentUser.id || currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR);
+            return (
+              <div key={e.id} className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg border border-gray-100 hover:bg-gray-50/50 text-sm">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="font-semibold text-gray-800">{user?.name || 'alguém'}</span>
+                    <span className="text-gray-400">·</span>
+                    <span className="font-bold text-gray-700">{e.durationMinutes != null ? fmtDuration(e.durationMinutes) : 'em andamento'}</span>
+                    {e.source === 'timer' && <span className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full font-bold uppercase">Cronômetro</span>}
+                    {!e.isBillable && <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded-full font-bold uppercase">Não faturável</span>}
+                  </div>
+                  <p className="text-xs text-gray-400 truncate">
+                    {new Date(e.startedAt).toLocaleString('pt-BR')}
+                    {e.description ? ` · ${e.description}` : ''}
+                  </p>
+                </div>
+                {canEdit && (
+                  <button onClick={() => handleDelete(e.id)} className="text-red-400 hover:text-red-600 shrink-0">
+                    <Icons.Trash className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ManualTimeEntryForm({ taskId, currentUser, onClose, onAdded }: any) {
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [hours, setHours] = useState('');
+  const [minutes, setMinutes] = useState('');
+  const [isBillable, setIsBillable] = useState(true);
+  const [description, setDescription] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSave = async () => {
+    const h = Number(hours) || 0;
+    const m = Number(minutes) || 0;
+    const totalMinutes = h * 60 + m;
+    if (totalMinutes <= 0) { toast.error('Informe uma duração válida.'); return; }
+    setIsSaving(true);
+    const res = await taskRepo.addManualTimeEntry(taskId, currentUser.id, new Date(date + 'T09:00:00').toISOString(), totalMinutes, isBillable, description || null);
+    setIsSaving(false);
+    if (!res.ok) { toast.error('Erro ao lançar tempo: ' + res.message); return; }
+    toast.success('Tempo lançado.');
+    onAdded();
+  };
+
+  return (
+    <div className="bg-white border border-gray-200 rounded-2xl p-4 flex flex-col gap-3">
+      <div className="grid grid-cols-3 gap-3">
+        <div>
+          <label className="text-[10px] font-bold text-gray-400 uppercase">Data</label>
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full text-sm border rounded px-2 py-1.5 mt-1 outline-none" />
+        </div>
+        <div>
+          <label className="text-[10px] font-bold text-gray-400 uppercase">Horas</label>
+          <input type="number" min={0} value={hours} onChange={(e) => setHours(e.target.value)} placeholder="0" className="w-full text-sm border rounded px-2 py-1.5 mt-1 outline-none" />
+        </div>
+        <div>
+          <label className="text-[10px] font-bold text-gray-400 uppercase">Minutos</label>
+          <input type="number" min={0} max={59} value={minutes} onChange={(e) => setMinutes(e.target.value)} placeholder="0" className="w-full text-sm border rounded px-2 py-1.5 mt-1 outline-none" />
+        </div>
+      </div>
+      <input
+        type="text"
+        placeholder="Descrição (opcional)"
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        className="w-full text-sm border rounded px-2 py-1.5 outline-none"
+      />
+      <label className="flex items-center gap-2 text-xs text-gray-600">
+        <input type="checkbox" checked={isBillable} onChange={(e) => setIsBillable(e.target.checked)} />
+        Faturável
+      </label>
+      <div className="flex justify-end gap-2">
+        <button onClick={onClose} className="px-3 py-1.5 text-xs rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+        <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-xs rounded-lg bg-blue-500 hover:bg-blue-600 text-white font-bold disabled:opacity-50">Salvar</button>
+      </div>
+    </div>
+  );
+}
+
 // Issue #187 (Workload/Capacidade) — MVP inspirado no ClickUp. Mesmo padrão
 // arquitetural do Dashboard: agregação vem pronta do banco
 // (get_workload_summary), a view só monta a matriz visual. Fica dentro de
@@ -10659,7 +10880,7 @@ function TaskDetailModal(props: any) {
 
   // Renamed to avoid shadowing
   const [searchParams, setSearchParams] = useSearchParams();
-  const [detailActiveTab, setDetailActiveTab] = useState<'info' | 'history' | 'checklist' | 'attachments' | 'custom' | 'subtasks' | 'dependencies' | 'watchers'>(() => {
+  const [detailActiveTab, setDetailActiveTab] = useState<'info' | 'history' | 'checklist' | 'attachments' | 'custom' | 'subtasks' | 'dependencies' | 'watchers' | 'time'>(() => {
     const fromUrl = searchParams.get('tab');
     const validTabs = ['info', 'history', 'checklist', 'attachments', 'custom', 'subtasks', 'dependencies', 'watchers'] as const;
     return (validTabs as readonly string[]).includes(fromUrl || '') ? (fromUrl as typeof validTabs[number]) : 'info';
@@ -11560,7 +11781,8 @@ function TaskDetailModal(props: any) {
                 { id: 'dependencies', label: 'Dependências' },
                 { id: 'watchers', label: 'Observadores' },
                 { id: 'checklist', label: 'Itens de ação' },
-                { id: 'attachments', label: 'Anexos', count: task.attachments?.length || 0 }
+                { id: 'attachments', label: 'Anexos', count: task.attachments?.length || 0 },
+                { id: 'time', label: 'Tempo' }
               ].map(tab => (
                 <button
                   key={tab.id}
@@ -11776,6 +11998,15 @@ function TaskDetailModal(props: any) {
                     )}
                   </div>
                 </div>
+              )}
+              {detailActiveTab === 'time' && (
+                <TaskTimeTracking
+                  taskId={task.id}
+                  currentUser={currentUser}
+                  isReadOnly={isReadOnly}
+                  estimatedHours={task.estimatedHours}
+                  users={users}
+                />
               )}
               {detailActiveTab === 'dependencies' && (
                 <TaskDependencies
