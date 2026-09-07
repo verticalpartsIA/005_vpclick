@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { CustomFieldValue, Goal, GoalTarget, GoalTargetType, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
+import { CustomFieldValue, Goal, GoalTarget, GoalTargetType, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -1765,6 +1765,124 @@ export async function updateGoalTarget(targetId: string, updates: {
 
 export async function deleteGoalTarget(targetId: string): Promise<{ ok: true } | { ok: false; message: string }> {
   const { error } = await supabase.from('goal_targets').delete().eq('id', targetId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+// ── Portfolios (issue #189) ──────────────────────────────────────────────────
+
+function mapPortfolioRow(r: any): Portfolio {
+  return {
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    color: r.color,
+    dueDate: r.due_date,
+    access: r.access,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    archivedAt: r.archived_at,
+    ownerIds: (r.portfolio_owners || []).map((o: any) => o.user_id),
+    listIds: (r.portfolio_lists || [])
+      .slice()
+      .sort((a: any, b: any) => (a.order_index ?? 0) - (b.order_index ?? 0))
+      .map((l: any) => l.list_id),
+  };
+}
+
+export async function fetchPortfolios(includeArchived = false): Promise<Portfolio[]> {
+  let q = supabase
+    .from('portfolios')
+    .select('*, portfolio_owners(user_id), portfolio_lists(list_id, order_index)')
+    .order('created_at', { ascending: false });
+  if (!includeArchived) q = q.is('archived_at', null);
+  const { data, error } = await q;
+  if (error) { console.error('taskRepo.fetchPortfolios:', error); throw error; }
+  return (data ?? []).map(mapPortfolioRow);
+}
+
+export async function createPortfolio(input: {
+  name: string; description?: string | null; color: string; dueDate?: string | null;
+  access: 'workspace' | 'private'; createdBy: string; ownerIds: string[]; listIds: string[];
+}): Promise<{ ok: true; portfolio: Portfolio } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('portfolios')
+    .insert({
+      name: input.name, description: input.description ?? null, color: input.color,
+      due_date: input.dueDate ?? null, access: input.access, created_by: input.createdBy,
+    })
+    .select()
+    .single();
+  if (error || !data) return { ok: false, message: error?.message ?? 'Erro ao criar portfolio' };
+
+  const ownerIds = Array.from(new Set(input.ownerIds));
+  if (ownerIds.length > 0) {
+    const { error: ownersError } = await supabase
+      .from('portfolio_owners')
+      .insert(ownerIds.map((userId) => ({ portfolio_id: data.id, user_id: userId })));
+    if (ownersError) return { ok: false, message: ownersError.message };
+  }
+
+  const listIds = Array.from(new Set(input.listIds));
+  if (listIds.length > 0) {
+    const { error: listsError } = await supabase
+      .from('portfolio_lists')
+      .insert(listIds.map((listId, i) => ({ portfolio_id: data.id, list_id: listId, order_index: i })));
+    if (listsError) return { ok: false, message: listsError.message };
+  }
+
+  return {
+    ok: true,
+    portfolio: mapPortfolioRow({
+      ...data,
+      portfolio_owners: ownerIds.map((user_id) => ({ user_id })),
+      portfolio_lists: listIds.map((list_id, i) => ({ list_id, order_index: i })),
+    }),
+  };
+}
+
+export async function updatePortfolio(portfolioId: string, updates: {
+  name?: string; description?: string | null; color?: string; dueDate?: string | null;
+  access?: 'workspace' | 'private'; archivedAt?: string | null;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const payload: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (updates.name !== undefined) payload.name = updates.name;
+  if (updates.description !== undefined) payload.description = updates.description;
+  if (updates.color !== undefined) payload.color = updates.color;
+  if (updates.dueDate !== undefined) payload.due_date = updates.dueDate;
+  if (updates.access !== undefined) payload.access = updates.access;
+  if (updates.archivedAt !== undefined) payload.archived_at = updates.archivedAt;
+  const { error } = await supabase.from('portfolios').update(payload).eq('id', portfolioId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function updatePortfolioOwners(portfolioId: string, ownerIds: string[]): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error: delError } = await supabase.from('portfolio_owners').delete().eq('portfolio_id', portfolioId);
+  if (delError) return { ok: false, message: delError.message };
+  const uniqueIds = Array.from(new Set(ownerIds));
+  if (uniqueIds.length === 0) return { ok: true };
+  const { error: insError } = await supabase
+    .from('portfolio_owners')
+    .insert(uniqueIds.map((userId) => ({ portfolio_id: portfolioId, user_id: userId })));
+  if (insError) return { ok: false, message: insError.message };
+  return { ok: true };
+}
+
+export async function updatePortfolioLists(portfolioId: string, listIds: string[]): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error: delError } = await supabase.from('portfolio_lists').delete().eq('portfolio_id', portfolioId);
+  if (delError) return { ok: false, message: delError.message };
+  const uniqueIds = Array.from(new Set(listIds));
+  if (uniqueIds.length === 0) return { ok: true };
+  const { error: insError } = await supabase
+    .from('portfolio_lists')
+    .insert(uniqueIds.map((listId, i) => ({ portfolio_id: portfolioId, list_id: listId, order_index: i })));
+  if (insError) return { ok: false, message: insError.message };
+  return { ok: true };
+}
+
+export async function deletePortfolio(portfolioId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('portfolios').delete().eq('id', portfolioId);
   if (error) return { ok: false, message: error.message };
   return { ok: true };
 }

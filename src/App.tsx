@@ -6,7 +6,7 @@ import {
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
   CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification, DuplicateTaskOptions,
   TaskRecurrenceRule, RecurrenceFrequencyType, RecurrenceWeekendShift, RecurrenceEndMode, RecurrenceOverlapPolicy, RecurrenceMisfirePolicy, RecurrenceInheritOptions,
-  Goal, GoalTarget, GoalTargetType
+  Goal, GoalTarget, GoalTargetType, Portfolio
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -143,7 +143,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -4564,6 +4564,19 @@ export default function App() {
                 onOpenTask={setSelectedTaskId}
               />
             )}
+            {activeView === 'Portfolios' && (
+              <PortfoliosView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                folders={folders}
+                spaces={spaces}
+                onOpenList={(listId: string) => {
+                  const list = lists.find((l: List) => l.id === listId);
+                  if (list) { handleNavigate('list', listId, list.name); setActiveListId(listId); setActiveView('List'); }
+                }}
+              />
+            )}
             {activeView === 'Doc' && activeDocId && (
               <DocView
                 doc={docs.find(d => d.id === activeDocId)!}
@@ -5682,10 +5695,6 @@ function Sidebar({
   listTaskCounts, listProgressMap,
   favorites, onToggleFavorite
 }: any) {
-  const compactLogo = "https://verticalparts.com.br/wp-content/uploads/2026/01/grp__NM__bg__NM__logo_compacto-1.png";
-  const isNonLightTheme = themePreset !== "claro";
-  const logoSrc = isNonLightTheme ? compactLogoWhite : compactLogo;
-  const logoStyle = isNonLightTheme ? undefined : ({ filter: 'brightness(0)' } as React.CSSProperties);
   const canManageStructure = userRole === UserRole.ADMIN || userRole === UserRole.GESTOR;
 
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
@@ -5725,6 +5734,17 @@ function Sidebar({
       icon: <Icons.Target className="w-3.5 h-3.5 shrink-0" />,
       onSelect: () => { onNavigate('global', null, 'Metas'); onViewChange('Goals'); },
       isActive: activeView === 'Goals',
+    },
+    {
+      // Portfolios no ClickUp real é feature de plano pago (Business+), não
+      // pôde ser aberta ao vivo neste workspace Free pra confirmar a
+      // localização exata — issue #189. Mantido no mesmo "Mais" que Metas,
+      // por consistência e porque é o padrão deste menu no VP Click.
+      key: 'portfolios',
+      label: 'Portfolios',
+      icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Portfolios'); onViewChange('Portfolios'); },
+      isActive: activeView === 'Portfolios',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -5843,10 +5863,19 @@ function Sidebar({
     <div className="flex h-full shrink-0" onClick={(e) => e.stopPropagation()}>
 
       {/* ══ ICON NAV BAR (sempre visível, 48px) ══ */}
-      <div className="w-12 flex flex-col items-center bg-sidebar border-r border-sidebar-border shrink-0 py-2 gap-0.5">
+      {/* Faixa de marca: degradê amarelo->preto (cores oficiais VerticalParts)
+          com sombra própria pra dar sensação de flutuar sobre o conteúdo,
+          em vez do cinza claro liso de antes. Puro capricho visual. */}
+      <div
+        className="w-12 flex flex-col items-center shrink-0 py-2 gap-0.5 rounded-r-2xl z-10"
+        style={{
+          background: 'linear-gradient(180deg, #ffce05 0%, #4a4020 55%, #161616 100%)',
+          boxShadow: '6px 0 24px -6px rgba(0,0,0,0.45), 2px 0 6px -2px rgba(0,0,0,0.25)',
+        }}
+      >
         {/* Logo */}
         <div className="mb-2 mt-1">
-          <img src={logoSrc} alt="VP" className="w-7 h-7 object-contain" style={logoStyle} />
+          <img src={compactLogoWhite} alt="VP" className="w-7 h-7 object-contain" />
         </div>
 
         {/* Nav icons */}
@@ -5859,8 +5888,8 @@ function Sidebar({
             aria-current={item.active ? 'page' : undefined}
             className={`w-9 h-9 flex items-center justify-center rounded-lg transition-colors ${
               item.active
-                ? 'bg-sidebar-accent text-primary'
-                : 'text-sidebar-foreground/50 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground'
+                ? 'bg-white/90 text-black shadow-sm'
+                : 'text-white/80 hover:bg-white/15 hover:text-white'
             }`}
           >
             {item.icon}
@@ -5890,7 +5919,7 @@ function Sidebar({
           <button
             onClick={onOpenFields}
             title="Campos Personalizados"
-            className="w-9 h-9 flex items-center justify-center rounded-lg text-sidebar-foreground/40 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors mt-1 mb-1"
+            className="w-9 h-9 flex items-center justify-center rounded-lg text-white/70 hover:bg-white/15 hover:text-white transition-colors mt-1 mb-1"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={1.8} viewBox="0 0 16 16"><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.22 3.22l1.42 1.42M11.36 11.36l1.42 1.42M3.22 12.78l1.42-1.42M11.36 4.64l1.42-1.42"/><circle cx="8" cy="8" r="3"/></svg>
           </button>
@@ -5900,7 +5929,7 @@ function Sidebar({
         <button
           onClick={onToggle}
           title={isCollapsed ? 'Expandir sidebar' : 'Recolher sidebar'}
-          className="w-9 h-9 flex items-center justify-center rounded-lg text-sidebar-foreground/40 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground transition-colors mb-1"
+          className="w-9 h-9 flex items-center justify-center rounded-lg text-white/70 hover:bg-white/15 hover:text-white transition-colors mb-1"
         >
           {isCollapsed ? (
             <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 16 16"><path d="M6 4l4 4-4 4"/></svg>
@@ -9815,6 +9844,360 @@ function GoalTargetFormModal({ goal, target, onClose, onSaved }: any) {
         <div className="px-6 py-4 border-t flex justify-end gap-2">
           <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
           <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium disabled:opacity-50">
+            {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PortfoliosView({ currentUser, users, lists, folders, spaces, onOpenList }: any) {
+  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
+  const [summaryRows, setSummaryRows] = useState<taskRepo.DashboardSummaryRow[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingPortfolio, setEditingPortfolio] = useState<Portfolio | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const [p, s] = await Promise.all([
+        taskRepo.fetchPortfolios(showArchived),
+        taskRepo.fetchDashboardSummary('all'),
+      ]);
+      setPortfolios(p);
+      setSummaryRows(s ?? []);
+    } catch (err) {
+      console.error('PortfoliosView: erro ao carregar', err);
+      toast.error('Não foi possível carregar os Portfolios.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [showArchived]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const listById = useMemo(() => new Map(lists.map((l: List) => [l.id, l])), [lists]);
+  const folderById = useMemo(() => new Map(folders.map((f: Folder) => [f.id, f])), [folders]);
+  const spaceById = useMemo(() => new Map(spaces.map((s: Space) => [s.id, s])), [spaces]);
+
+  const listPath = useCallback((listId: string) => {
+    const list: any = listById.get(listId);
+    if (!list) return 'Lista removida ou sem acesso';
+    const folder: any = folderById.get(list.folderId);
+    const space: any = folder ? spaceById.get(folder.spaceId) : undefined;
+    return [space?.name, folder?.name].filter(Boolean).join(' / ') || '—';
+  }, [listById, folderById, spaceById]);
+
+  // Rollup NÃO duplica dado nenhum de tarefa: filtra client-side o mesmo
+  // summaryRows já agregado no banco (get_dashboard_summary, SECURITY
+  // INVOKER — respeita RLS linha a linha). "Permissão herdada" (issue #189):
+  // se o usuário não acessa uma lista, ela simplesmente não aparece aqui,
+  // sem precisar de nenhuma regra nova.
+  const rollupFor = useCallback((listIds: string[]) => {
+    const idSet = new Set(listIds);
+    const rows = summaryRows.filter(r => r.listId && idSet.has(r.listId));
+    const total = rows.reduce((s, r) => s + r.count, 0);
+    const done = rows.filter(r => r.healthKey === 'done').reduce((s, r) => s + r.count, 0);
+    const late = rows.filter(r => r.healthKey === 'late').reduce((s, r) => s + r.count, 0);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    return { total, done, late, pct };
+  }, [summaryRows]);
+
+  const handleDelete = async (p: Portfolio) => {
+    if (!window.confirm(`Excluir o portfolio "${p.name}"? As listas em si não são afetadas, só a coleção some.`)) return;
+    const res = await taskRepo.deletePortfolio(p.id);
+    if (!res.ok) { toast.error('Erro ao excluir: ' + res.message); return; }
+    toast.success('Portfolio excluído.');
+    load();
+  };
+
+  const handleToggleArchive = async (p: Portfolio) => {
+    const res = await taskRepo.updatePortfolio(p.id, { archivedAt: p.archivedAt ? null : new Date().toISOString() });
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    toast.success(p.archivedAt ? 'Portfolio reativado.' : 'Portfolio arquivado.');
+    load();
+  };
+
+  const canEdit = (p: Portfolio) =>
+    p.createdBy === currentUser.id || p.ownerIds.includes(currentUser.id) || currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.Layout className="w-5 h-5 text-indigo-600" />Portfolios</h2>
+          <p className="text-xs text-gray-500 mt-0.5">Visão executiva consolidando várias Listas — inspirado no ClickUp Portfolios. Progresso vem direto do Dashboard, sem duplicar dado.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowArchived(v => !v)}
+            className={`px-3 py-1.5 text-xs rounded-lg border font-medium transition-colors ${showArchived ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+          >
+            {showArchived ? 'Mostrando arquivados' : 'Mostrar arquivados'}
+          </button>
+          <button
+            onClick={() => { setEditingPortfolio(null); setIsFormOpen(true); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium transition-colors"
+          >
+            <Icons.Plus className="w-4 h-4" />Novo Portfolio
+          </button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-24">
+          <div className="w-8 h-8 border-2 border-gray-200 border-t-indigo-500 rounded-full animate-spin" />
+        </div>
+      ) : portfolios.length === 0 ? (
+        <p className="text-sm text-gray-500 text-center py-24">
+          {showArchived ? 'Nenhum portfolio arquivado.' : 'Nenhum portfolio criado ainda. Clique em "Novo Portfolio" para agrupar suas Listas mais importantes.'}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {portfolios.map((p: Portfolio) => {
+            const r = rollupFor(p.listIds);
+            const isExpanded = expandedId === p.id;
+            const editable = canEdit(p);
+            return (
+              <div key={p.id} className="border rounded-xl bg-white overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-3 cursor-pointer" onClick={() => setExpandedId(isExpanded ? null : p.id)}>
+                  <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: p.color }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-gray-800 text-sm truncate">{p.name}</span>
+                      {p.archivedAt && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">Arquivado</span>}
+                      {p.access === 'private' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 font-medium">Privado</span>}
+                      {r.late > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-50 text-red-600 font-medium">🔴 {r.late} atrasada{r.late > 1 ? 's' : ''}</span>}
+                    </div>
+                    <span className="text-xs text-gray-400">{p.listIds.length} lista{p.listIds.length !== 1 ? 's' : ''}{p.dueDate ? ` · Prazo: ${new Date(p.dueDate + 'T00:00:00').toLocaleDateString('pt-BR')}` : ''}</span>
+                  </div>
+                  <div className="flex items-center gap-2 w-44 shrink-0">
+                    <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div className="h-full rounded-full transition-all" style={{ width: `${Math.max(r.pct, r.total > 0 ? 2 : 0)}%`, backgroundColor: p.color }} />
+                    </div>
+                    <span className="text-xs font-semibold text-gray-600 w-9 text-right">{r.pct}%</span>
+                  </div>
+                  {editable && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button onClick={(e) => e.stopPropagation()} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                          <Icons.Settings className="w-4 h-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => { setEditingPortfolio(p); setIsFormOpen(true); }}><Icons.Edit className="w-3.5 h-3.5 mr-2" />Editar</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleToggleArchive(p)}>{p.archivedAt ? 'Reativar' : 'Arquivar'}</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => handleDelete(p)} className="text-red-600"><Icons.Trash className="w-3.5 h-3.5 mr-2" />Excluir</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
+
+                {isExpanded && (
+                  <div className="border-t bg-gray-50/50 px-4 py-3">
+                    {p.description && <p className="text-xs text-gray-600 mb-3 whitespace-pre-wrap">{p.description}</p>}
+                    {p.ownerIds.length > 0 && (
+                      <div className="flex items-center gap-1.5 mb-3">
+                        <Icons.Users className="w-3.5 h-3.5 text-gray-400" />
+                        <span className="text-xs text-gray-500">{p.ownerIds.map((id: string) => users.find((u: any) => u.id === id)?.name || '—').join(', ')}</span>
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-1.5">
+                      {p.listIds.length === 0 && <p className="text-xs text-gray-400">Nenhuma lista neste portfolio ainda.</p>}
+                      {p.listIds.map((listId: string) => {
+                        const lr = rollupFor([listId]);
+                        const list: any = listById.get(listId);
+                        return (
+                          <button
+                            key={listId}
+                            onClick={() => onOpenList(listId)}
+                            className="flex items-center gap-2 bg-white border rounded-lg px-3 py-2 text-left hover:border-indigo-300 transition-colors"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm text-gray-700 truncate">{list?.name || 'Lista removida'}</p>
+                              <p className="text-[10px] text-gray-400 truncate">{listPath(listId)}</p>
+                            </div>
+                            <div className="w-28 h-1.5 bg-gray-100 rounded-full overflow-hidden shrink-0">
+                              <div className="h-full rounded-full" style={{ width: `${Math.max(lr.pct, lr.total > 0 ? 2 : 0)}%`, backgroundColor: lr.pct === 100 ? '#10b981' : lr.late > 0 ? '#ef4444' : '#3b82f6' }} />
+                            </div>
+                            <span className="text-xs font-semibold text-gray-600 w-16 text-right shrink-0">{lr.done}/{lr.total}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {isFormOpen && (
+        <PortfolioFormModal
+          portfolio={editingPortfolio}
+          users={users}
+          lists={lists}
+          folders={folders}
+          spaces={spaces}
+          currentUser={currentUser}
+          onClose={() => setIsFormOpen(false)}
+          onSaved={() => { setIsFormOpen(false); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function PortfolioFormModal({ portfolio, users, lists, folders, spaces, currentUser, onClose, onSaved }: any) {
+  const [name, setName] = useState(portfolio?.name ?? '');
+  const [description, setDescription] = useState(portfolio?.description ?? '');
+  const [color, setColor] = useState(portfolio?.color ?? GOAL_COLORS[0]);
+  const [dueDate, setDueDate] = useState(portfolio?.dueDate ?? '');
+  const [access, setAccess] = useState<'workspace' | 'private'>(portfolio?.access ?? 'workspace');
+  const [ownerIds, setOwnerIds] = useState<string[]>(portfolio?.ownerIds ?? []);
+  const [listIds, setListIds] = useState<string[]>(portfolio?.listIds ?? []);
+  const [listSearch, setListSearch] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const folderById = useMemo(() => new Map(folders.map((f: any) => [f.id, f])), [folders]);
+  const spaceById = useMemo(() => new Map(spaces.map((s: any) => [s.id, s])), [spaces]);
+  const pathFor = (list: any) => {
+    const folder: any = folderById.get(list.folderId);
+    const space: any = folder ? spaceById.get(folder.spaceId) : undefined;
+    return [space?.name, folder?.name].filter(Boolean).join(' / ');
+  };
+
+  const filteredLists = useMemo(() => {
+    const q = listSearch.trim().toLowerCase();
+    const base = q ? lists.filter((l: any) => l.name.toLowerCase().includes(q)) : lists;
+    return base.slice(0, 60);
+  }, [lists, listSearch]);
+
+  const toggleOwner = (id: string) => setOwnerIds((prev) => prev.includes(id) ? prev.filter((o) => o !== id) : [...prev, id]);
+  const toggleList = (id: string) => setListIds((prev) => prev.includes(id) ? prev.filter((l) => l !== id) : [...prev, id]);
+
+  const handleSave = async () => {
+    if (!name.trim()) { toast.error('Dê um nome pro portfolio.'); return; }
+    if (listIds.length === 0) { toast.error('Escolha pelo menos uma lista.'); return; }
+    setIsSaving(true);
+    if (portfolio) {
+      const res = await taskRepo.updatePortfolio(portfolio.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
+      if (res.ok) {
+        await taskRepo.updatePortfolioOwners(portfolio.id, ownerIds);
+        await taskRepo.updatePortfolioLists(portfolio.id, listIds);
+      }
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Portfolio atualizado.');
+    } else {
+      const res = await taskRepo.createPortfolio({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds, listIds });
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Portfolio criado.');
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">{portfolio ? 'Editar portfolio' : 'Novo portfolio'}</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Nome</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-200" placeholder="Ex: Campanhas de Marketing 2026" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Descrição (opcional)</label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-200 resize-none" />
+          </div>
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Prazo (opcional)</label>
+              <input type="date" value={dueDate ?? ''} onChange={(e) => setDueDate(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none" />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Acesso</label>
+              <select value={access} onChange={(e) => setAccess(e.target.value as 'workspace' | 'private')} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+                <option value="workspace">Workspace</option>
+                <option value="private">Privado</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Cor</label>
+            <div className="flex gap-2">
+              {GOAL_COLORS.map((c) => (
+                <button key={c} onClick={() => setColor(c)} className={`w-6 h-6 rounded-full ${color === c ? 'ring-2 ring-offset-2 ring-gray-400' : ''}`} style={{ backgroundColor: c }} />
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Dono(s) (opcional)</label>
+            <div className="flex flex-wrap gap-1.5 max-h-28 overflow-auto custom-scrollbar border rounded-lg p-2">
+              {users.map((u: any) => (
+                <button
+                  key={u.id}
+                  onClick={() => toggleOwner(u.id)}
+                  className={`text-xs px-2 py-1 rounded-full border font-medium transition-colors ${ownerIds.includes(u.id) ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                >
+                  {u.name}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Listas incluídas ({listIds.length})</label>
+            {listIds.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {listIds.map((id) => {
+                  const list = lists.find((l: any) => l.id === id);
+                  if (!list) return null;
+                  return (
+                    <span key={id} className="text-xs px-2 py-1 rounded-full bg-indigo-50 text-indigo-700 font-medium flex items-center gap-1">
+                      {list.name}
+                      <button onClick={() => toggleList(id)} className="hover:text-indigo-900"><X className="w-3 h-3" /></button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+            <input
+              value={listSearch}
+              onChange={(e) => setListSearch(e.target.value)}
+              placeholder="Buscar lista por nome..."
+              className="w-full text-sm border rounded-lg px-3 py-2 outline-none mb-1.5"
+            />
+            <div className="border rounded-lg max-h-40 overflow-y-auto custom-scrollbar">
+              {filteredLists.length === 0 && <p className="text-xs text-gray-400 text-center py-3">Nenhuma lista encontrada.</p>}
+              {filteredLists.map((l: any) => (
+                <button
+                  key={l.id}
+                  onClick={() => toggleList(l.id)}
+                  className="w-full text-left px-3 py-2 hover:bg-gray-50 border-b last:border-b-0 flex items-center justify-between gap-2"
+                >
+                  <span className="min-w-0">
+                    <span className="text-sm text-gray-700 truncate block">{l.name}</span>
+                    <span className="text-[10px] text-gray-400 truncate block">{pathFor(l)}</span>
+                  </span>
+                  {listIds.includes(l.id) && <Icons.Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium disabled:opacity-50">
             {isSaving ? 'Salvando...' : 'Salvar'}
           </button>
         </div>

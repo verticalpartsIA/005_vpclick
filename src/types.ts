@@ -513,6 +513,25 @@ export interface Goal {
   targets: GoalTarget[];
 }
 
+// ── Portfolios (issue #189) ─────────────────────────────────
+// Coleção nomeada de Lists com visão executiva agregada. Não duplica dados
+// de tarefa — números por lista vêm de get_dashboard_summary (RPC já usada
+// pelo Dashboard), filtrados pelas listas do portfolio.
+
+export interface Portfolio {
+  id: string;
+  name: string;
+  description?: string | null;
+  color: string;
+  dueDate?: string | null;
+  access: GoalAccess;
+  createdBy: string | null;
+  createdAt: string;
+  archivedAt?: string | null;
+  ownerIds: string[];
+  listIds: string[];
+}
+
 // ── Automations ───────────────────────────────────────────
 
 export type AutomationTriggerType =
