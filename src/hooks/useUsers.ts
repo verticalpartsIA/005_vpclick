@@ -12,6 +12,7 @@ interface ProfileRow {
   avatar: string | null;
   role: string;
   theme: string | null;
+  manager_id: string | null;
 }
 
 // Diretório de usuários do workspace (usado em menções "@", dropdowns de
@@ -47,6 +48,7 @@ export function useUsers(params: {
           avatar: d.avatar || `https://picsum.photos/seed/${d.id}/100`,
           role: d.role as UserRole,
           theme: d.theme ?? undefined,
+          managerId: d.manager_id,
         }));
       // Garante que o usuário logado esteja na lista mesmo sem perfil.
       if (currentUser.id !== 'loading' && !users.some(u => u.id === currentUser.id)) {
@@ -205,7 +207,21 @@ export function useUsers(params: {
     }
   };
 
-  const handleAdminCreateUser = async (user: Partial<User>, password?: string) => {
+  // Gráfico organizacional (issue "Equipes completo"): define o gerente direto
+  // de um usuário. Via RPC dedicada (não update direto em profiles) porque a
+  // policy de UPDATE de profiles só libera pro próprio usuário ou ADMIN — a
+  // RPC amplia isso pra GESTOR também, mas só pra esse campo, sem abrir edição
+  // de nome/email/role de terceiros.
+  const handleAdminUpdateManager = async (userId: string, managerId: string | null) => {
+    const { error } = await supabase.rpc('update_user_manager', { p_user_id: userId, p_manager_id: managerId });
+    if (error) {
+      console.error('Erro ao definir gerente:', error);
+      throw new Error(error.message);
+    }
+    setAdminUsers(prev => prev.map(u => u.id === userId ? { ...u, managerId } : u));
+  };
+
+  const handleAdminCreateUser = async (user: Partial<User>, password?: string, teamIds?: string[]) => {
     const { data, error } = await supabase.functions.invoke('admin-user-management', {
       body: {
         action: 'create',
@@ -238,6 +254,18 @@ export function useUsers(params: {
         console.error('Erro ao criar perfil do novo usuário:', profileError);
         toast.error('Usuário criado no Auth, mas houve erro ao criar o perfil: ' + profileError.message);
       }
+      // Convite direto pra Equipe(s) (issue "Equipes completo", igual ao
+      // "Adicionar como" do convite do ClickUp real) — best-effort: se falhar,
+      // o usuário já foi criado normalmente, só avisa que a Equipe ficou de fora.
+      if (teamIds && teamIds.length > 0 && !profileError) {
+        const { error: teamError } = await supabase
+          .from('team_members')
+          .insert(teamIds.map((teamId) => ({ team_id: teamId, user_id: newUser.id })));
+        if (teamError) {
+          console.error('Erro ao adicionar novo usuário às Equipes:', teamError);
+          toast.error('Usuário criado, mas não foi possível adicioná-lo às Equipes selecionadas: ' + teamError.message);
+        }
+      }
       setAdminUsers(prev => [newUser, ...prev]);
       setUserAccess(prev => ({ ...prev, [newUser.id]: { spaceIds: [], folderIds: [] } }));
       return newUser;
@@ -257,5 +285,6 @@ export function useUsers(params: {
     handleAdminUpdateUserAvatar,
     handleAdminUpdatePassword,
     handleAdminCreateUser,
+    handleAdminUpdateManager,
   };
 }

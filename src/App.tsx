@@ -149,7 +149,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -1653,6 +1653,7 @@ export default function App() {
     handleAdminUpdateUserAvatar,
     handleAdminUpdatePassword,
     handleAdminCreateUser,
+    handleAdminUpdateManager,
   } = useUsers({ session, currentUser, setCurrentUser, setUserAccess });
 
   // Listas acessíveis ao usuário (RLS já restringe `lists`): usadas para filtrar
@@ -4330,6 +4331,7 @@ export default function App() {
                 spaces={spaces}
                 folders={folders}
                 users={adminUsers}
+                teams={teams}
                 lastSignInMap={lastSignInMap}
                 access={userAccess}
                 onAdminUpdateRole={handleAdminUpdateRole}
@@ -4601,6 +4603,15 @@ export default function App() {
                 users={adminUsers}
                 tasks={tasks}
                 onOpenTask={setSelectedTaskId}
+              />
+            )}
+            {activeView === 'Teams' && (
+              <EquipesView
+                currentUser={currentUser}
+                users={adminUsers}
+                teams={teams}
+                setTeams={setTeams}
+                onUpdateManager={handleAdminUpdateManager}
               />
             )}
             {activeView === 'Doc' && activeDocId && (
@@ -5791,6 +5802,20 @@ function Sidebar({
       icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
       onSelect: () => { onNavigate('global', null, 'Quadros Brancos'); onViewChange('Whiteboards'); },
       isActive: activeView === 'Whiteboards',
+    },
+    {
+      // No ClickUp real "Equipes" tem ícone próprio e em destaque na barra
+      // lateral, com Central de Equipes (todas as equipes, todas as pessoas,
+      // gráfico organizacional) — testado ao vivo em app.clickup.com. O VP
+      // Click já tinha "Equipes" funcional só como modal no menu do avatar
+      // (atribuir/mencionar equipe em tarefas); isso vira também um destino
+      // de página própria, com o gráfico organizacional que faltava, mantido
+      // aqui em "Mais" por consistência com o resto do VP Click nesta fase.
+      key: 'teams',
+      label: 'Equipes',
+      icon: <Icons.Users className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Equipes'); onViewChange('Teams'); },
+      isActive: activeView === 'Teams',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -11247,6 +11272,288 @@ function WhiteboardCanvas({ whiteboard, onClose }: { whiteboard: WhiteboardDef; 
       <div className="flex-1 relative">
         <Tldraw onMount={handleMount} />
       </div>
+    </div>
+  );
+}
+
+const TEAM_COLORS_EQUIPES = ['#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4', '#f97316'];
+// Conta de serviço do rastro de atividade cross-sistema (ver TeamsModal.tsx):
+// mesma exclusão aplicada lá, pra não oferecer como opção nova de membro.
+const AI_AGENT_EMAIL_EQUIPES = 'agente.ia@vpsistema.com';
+
+/**
+ * "Equipes" completo (issue além do #191): o VP Click já tinha Equipes
+ * funcional só como modal no menu do avatar (ver TeamsModal.tsx) — vira
+ * também um destino de página própria na sidebar, igual ao ClickUp real, com
+ * a peça que faltava (organograma). Duas abas: Equipes (grupos de pessoas,
+ * mesma função do TeamsModal) e Organograma (quem reporta pra quem).
+ */
+function EquipesView({ currentUser, users, teams, setTeams, onUpdateManager }: any) {
+  const [tab, setTab] = useState<'teams' | 'orgchart'>('teams');
+  const canManage = currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.Users className="w-5 h-5 text-indigo-600" />Equipes</h2>
+        <p className="text-xs text-gray-500 mt-0.5">Agrupe pessoas pra atribuir tarefas e mencionar todo mundo de uma vez com @NomeDaEquipe. Veja também quem reporta pra quem no organograma.</p>
+      </div>
+      <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        <button onClick={() => setTab('teams')} className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${tab === 'teams' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>Equipes</button>
+        <button onClick={() => setTab('orgchart')} className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${tab === 'orgchart' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>Organograma</button>
+      </div>
+      {tab === 'teams' ? (
+        <EquipesTeamsTab currentUser={currentUser} users={users} teams={teams} setTeams={setTeams} canManage={canManage} />
+      ) : (
+        <OrgChartTab users={users} canManage={canManage} onUpdateManager={onUpdateManager} />
+      )}
+    </div>
+  );
+}
+
+function EquipesTeamsTab({ currentUser, users, teams, setTeams, canManage }: any) {
+  const [newTeamName, setNewTeamName] = useState('');
+  const [newTeamColor, setNewTeamColor] = useState(TEAM_COLORS_EQUIPES[0]);
+  const [isCreating, setIsCreating] = useState(false);
+  const [expandedTeamId, setExpandedTeamId] = useState<string | null>(null);
+  const [memberSearch, setMemberSearch] = useState('');
+  const [descDraft, setDescDraft] = useState<Record<string, string>>({});
+
+  const filteredUsers = useMemo(() => {
+    const q = memberSearch.toLowerCase().trim();
+    if (!q) return users;
+    return users.filter((u: any) => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+  }, [users, memberSearch]);
+
+  const handleCreateTeam = async () => {
+    const name = newTeamName.trim();
+    if (!name) return;
+    if (teams.some((t: Team) => t.name.toLowerCase() === name.toLowerCase())) {
+      toast.error('Já existe uma Equipe com esse nome.');
+      return;
+    }
+    setIsCreating(true);
+    try {
+      const { data, error } = await supabase.from('teams').insert({ name, color: newTeamColor, created_by: currentUser.id }).select().single();
+      if (error || !data) {
+        console.error('Erro ao criar Equipe:', error);
+        toast.error(`Não foi possível criar a Equipe${error?.message ? `: ${error.message}` : '.'}`);
+        return;
+      }
+      setTeams((prev: Team[]) => [...prev, { id: data.id, name: data.name, description: data.description || '', color: data.color, memberIds: [] }]);
+      setNewTeamName('');
+      setExpandedTeamId(data.id);
+      toast.success(`Equipe "${name}" criada. Adicione os membros.`);
+    } finally {
+      setIsCreating(false);
+    }
+  };
+
+  const handleDeleteTeam = async (team: Team) => {
+    if (!window.confirm(`Excluir a equipe "${team.name}"? Essa ação não pode ser desfeita.`)) return;
+    const { error } = await supabase.from('teams').delete().eq('id', team.id);
+    if (error) { toast.error('Não foi possível excluir a Equipe: ' + error.message); return; }
+    setTeams((prev: Team[]) => prev.filter((t) => t.id !== team.id));
+    toast.success(`Equipe "${team.name}" excluída.`);
+  };
+
+  const handleToggleMember = async (team: Team, userId: string) => {
+    const isMember = team.memberIds.includes(userId);
+    if (isMember) {
+      const { error } = await supabase.from('team_members').delete().eq('team_id', team.id).eq('user_id', userId);
+      if (error) { toast.error('Não foi possível remover o membro.'); return; }
+      setTeams((prev: Team[]) => prev.map((t) => t.id === team.id ? { ...t, memberIds: t.memberIds.filter((id) => id !== userId) } : t));
+    } else {
+      const { error } = await supabase.from('team_members').insert({ team_id: team.id, user_id: userId });
+      if (error) { toast.error('Não foi possível adicionar o membro.'); return; }
+      setTeams((prev: Team[]) => prev.map((t) => t.id === team.id ? { ...t, memberIds: [...t.memberIds, userId] } : t));
+    }
+  };
+
+  const handleSaveDescription = async (team: Team) => {
+    const description = (descDraft[team.id] ?? team.description).trim();
+    if (description === team.description) return;
+    const { error } = await supabase.from('teams').update({ description }).eq('id', team.id);
+    if (error) { toast.error('Não foi possível salvar a descrição: ' + error.message); return; }
+    setTeams((prev: Team[]) => prev.map((t) => t.id === team.id ? { ...t, description } : t));
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      {canManage && (
+        <div className="bg-gray-50 rounded-2xl p-4 border border-gray-100 flex items-center gap-3">
+          <input
+            type="text"
+            placeholder="Nome da nova Equipe (ex: Gestão Comercial)"
+            value={newTeamName}
+            onChange={(e) => setNewTeamName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleCreateTeam(); }}
+            className="flex-1 px-3 py-2 text-sm bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200"
+          />
+          <div className="flex items-center gap-1">
+            {TEAM_COLORS_EQUIPES.map((c) => (
+              <button key={c} onClick={() => setNewTeamColor(c)} className={`w-5 h-5 rounded-full transition-transform ${newTeamColor === c ? 'scale-125 ring-2 ring-offset-1 ring-gray-300' : 'hover:scale-110'}`} style={{ backgroundColor: c }} />
+            ))}
+          </div>
+          <button onClick={handleCreateTeam} disabled={!newTeamName.trim() || isCreating} className="bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-xl text-white text-sm font-bold transition-all disabled:opacity-50">
+            {isCreating ? 'Criando...' : 'Criar'}
+          </button>
+        </div>
+      )}
+
+      {teams.length === 0 && (
+        <p className="text-sm text-gray-400 text-center py-12">
+          Nenhuma Equipe criada ainda.{canManage ? ' Crie a primeira acima.' : ' Peça a um gestor ou administrador para criar.'}
+        </p>
+      )}
+
+      {teams.map((team: Team) => {
+        const isExpanded = expandedTeamId === team.id;
+        const members = users.filter((u: any) => team.memberIds.includes(u.id));
+        return (
+          <div key={team.id} className="border rounded-xl bg-white overflow-hidden">
+            <button onClick={() => { setExpandedTeamId(isExpanded ? null : team.id); setMemberSearch(''); }} className="w-full flex items-center gap-3 p-4 hover:bg-gray-50 transition-colors text-left">
+              <span className="w-8 h-8 rounded-full flex items-center justify-center text-white shrink-0" style={{ backgroundColor: team.color }}>
+                <Icons.Users className="w-4 h-4" />
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className="font-bold text-gray-800 text-sm">{team.name}</p>
+                <p className="text-xs text-gray-400">{members.length} {members.length === 1 ? 'membro' : 'membros'}</p>
+              </div>
+              <div className="flex -space-x-1.5 shrink-0">
+                {members.slice(0, 5).map((m: any) => (<img key={m.id} src={avatarThumb(m.avatar)} title={m.name} className="w-6 h-6 rounded-full border-2 border-white" alt="" />))}
+                {members.length > 5 && (<span className="w-6 h-6 rounded-full bg-gray-100 border-2 border-white text-[9px] font-bold text-gray-500 flex items-center justify-center">+{members.length - 5}</span>)}
+              </div>
+              <Icons.ChevronRight className={`w-4 h-4 text-gray-400 transition-transform shrink-0 ${isExpanded ? 'rotate-90' : ''}`} />
+            </button>
+
+            {isExpanded && (
+              <div className="border-t bg-gray-50/50 p-4 flex flex-col gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-gray-500 mb-1 block">Descrição / wiki da equipe</label>
+                  <textarea
+                    disabled={!canManage}
+                    value={descDraft[team.id] ?? team.description}
+                    onChange={(e) => setDescDraft((prev) => ({ ...prev, [team.id]: e.target.value }))}
+                    onBlur={() => handleSaveDescription(team)}
+                    rows={2}
+                    placeholder="Sobre o que essa equipe cuida..."
+                    className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-indigo-200 resize-none disabled:bg-gray-100 disabled:text-gray-500"
+                  />
+                </div>
+
+                {canManage && (
+                  <input
+                    type="text"
+                    placeholder="Buscar pessoa para adicionar/remover..."
+                    value={memberSearch}
+                    onChange={(e) => setMemberSearch(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-white border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200"
+                  />
+                )}
+                <div className="max-h-52 overflow-y-auto custom-scrollbar space-y-0.5">
+                  {(canManage ? filteredUsers.filter((u: any) => u.email !== AI_AGENT_EMAIL_EQUIPES || team.memberIds.includes(u.id)) : members).map((u: any) => {
+                    const isMember = team.memberIds.includes(u.id);
+                    return (
+                      <button key={u.id} disabled={!canManage} onClick={() => handleToggleMember(team, u.id)} className={`w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-left transition-colors ${canManage ? 'hover:bg-white' : 'cursor-default'}`}>
+                        <img src={avatarThumb(u.avatar)} className="w-6 h-6 rounded-full shrink-0" alt="" />
+                        <span className={`text-sm flex-1 truncate ${isMember ? 'font-semibold text-gray-800' : 'text-gray-500'}`}>{u.name}</span>
+                        {canManage && (<span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${isMember ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400'}`}>{isMember ? 'Membro' : 'Adicionar'}</span>)}
+                      </button>
+                    );
+                  })}
+                </div>
+                {canManage && (
+                  <div className="pt-2 border-t flex justify-end">
+                    <button onClick={() => handleDeleteTeam(team)} className="text-xs text-red-400 hover:text-red-600 font-semibold">Excluir Equipe</button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function OrgChartTab({ users, canManage, onUpdateManager }: any) {
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [savingId, setSavingId] = useState<string | null>(null);
+
+  const childrenByManager = useMemo(() => {
+    const map: Record<string, any[]> = {};
+    users.forEach((u: any) => {
+      const key = u.managerId && users.some((m: any) => m.id === u.managerId) ? u.managerId : '__root__';
+      if (!map[key]) map[key] = [];
+      map[key].push(u);
+    });
+    Object.values(map).forEach((arr) => arr.sort((a: any, b: any) => a.name.localeCompare(b.name, 'pt-BR')));
+    return map;
+  }, [users]);
+
+  const toggle = (id: string) => setExpandedIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+
+  const handleChangeManager = async (userId: string, managerId: string) => {
+    setSavingId(userId);
+    try {
+      await onUpdateManager(userId, managerId || null);
+      toast.success('Gerente atualizado.');
+    } catch (err: any) {
+      toast.error('Erro: ' + err.message);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  // Cap de profundidade só como rede de segurança contra um ciclo indireto
+  // (A->B->C->A) que a RPC update_user_manager não bloqueia — ver comentário
+  // na migration. Um workspace real nunca chega perto disso.
+  const renderNode = (u: any, depth: number): React.ReactNode => {
+    if (depth > 25) return null;
+    const children = childrenByManager[u.id] || [];
+    const isExpanded = depth === 0 || expandedIds.has(u.id);
+    return (
+      <div key={u.id} className="flex flex-col">
+        <div className="flex items-center gap-2 py-1.5" style={{ paddingLeft: depth * 24 }}>
+          {children.length > 0 ? (
+            <button onClick={() => toggle(u.id)} className="text-gray-400 hover:text-gray-700 shrink-0">
+              <Icons.ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+            </button>
+          ) : <span className="w-3.5 h-3.5 shrink-0" />}
+          <img src={avatarThumb(u.avatar)} className="w-7 h-7 rounded-full shrink-0" alt="" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-gray-800 truncate">{u.name}</p>
+            <p className="text-[11px] text-gray-400">{u.role}</p>
+          </div>
+          {children.length > 0 && <span className="text-[10px] text-gray-400 shrink-0">{children.length} direto{children.length !== 1 ? 's' : ''}</span>}
+          {canManage && (
+            <select
+              disabled={savingId === u.id}
+              value={u.managerId && users.some((m: any) => m.id === u.managerId) ? u.managerId : ''}
+              onChange={(e) => handleChangeManager(u.id, e.target.value)}
+              className="text-xs border rounded-lg px-2 py-1 outline-none max-w-[160px] shrink-0 disabled:opacity-50 bg-white"
+            >
+              <option value="">Sem gerente</option>
+              {users.filter((m: any) => m.id !== u.id).map((m: any) => (<option key={m.id} value={m.id}>{m.name}</option>))}
+            </select>
+          )}
+        </div>
+        {isExpanded && children.map((c: any) => renderNode(c, depth + 1))}
+      </div>
+    );
+  };
+
+  const roots = childrenByManager['__root__'] || [];
+
+  return (
+    <div className="border rounded-xl bg-white p-4">
+      <p className="text-xs text-gray-500 mb-3">Quem reporta pra quem no workspace.{canManage ? ' Use o seletor pra definir o gerente direto de cada pessoa.' : ''}</p>
+      {roots.length === 0 ? (
+        <p className="text-sm text-gray-400 text-center py-8">Nenhum usuário encontrado.</p>
+      ) : (
+        <div className="flex flex-col">{roots.map((u: any) => renderNode(u, 0))}</div>
+      )}
     </div>
   );
 }

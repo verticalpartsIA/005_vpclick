@@ -100,6 +100,8 @@ export interface User {
   role: UserRole;
   email: string;
   theme?: string;
+  // Gerente direto (gráfico organizacional, issue "Equipes completo") — null/undefined = sem gerente (raiz do organograma).
+  managerId?: string | null;
 }
 
 export interface ExtensionLog {

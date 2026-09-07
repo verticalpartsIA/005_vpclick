@@ -14,7 +14,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 
-import { Folder, Space, User, UserRole } from "@/types";
+import { Folder, Space, Team, User, UserRole } from "@/types";
 import { supabase } from "@/lib/supabase";
 import { avatarThumb } from "@/lib/avatarUrl";
 import AdminPasswordModal from "@/components/AdminPasswordModal";
@@ -34,12 +34,13 @@ type AdminPanelProps = {
   spaces: Space[];
   folders: Folder[];
   users: User[];
+  teams: Team[];
   lastSignInMap: Record<string, string | null>;
   access: UserAccess;
   onAdminUpdateRole: (userId: string, role: UserRole) => Promise<void>;
   onAdminUpdateAccess: (userId: string, spaceIds: string[], folderIds: string[]) => Promise<void>;
   onAdminDeleteUser: (userId: string) => Promise<void>;
-  onAdminCreateUser: (user: Partial<User>, password?: string) => Promise<User>;
+  onAdminCreateUser: (user: Partial<User>, password?: string, teamIds?: string[]) => Promise<User>;
   onAdminUpdateAvatar: (userId: string, avatarUrl: string) => Promise<void>;
   onAdminUpdatePassword: (userId: string, newPassword: string) => Promise<void>;
   onBack: () => void;
@@ -100,6 +101,7 @@ export default function AdminPanel({
   spaces,
   folders,
   users,
+  teams,
   lastSignInMap,
   access,
   onAdminUpdateRole,
@@ -120,6 +122,9 @@ export default function AdminPanel({
   const [tempPassword, setTempPassword] = useState(() => generateTempPassword());
   const [formError, setFormError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  // "Adicionar como" (issue "Equipes completo", inspirado no convite do ClickUp
+  // real): já colocar o novo usuário direto numa ou mais Equipes na criação.
+  const [selectedTeamIds, setSelectedTeamIds] = useState<string[]>([]);
 
   // ── Lista de usuários ──────────────────────────────────────
   const [search, setSearch] = useState("");
@@ -181,10 +186,12 @@ export default function AdminPanel({
     try {
       await onAdminCreateUser(
         { name: parsed.data.name, email: parsed.data.email, avatar: parsed.data.avatar, role: parsed.data.role },
-        tempPassword
+        tempPassword,
+        selectedTeamIds
       );
       setTempPassword(generateTempPassword());
       setForm({ name: "", email: "", avatar: "https://picsum.photos/seed/new-user/100", role: UserRole.COLABORADOR });
+      setSelectedTeamIds([]);
     } catch (err: any) {
       setFormError(err.message || "Erro ao criar usuário.");
     } finally {
@@ -334,6 +341,28 @@ export default function AdminPanel({
                 <option value={UserRole.COLABORADOR}>COLABORADOR</option>
               </select>
             </div>
+
+            {teams.length > 0 && (
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-gray-600">Adicionar como membro de (opcional)</label>
+                <div className="flex flex-wrap gap-1.5 max-h-24 overflow-auto custom-scrollbar rounded-lg border bg-gray-50 p-2">
+                  {teams.map((t) => {
+                    const selected = selectedTeamIds.includes(t.id);
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => setSelectedTeamIds((prev) => selected ? prev.filter((id) => id !== t.id) : [...prev, t.id])}
+                        className={`text-xs px-2 py-1 rounded-full border font-medium transition-colors ${selected ? 'text-white border-transparent' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-100'}`}
+                        style={selected ? { backgroundColor: t.color } : undefined}
+                      >
+                        {t.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Senha temporária */}
             <div className="rounded-lg border border-blue-100 bg-blue-50 p-3">
