@@ -1,12 +1,18 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useLocation, useNavigationType, useSearchParams } from 'react-router-dom';
+// Issue #191 (Whiteboards) — engine gráfica é a tldraw (mesma que o ClickUp
+// real usa por baixo dos panos, ver README do pacote), não construída do
+// zero.
+import { Tldraw, Editor as TldrawEditor, getSnapshot as getTldrawSnapshot, loadSnapshot as loadTldrawSnapshot } from 'tldraw';
+import 'tldraw/tldraw.css';
 import { MoreHorizontal, FileText, ListPlus, Link as LinkIcon, Image as ImageIcon, Paperclip, AlertTriangle as AlertTriangleIcon, Tag, Copy, ArrowUpDown, Search, Filter, RotateCcw, Check, X, Edit3, CalendarDays, UserCircle, Flag, MessageSquare, CheckSquare, GripVertical, Repeat, Pause, Play, Archive as ArchiveIcon } from "lucide-react";
 import {
   User, Task, Workspace, Space, Folder, List, Project,
   UserRole, StatusType, StatusOption, StatusGroup, TaskPriority, ExtensionLog, Comment, ChecklistItem, Attachment,
   CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification, DuplicateTaskOptions,
   TaskRecurrenceRule, RecurrenceFrequencyType, RecurrenceWeekendShift, RecurrenceEndMode, RecurrenceOverlapPolicy, RecurrenceMisfirePolicy, RecurrenceInheritOptions,
-  Goal, GoalTarget, GoalTargetType, Portfolio, FormDef, FormQuestion, FormQuestionType, FormMapsTo, FormSubmission
+  Goal, GoalTarget, GoalTargetType, Portfolio, FormDef, FormQuestion, FormQuestionType, FormMapsTo, FormSubmission,
+  WhiteboardDef, WhiteboardAccess
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -143,7 +149,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -4589,6 +4595,14 @@ export default function App() {
                 onOpenTask={setSelectedTaskId}
               />
             )}
+            {activeView === 'Whiteboards' && (
+              <WhiteboardsView
+                currentUser={currentUser}
+                users={adminUsers}
+                tasks={tasks}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Doc' && activeDocId && (
               <DocView
                 doc={docs.find(d => d.id === activeDocId)!}
@@ -5766,6 +5780,17 @@ function Sidebar({
       icon: <Icons.FileText className="w-3.5 h-3.5 shrink-0" />,
       onSelect: () => { onNavigate('global', null, 'Formulários'); onViewChange('Forms'); },
       isActive: activeView === 'Forms',
+    },
+    {
+      // No ClickUp real "Quadros brancos" fica direto no ícone da barra
+      // lateral (mais em destaque que Metas/Forms, que ficam em "Mais") —
+      // testado ao vivo em app.clickup.com, issue #191. Mantido aqui em
+      // "Mais" por consistência com o resto do VP Click nesta fase.
+      key: 'whiteboards',
+      label: 'Quadros Brancos',
+      icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Quadros Brancos'); onViewChange('Whiteboards'); },
+      isActive: activeView === 'Whiteboards',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -9478,7 +9503,7 @@ function GoalsView({ users, currentUser, tasks, lists, statusGroups, onOpenTask 
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.Target className="w-5 h-5 text-purple-600" />Metas</h2>
-          <p className="text-xs text-gray-500 mt-0.5">Objetivos de alto nível divididos em targets mensuráveis — inspirado no ClickUp Goals.</p>
+          <p className="text-xs text-gray-500 mt-0.5">Crie uma meta, divida em targets mensuráveis (número, moeda, verdadeiro/falso ou tarefa) e acompanhe o progresso conforme os targets avançam.</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -9951,7 +9976,7 @@ function PortfoliosView({ currentUser, users, lists, folders, spaces, onOpenList
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.Layout className="w-5 h-5 text-indigo-600" />Portfolios</h2>
-          <p className="text-xs text-gray-500 mt-0.5">Visão executiva consolidando várias Listas — inspirado no ClickUp Portfolios. Progresso vem direto do Dashboard, sem duplicar dado.</p>
+          <p className="text-xs text-gray-500 mt-0.5">Crie um portfolio, escolha as Listas que quer acompanhar juntas e veja o progresso agregado de cada uma, direto do Dashboard.</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -10306,7 +10331,7 @@ function FormsView({ currentUser, users, lists, folders, spaces, customFields, s
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.FileText className="w-5 h-5 text-teal-600" />Formulários</h2>
-          <p className="text-xs text-gray-500 mt-0.5">Cada envio cria uma tarefa direto na lista de destino — inspirado no ClickUp Forms. Formulário interno (usuário logado); versão pública é um próximo incremento.</p>
+          <p className="text-xs text-gray-500 mt-0.5">Crie um formulário, adicione perguntas mapeadas pros campos da tarefa e cada envio já cria uma tarefa nova direto na lista de destino. Formulário interno (usuário logado); versão pública é um próximo incremento.</p>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -10850,6 +10875,377 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
             {isSubmitting ? 'Enviando...' : (form.submitLabel || 'Enviar')}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function WhiteboardsView({ currentUser, users, tasks, onOpenTask }: any) {
+  const [whiteboards, setWhiteboards] = useState<WhiteboardDef[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingWhiteboard, setEditingWhiteboard] = useState<WhiteboardDef | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [taskIdsByWhiteboard, setTaskIdsByWhiteboard] = useState<Record<string, string[]>>({});
+  const [showArchived, setShowArchived] = useState(false);
+  const [openWhiteboard, setOpenWhiteboard] = useState<WhiteboardDef | null>(null);
+  const [taskSearch, setTaskSearch] = useState('');
+  const [taskResults, setTaskResults] = useState<{ id: string; title: string }[]>([]);
+  const [linkingFor, setLinkingFor] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try { setWhiteboards(await taskRepo.fetchWhiteboards(showArchived)); }
+    catch (err) { console.error('WhiteboardsView: erro ao carregar', err); toast.error('Não foi possível carregar os Quadros Brancos.'); }
+    finally { setIsLoading(false); }
+  }, [showArchived]);
+  useEffect(() => { load(); }, [load]);
+
+  const loadTaskIds = async (whiteboardId: string) => {
+    try { const ids = await taskRepo.fetchWhiteboardTaskIds(whiteboardId); setTaskIdsByWhiteboard((prev) => ({ ...prev, [whiteboardId]: ids })); }
+    catch (err) { console.error('WhiteboardsView: erro ao carregar tarefas vinculadas', err); }
+  };
+
+  const toggleExpand = (w: WhiteboardDef) => {
+    const next = expandedId === w.id ? null : w.id;
+    setExpandedId(next);
+    setLinkingFor(null);
+    if (next) loadTaskIds(w.id);
+  };
+
+  const canEdit = (w: WhiteboardDef) => w.createdBy === currentUser.id || w.ownerIds.includes(currentUser.id) || currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR;
+
+  const handleDelete = async (w: WhiteboardDef) => {
+    if (!window.confirm(`Excluir o quadro "${w.name}"? Essa ação não pode ser desfeita.`)) return;
+    const res = await taskRepo.deleteWhiteboard(w.id);
+    if (!res.ok) { toast.error('Erro ao excluir: ' + res.message); return; }
+    toast.success('Quadro excluído.');
+    load();
+  };
+
+  const handleToggleArchive = async (w: WhiteboardDef) => {
+    const res = await taskRepo.updateWhiteboard(w.id, { archivedAt: w.archivedAt ? null : new Date().toISOString() });
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    toast.success(w.archivedAt ? 'Quadro reativado.' : 'Quadro arquivado.');
+    load();
+  };
+
+  useEffect(() => {
+    if (!linkingFor || taskSearch.trim().length < 2) { setTaskResults([]); return; }
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const rows = await taskRepo.searchTaskRowsByTitle(taskSearch.trim(), 15);
+      if (!cancelled) setTaskResults(rows.map((r: any) => ({ id: r.id, title: r.title })));
+    }, 300);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [taskSearch, linkingFor]);
+
+  const handleLinkTask = async (whiteboardId: string, taskId: string) => {
+    const res = await taskRepo.linkWhiteboardTask(whiteboardId, taskId);
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    setTaskSearch(''); setTaskResults([]); setLinkingFor(null);
+    loadTaskIds(whiteboardId);
+  };
+
+  const handleUnlinkTask = async (whiteboardId: string, taskId: string) => {
+    const res = await taskRepo.unlinkWhiteboardTask(whiteboardId, taskId);
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    loadTaskIds(whiteboardId);
+  };
+
+  if (openWhiteboard) {
+    return (
+      <WhiteboardCanvas
+        whiteboard={openWhiteboard}
+        onClose={() => { setOpenWhiteboard(null); load(); }}
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.Layout className="w-5 h-5 text-sky-600" />Quadros Brancos</h2>
+          <p className="text-xs text-gray-500 mt-0.5">Crie um quadro, desenhe livremente (formas, notas, conectores) e vincule tarefas pra conectar o brainstorm ao trabalho real. Salva automaticamente enquanto você edita.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowArchived((v) => !v)}
+            className={`px-3 py-1.5 text-xs rounded-lg border font-medium transition-colors ${showArchived ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+          >
+            {showArchived ? 'Mostrando arquivados' : 'Mostrar arquivados'}
+          </button>
+          <button
+            onClick={() => { setEditingWhiteboard(null); setIsFormOpen(true); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-sky-600 hover:bg-sky-700 text-white font-medium transition-colors"
+          >
+            <Icons.Plus className="w-4 h-4" />Novo Quadro
+          </button>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-24">
+          <div className="w-8 h-8 border-2 border-gray-200 border-t-sky-500 rounded-full animate-spin" />
+        </div>
+      ) : whiteboards.length === 0 ? (
+        <p className="text-sm text-gray-500 text-center py-24">
+          {showArchived ? 'Nenhum quadro arquivado.' : 'Nenhum quadro criado ainda. Clique em "Novo Quadro" pra começar.'}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {whiteboards.map((w: WhiteboardDef) => {
+            const isExpanded = expandedId === w.id;
+            const editable = canEdit(w);
+            const linkedIds = taskIdsByWhiteboard[w.id] || [];
+            return (
+              <div key={w.id} className="border rounded-xl bg-white overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-3 cursor-pointer" onClick={() => toggleExpand(w)}>
+                  <Icons.Layout className="w-4 h-4 text-sky-500 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-gray-800 text-sm truncate">{w.name}</span>
+                      {w.archivedAt && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">Arquivado</span>}
+                      {w.access === 'private' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 font-medium">Privado</span>}
+                    </div>
+                    <span className="text-xs text-gray-400">{w.linkedTaskCount ?? 0} tarefa{(w.linkedTaskCount ?? 0) !== 1 ? 's' : ''} vinculada{(w.linkedTaskCount ?? 0) !== 1 ? 's' : ''} · atualizado {new Date(w.updatedAt).toLocaleDateString('pt-BR')}</span>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setOpenWhiteboard(w); }}
+                    className="px-3 py-1.5 text-xs rounded-lg bg-sky-50 text-sky-700 hover:bg-sky-100 font-medium shrink-0"
+                  >
+                    Abrir quadro
+                  </button>
+                  {editable && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button onClick={(e) => e.stopPropagation()} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                          <Icons.Settings className="w-4 h-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => { setEditingWhiteboard(w); setIsFormOpen(true); }}><Icons.Edit className="w-3.5 h-3.5 mr-2" />Editar</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleToggleArchive(w)}>{w.archivedAt ? 'Reativar' : 'Arquivar'}</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => handleDelete(w)} className="text-red-600"><Icons.Trash className="w-3.5 h-3.5 mr-2" />Excluir</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
+
+                {isExpanded && (
+                  <div className="border-t bg-gray-50/50 px-4 py-3 flex flex-col gap-3">
+                    {w.description && <p className="text-xs text-gray-600 whitespace-pre-wrap">{w.description}</p>}
+                    {w.ownerIds.length > 0 && (
+                      <div className="flex items-center gap-1.5">
+                        <Icons.Users className="w-3.5 h-3.5 text-gray-400" />
+                        <span className="text-xs text-gray-500">{w.ownerIds.map((id: string) => users.find((u: any) => u.id === id)?.name || '—').join(', ')}</span>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 mb-1.5">Tarefas vinculadas</p>
+                      <div className="flex flex-col gap-1.5">
+                        {linkedIds.length === 0 && <p className="text-xs text-gray-400">Nenhuma tarefa vinculada ainda.</p>}
+                        {linkedIds.map((taskId: string) => {
+                          const t = tasks.find((tk: Task) => tk.id === taskId);
+                          return (
+                            <div key={taskId} className="flex items-center gap-2 bg-white border rounded-lg px-3 py-1.5">
+                              <button onClick={() => onOpenTask(taskId)} className="flex-1 text-left text-sm text-sky-700 hover:underline truncate">{t?.title || 'Tarefa removida'}</button>
+                              {editable && (
+                                <button onClick={() => handleUnlinkTask(w.id, taskId)} className="text-gray-400 hover:text-red-600 shrink-0"><X className="w-3.5 h-3.5" /></button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {editable && (
+                        linkingFor === w.id ? (
+                          <div className="mt-2">
+                            <input
+                              autoFocus
+                              value={taskSearch}
+                              onChange={(e) => setTaskSearch(e.target.value)}
+                              placeholder="Buscar tarefa por título..."
+                              className="w-full text-sm border rounded-lg px-3 py-1.5 outline-none"
+                            />
+                            {taskResults.length > 0 && (
+                              <div className="mt-1 border rounded-lg overflow-hidden max-h-40 overflow-y-auto custom-scrollbar bg-white">
+                                {taskResults.filter((t) => !linkedIds.includes(t.id)).map((t) => (
+                                  <button key={t.id} onClick={() => handleLinkTask(w.id, t.id)} className="w-full text-left text-sm px-3 py-2 hover:bg-gray-50 border-b last:border-b-0 truncate">
+                                    {t.title}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            <button onClick={() => { setLinkingFor(null); setTaskSearch(''); setTaskResults([]); }} className="mt-1 text-xs text-gray-400 hover:text-gray-600">Cancelar</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setLinkingFor(w.id)} className="mt-2 flex items-center gap-1 text-xs text-sky-600 hover:text-sky-800 font-medium">
+                            <Icons.Plus className="w-3.5 h-3.5" />Vincular tarefa
+                          </button>
+                        )
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {isFormOpen && (
+        <WhiteboardFormModal
+          whiteboard={editingWhiteboard}
+          users={users}
+          currentUser={currentUser}
+          onClose={() => setIsFormOpen(false)}
+          onSaved={() => { setIsFormOpen(false); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function WhiteboardFormModal({ whiteboard, users, currentUser, onClose, onSaved }: any) {
+  const [name, setName] = useState(whiteboard?.name ?? '');
+  const [description, setDescription] = useState(whiteboard?.description ?? '');
+  const [access, setAccess] = useState<WhiteboardAccess>(whiteboard?.access ?? 'workspace');
+  const [ownerIds, setOwnerIds] = useState<string[]>(whiteboard?.ownerIds ?? []);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const toggleOwner = (id: string) => setOwnerIds((prev) => (prev.includes(id) ? prev.filter((o) => o !== id) : [...prev, id]));
+
+  const handleSave = async () => {
+    if (!name.trim()) { toast.error('Dê um nome pro quadro.'); return; }
+    setIsSaving(true);
+    if (whiteboard) {
+      const res = await taskRepo.updateWhiteboard(whiteboard.id, { name: name.trim(), description: description.trim() || null, access });
+      if (res.ok) await taskRepo.updateWhiteboardOwners(whiteboard.id, ownerIds);
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Quadro atualizado.');
+    } else {
+      const res = await taskRepo.createWhiteboard({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Quadro criado.');
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">{whiteboard ? 'Editar quadro' : 'Novo quadro branco'}</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Nome</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-sky-200" placeholder="Ex: Brainstorm Campanha Q4" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Descrição (opcional)</label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-sky-200 resize-none" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Acesso</label>
+            <select value={access} onChange={(e) => setAccess(e.target.value as WhiteboardAccess)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+              <option value="workspace">Workspace</option>
+              <option value="private">Privado</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Dono(s) (opcional)</label>
+            <div className="flex flex-wrap gap-1.5 max-h-28 overflow-auto custom-scrollbar border rounded-lg p-2">
+              {users.map((u: any) => (
+                <button
+                  key={u.id}
+                  onClick={() => toggleOwner(u.id)}
+                  className={`text-xs px-2 py-1 rounded-full border font-medium transition-colors ${ownerIds.includes(u.id) ? 'bg-sky-600 text-white border-sky-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                >
+                  {u.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50">
+            {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WhiteboardCanvas({ whiteboard, onClose }: { whiteboard: WhiteboardDef; onClose: () => void }) {
+  const editorRef = useRef<TldrawEditor | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [isLoadingDoc, setIsLoadingDoc] = useState(true);
+  const [initialDoc, setInitialDoc] = useState<any>(null);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+
+  useEffect(() => {
+    let cancelled = false;
+    taskRepo.fetchWhiteboardDocument(whiteboard.id)
+      .then((doc) => { if (!cancelled) { setInitialDoc(doc); setIsLoadingDoc(false); } })
+      .catch((err) => { console.error('WhiteboardCanvas: erro ao carregar', err); if (!cancelled) setIsLoadingDoc(false); });
+    return () => { cancelled = true; };
+  }, [whiteboard.id]);
+
+  const scheduleSave = useCallback(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    setSaveState('saving');
+    saveTimerRef.current = setTimeout(async () => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      const { document } = getTldrawSnapshot(editor.store);
+      const res = await taskRepo.saveWhiteboardDocument(whiteboard.id, document);
+      setSaveState(res.ok ? 'saved' : 'idle');
+      if (!res.ok) toast.error('Erro ao salvar o quadro: ' + res.message);
+    }, 1500);
+  }, [whiteboard.id]);
+
+  const handleMount = useCallback((editor: TldrawEditor) => {
+    editorRef.current = editor;
+    if (initialDoc) {
+      try { loadTldrawSnapshot(editor.store, { document: initialDoc }); }
+      catch (err) { console.error('WhiteboardCanvas: erro ao aplicar snapshot salvo', err); }
+    }
+    const unsubscribe = editor.store.listen(() => { scheduleSave(); }, { source: 'user', scope: 'document' });
+    return () => {
+      unsubscribe();
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [initialDoc, scheduleSave]);
+
+  if (isLoadingDoc) {
+    return (
+      <div className="fixed inset-0 z-[300] bg-white flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-gray-200 border-t-sky-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-[300] bg-white flex flex-col">
+      <div className="flex items-center justify-between px-4 py-2 border-b shrink-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 shrink-0" title="Voltar aos Quadros Brancos">
+            <Icons.ChevronRight className="w-4 h-4 rotate-180" />
+          </button>
+          <span className="font-semibold text-sm text-gray-800 truncate">{whiteboard.name}</span>
+        </div>
+        <span className="text-xs text-gray-400 shrink-0">{saveState === 'saving' ? 'Salvando...' : saveState === 'saved' ? 'Salvo' : ''}</span>
+      </div>
+      <div className="flex-1 relative">
+        <Tldraw onMount={handleMount} />
       </div>
     </div>
   );

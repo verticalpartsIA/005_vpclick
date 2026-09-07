@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WorkloadBucket } from '../types';
+import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WhiteboardAccess, WhiteboardDef, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -2110,4 +2110,118 @@ export async function submitForm(input: {
   if (subError) return { ok: false, message: 'Tarefa criada, mas falha ao registrar a resposta: ' + subError.message };
 
   return { ok: true, taskId };
+}
+
+// ── Whiteboards (issue #191) ─────────────────────────────────────────────────
+
+function mapWhiteboardRow(r: any): WhiteboardDef {
+  return {
+    id: r.id,
+    name: r.name,
+    description: r.description,
+    access: r.access,
+    createdBy: r.created_by,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    archivedAt: r.archived_at,
+    ownerIds: (r.whiteboard_owners || []).map((o: any) => o.user_id),
+    linkedTaskCount: r.whiteboard_tasks?.[0]?.count ?? 0,
+  };
+}
+
+// Lista SEM o snapshot do canvas (pode ser grande) — só metadados pro Hub.
+export async function fetchWhiteboards(includeArchived = false): Promise<WhiteboardDef[]> {
+  let q = supabase
+    .from('whiteboards')
+    .select('id, name, description, access, created_by, created_at, updated_at, archived_at, whiteboard_owners(user_id), whiteboard_tasks(count)')
+    .order('updated_at', { ascending: false });
+  if (!includeArchived) q = q.is('archived_at', null);
+  const { data, error } = await q;
+  if (error) { console.error('taskRepo.fetchWhiteboards:', error); throw error; }
+  return (data ?? []).map(mapWhiteboardRow);
+}
+
+export async function createWhiteboard(input: {
+  name: string; description?: string | null; access: WhiteboardAccess; createdBy: string; ownerIds: string[];
+}): Promise<{ ok: true; whiteboard: WhiteboardDef } | { ok: false; message: string }> {
+  const { data, error } = await supabase
+    .from('whiteboards')
+    .insert({ name: input.name, description: input.description ?? null, access: input.access, created_by: input.createdBy })
+    .select('id, name, description, access, created_by, created_at, updated_at, archived_at')
+    .single();
+  if (error || !data) return { ok: false, message: error?.message ?? 'Erro ao criar quadro' };
+
+  const ownerIds = Array.from(new Set(input.ownerIds));
+  if (ownerIds.length > 0) {
+    const { error: ownersError } = await supabase
+      .from('whiteboard_owners')
+      .insert(ownerIds.map((userId) => ({ whiteboard_id: data.id, user_id: userId })));
+    if (ownersError) return { ok: false, message: ownersError.message };
+  }
+
+  return { ok: true, whiteboard: mapWhiteboardRow({ ...data, whiteboard_owners: ownerIds.map((user_id) => ({ user_id })), whiteboard_tasks: [{ count: 0 }] }) };
+}
+
+export async function updateWhiteboard(whiteboardId: string, updates: {
+  name?: string; description?: string | null; access?: WhiteboardAccess; archivedAt?: string | null;
+}): Promise<{ ok: true } | { ok: false; message: string }> {
+  const payload: Record<string, any> = { updated_at: new Date().toISOString() };
+  if (updates.name !== undefined) payload.name = updates.name;
+  if (updates.description !== undefined) payload.description = updates.description;
+  if (updates.access !== undefined) payload.access = updates.access;
+  if (updates.archivedAt !== undefined) payload.archived_at = updates.archivedAt;
+  const { error } = await supabase.from('whiteboards').update(payload).eq('id', whiteboardId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function updateWhiteboardOwners(whiteboardId: string, ownerIds: string[]): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error: delError } = await supabase.from('whiteboard_owners').delete().eq('whiteboard_id', whiteboardId);
+  if (delError) return { ok: false, message: delError.message };
+  const uniqueIds = Array.from(new Set(ownerIds));
+  if (uniqueIds.length === 0) return { ok: true };
+  const { error: insError } = await supabase
+    .from('whiteboard_owners')
+    .insert(uniqueIds.map((userId) => ({ whiteboard_id: whiteboardId, user_id: userId })));
+  if (insError) return { ok: false, message: insError.message };
+  return { ok: true };
+}
+
+export async function deleteWhiteboard(whiteboardId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('whiteboards').delete().eq('id', whiteboardId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+// Snapshot do canvas, buscado só na hora de abrir o quadro (não na listagem).
+export async function fetchWhiteboardDocument(whiteboardId: string): Promise<any | null> {
+  const { data, error } = await supabase.from('whiteboards').select('document').eq('id', whiteboardId).maybeSingle();
+  if (error) { console.error('taskRepo.fetchWhiteboardDocument:', error); throw error; }
+  return data?.document ?? null;
+}
+
+// Autosave: só grava o snapshot (não mexe em nome/acesso/etc.), qualquer um
+// com acesso ao quadro pode salvar (é o ponto central de colaborar nele).
+export async function saveWhiteboardDocument(whiteboardId: string, document: any): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('whiteboards').update({ document, updated_at: new Date().toISOString() }).eq('id', whiteboardId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function fetchWhiteboardTaskIds(whiteboardId: string): Promise<string[]> {
+  const { data, error } = await supabase.from('whiteboard_tasks').select('task_id').eq('whiteboard_id', whiteboardId);
+  if (error) { console.error('taskRepo.fetchWhiteboardTaskIds:', error); throw error; }
+  return (data ?? []).map((r: any) => r.task_id);
+}
+
+export async function linkWhiteboardTask(whiteboardId: string, taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('whiteboard_tasks').insert({ whiteboard_id: whiteboardId, task_id: taskId });
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function unlinkWhiteboardTask(whiteboardId: string, taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('whiteboard_tasks').delete().eq('whiteboard_id', whiteboardId).eq('task_id', taskId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
 }

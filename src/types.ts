@@ -585,6 +585,28 @@ export interface FormSubmission {
   createdAt: string;
 }
 
+// ── Whiteboards (issue #191) ─────────────────────────────────
+// Canvas colaborativo (formas, conectores, sticky notes) via tldraw —
+// mesma engine usada pelo próprio ClickUp Whiteboards (ver README do
+// pacote). `document` guarda o snapshot do canvas (autosave); sem
+// colaboração em tempo real nesta fase (precisaria de infra de sync que
+// este projeto não tem).
+
+export type WhiteboardAccess = 'workspace' | 'private';
+
+export interface WhiteboardDef {
+  id: string;
+  name: string;
+  description?: string | null;
+  access: WhiteboardAccess;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string | null;
+  ownerIds: string[];
+  linkedTaskCount?: number;
+}
+
 // ── Automations ───────────────────────────────────────────
 
 export type AutomationTriggerType =
