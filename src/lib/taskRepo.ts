@@ -844,24 +844,61 @@ export async function hydrateTaskRows(rows: TaskRow[]): Promise<Task[]> {
   } as Task));
 }
 
+// Uma sub-busca de fetchTaskDetails NUNCA rejeita: erro de rede/RLS vira log +
+// `[]`, e `failed: true` avisa o chamador. Antes, um `Promise.all` nu aqui
+// fazia QUALQUER uma das 6 falhar (rede instável, mesma causa da renovação de
+// token que trava a fila do Supabase — ver connectionStatus.ts) derrubar a
+// busca INTEIRA sem erro nenhum na tela: a tarefa abria com título/status
+// (já veio da lista) mas comentários/checklist/anexos ficavam vazios pra
+// sempre, sem toast, sem retry — só fechar e reabrir (ou F5) tentava de novo.
+// Mesmo padrão de resiliência que fetchSubEntityInChunks já usa pra listagem
+// em lote, só que aqui é uma tarefa só (sem chunking).
+async function fetchTaskSubEntity<T>(
+  build: () => PromiseLike<PostgrestResult<T>>,
+  label: string,
+): Promise<{ data: T[]; failed: boolean }> {
+  try {
+    const { data, error } = await build();
+    if (error) {
+      console.error(`taskRepo.fetchTaskDetails: erro ao carregar ${label}:`, error);
+      return { data: [], failed: true };
+    }
+    return { data: (data as T[] | null) ?? [], failed: false };
+  } catch (err) {
+    console.error(`taskRepo.fetchTaskDetails: erro ao carregar ${label}:`, err);
+    return { data: [], failed: true };
+  }
+}
+
+export interface TaskDetailsResult {
+  data: Partial<Task>;
+  // true se QUALQUER uma das 6 sub-buscas falhou — o chamador decide se tenta
+  // de novo. `data` já vem com as partes que deram certo preenchidas (falha
+  // parcial não zera o que funcionou).
+  hasError: boolean;
+}
+
 // Sub-entidades de UMA tarefa (lazy-load ao abrir o detalhe).
-export async function fetchTaskDetails(taskId: string): Promise<Partial<Task>> {
-  const [attRes, commRes, logRes, checkRes, actRes, watchRes] = await Promise.all([
-    supabase.from('task_attachments').select('*').eq('task_id', taskId),
-    supabase.from('task_comments').select('*').eq('task_id', taskId).is('deleted_at', null),
-    supabase.from('task_extension_logs').select('*').eq('task_id', taskId),
-    supabase.from('task_checklists').select('*').eq('task_id', taskId),
-    supabase.from('task_activities').select('*').eq('task_id', taskId),
-    supabase.from('task_watchers').select('task_id, user_id').eq('task_id', taskId),
+export async function fetchTaskDetails(taskId: string): Promise<TaskDetailsResult> {
+  const [att, comm, log, check, act, watch] = await Promise.all([
+    fetchTaskSubEntity<AttachmentRow>(() => supabase.from('task_attachments').select('*').eq('task_id', taskId), 'anexos'),
+    fetchTaskSubEntity<CommentRow>(() => supabase.from('task_comments').select('*').eq('task_id', taskId).is('deleted_at', null), 'comentários'),
+    fetchTaskSubEntity<ExtensionLogRow>(() => supabase.from('task_extension_logs').select('*').eq('task_id', taskId), 'histórico de prorrogação'),
+    fetchTaskSubEntity<ChecklistRow>(() => supabase.from('task_checklists').select('*').eq('task_id', taskId), 'checklist'),
+    fetchTaskSubEntity<ActivityRow>(() => supabase.from('task_activities').select('*').eq('task_id', taskId), 'atividade'),
+    fetchTaskSubEntity<WatcherRow>(() => supabase.from('task_watchers').select('task_id, user_id').eq('task_id', taskId), 'observadores'),
   ]);
   return {
-    attachments: ((attRes.data || []) as AttachmentRow[]).map(mapAttachment),
-    comments: ((commRes.data || []) as CommentRow[]).map(mapComment),
-    extensionHistory: ((logRes.data || []) as ExtensionLogRow[]).map(mapLog),
-    checklists: ((checkRes.data || []) as ChecklistRow[]).map(mapChecklist),
-    activities: ((actRes.data || []) as ActivityRow[]).map(mapActivity),
-    watcherIds: ((watchRes.data || []) as WatcherRow[]).map((w) => w.user_id),
-  } as Partial<Task>;
+    data: {
+      attachments: att.data.map(mapAttachment),
+      comments: comm.data.map(mapComment),
+      extensionHistory: log.data.map(mapLog),
+      checklists: check.data.map(mapChecklist),
+      activities: act.data.map(mapActivity),
+      watcherIds: watch.data.map((w) => w.user_id),
+    } as Partial<Task>,
+    hasError: att.failed || comm.failed || log.failed || check.failed || act.failed || watch.failed,
+  };
 }
 
 // ── Escrita (mutações de nível-tarefa) ──────────────────────────────────────

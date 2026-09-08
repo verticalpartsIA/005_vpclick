@@ -2085,17 +2085,41 @@ export default function App() {
   // buscamos essas sub-entidades só para ela e mesclamos no array `tasks`, de
   // onde o modal de detalhe lê. Sempre refetch ao abrir (idempotente, poucas
   // queries) para refletir alterações feitas por outros usuários.
+  //
+  // Achado real (2026-09-08): fetchTaskDetails não tinha tratamento de erro
+  // nenhum — um soluço de rede (mesma causa da renovação de token que trava a
+  // fila do Supabase, ver connectionStatus.ts) fazia a busca falhar
+  // silenciosamente, e a tarefa ficava com título/status mas comentários/
+  // checklist/anexos vazios pra sempre, sem aviso nenhum ("tarefa vazia" —
+  // só fechar/reabrir ou F5 tentava de novo). Agora: 1 retry automático (a
+  // causa mais comum é passageira) e, se persistir, toast com botão de tentar
+  // de novo em vez de falha muda.
+  const [taskDetailsRetryNonce, setTaskDetailsRetryNonce] = useState(0);
   useEffect(() => {
     const id = selectedTaskId;
     if (!id) return;
     let cancelled = false;
     (async () => {
-      const subs = await taskRepo.fetchTaskDetails(id);
+      let result = await taskRepo.fetchTaskDetails(id);
       if (cancelled) return;
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, ...subs } : t));
+      if (result.hasError) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (cancelled) return;
+        result = await taskRepo.fetchTaskDetails(id);
+        if (cancelled) return;
+      }
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, ...result.data } : t));
+      if (result.hasError) {
+        toast.error('Não foi possível carregar todos os detalhes da tarefa (comentários, checklist ou anexos).', {
+          action: {
+            label: 'Tentar novamente',
+            onClick: () => setTaskDetailsRetryNonce((n) => n + 1),
+          },
+        });
+      }
     })();
     return () => { cancelled = true; };
-  }, [selectedTaskId]);
+  }, [selectedTaskId, taskDetailsRetryNonce]);
 
   // Resolve o escopo ativo (lista/pasta/espaço) para o conjunto de listas a
   // buscar. Memoizado (em vez de calculado dentro de loadTasks) para que,
@@ -2319,7 +2343,10 @@ export default function App() {
     const refreshOpenTaskAttachments = async (payload: any) => {
       const taskId = payload?.new?.task_id || payload?.old?.task_id;
       if (!taskId || taskId !== selectedTaskIdRef.current) return;
-      const subs = await taskRepo.fetchTaskDetails(taskId);
+      // Refresh de segundo plano (evento realtime) — sem retry/toast aqui:
+      // se falhar, a tarefa continua com os anexos que já tinha; o próximo
+      // evento ou uma reabertura tenta de novo naturalmente.
+      const { data: subs } = await taskRepo.fetchTaskDetails(taskId);
       setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...subs } : t));
     };
     const channel = supabase
