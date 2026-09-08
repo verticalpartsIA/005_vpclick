@@ -1620,7 +1620,7 @@ export default function App() {
 
   // --- Inline Rename / Confirm modal state ---
   const [renameModal, setRenameModal] = useState<{ title: string; defaultValue: string; placeholder?: string; onSubmit: (v: string) => void } | null>(null);
-  const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void; confirmLabel?: string; variant?: 'danger' | 'warning' } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void | Promise<void>; confirmLabel?: string; variant?: 'danger' | 'warning' } | null>(null);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -2485,9 +2485,13 @@ export default function App() {
   const handleConfirmMoveToTrash = async (reasonCode: string | null, reasonText: string | null) => {
     const taskId = trashReasonModal?.taskId;
     if (!taskId) return;
-    setTrashReasonModal(null);
+    // Achado real (2026-09-08): antes fechava o modal ANTES desta busca —
+    // se demorasse (rede instável), a tarefa ficava parada na lista sem
+    // nenhum sinal de "processando", parecendo travado. Agora só fecha
+    // (ver TrashReasonModal) depois que a exclusão de verdade terminar.
     const res = await taskRepo.softDeleteTaskTree(taskId, currentUser.id, reasonCode, reasonText);
     if (!res.ok) { toast.error('Erro ao mover tarefa para a Lixeira: ' + res.message); return; }
+    setTrashReasonModal(null);
     // Só o nível de topo — o mesmo critério que o hard-delete anterior já
     // usava aqui (subtarefas somem do array local no próximo loadTasks/
     // realtime, não há remoção em cascata client-side).
@@ -2534,9 +2538,12 @@ export default function App() {
   const handleConfirmPermanentDelete = async () => {
     const task = permanentDeleteConfirm?.task;
     if (!task) return;
-    setPermanentDeleteConfirm(null);
+    // Ver comentário em handleConfirmMoveToTrash (mesmo achado, 2026-09-08):
+    // só fecha (ver PermanentDeleteConfirmModal) depois que a exclusão de
+    // verdade terminar, não antes.
     const res = await taskRepo.permanentlyDeleteTask(task.id);
     if (!res.ok) { toast.error('Erro ao excluir permanentemente: ' + res.message); return; }
+    setPermanentDeleteConfirm(null);
     setTrashedTasks(prev => prev.filter(t => t.id !== task.id));
     setTasks(prev => prev.filter(t => t.id !== task.id));
     setArchivedTasks(prev => prev.filter(t => t.id !== task.id));
@@ -4961,7 +4968,7 @@ export default function App() {
             message={confirmModal.message}
             confirmLabel={confirmModal.confirmLabel}
             variant={confirmModal.variant}
-            onConfirm={() => { confirmModal.onConfirm(); setConfirmModal(null); }}
+            onConfirm={async () => { await confirmModal.onConfirm(); setConfirmModal(null); }}
             onClose={() => setConfirmModal(null)}
           />
         )}
@@ -6954,7 +6961,7 @@ function ConfirmModal({
   message: string;
   confirmLabel?: string;
   variant?: 'danger' | 'warning';
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
   onClose: () => void;
 }) {
   // 'danger' (padrão) preserva o visual vermelho já usado pelas exclusões
@@ -6962,8 +6969,24 @@ function ConfirmModal({
   // (ex.: arquivar tarefa não concluída — issue #185 seção 5), pra não
   // assustar o usuário com a mesma cor de "isso vai apagar algo".
   const isDanger = variant === 'danger';
+  // Achado real (2026-09-08): este modal fechava na hora do clique, ANTES da
+  // exclusão terminar no banco — se a chamada demorasse (rede instável, mesma
+  // causa da renovação de token que trava a fila do Supabase, ver
+  // connectionStatus.ts), o item ficava parado na tela sem nenhum sinal de
+  // que algo estava em andamento, parecendo travado ("precisei dar F5").
+  // Agora fica aberto com spinner até a ação de verdade terminar.
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const handleConfirmClick = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await onConfirm();
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={isSubmitting ? undefined : onClose}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 flex flex-col gap-5" onClick={e => e.stopPropagation()}>
         <div className="flex items-start gap-3">
           <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${isDanger ? 'bg-red-100' : 'bg-amber-100'}`}>
@@ -6975,12 +6998,14 @@ function ConfirmModal({
           </div>
         </div>
         <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={onClose} disabled={isSubmitting} className="px-4 py-2 text-sm rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Cancelar</button>
           <button
-            onClick={onConfirm}
-            className={`px-4 py-2 text-sm rounded-lg text-white font-bold ${isDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-500 hover:bg-amber-600'}`}
+            onClick={handleConfirmClick}
+            disabled={isSubmitting}
+            className={`px-4 py-2 text-sm rounded-lg text-white font-bold flex items-center gap-2 ${isDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-500 hover:bg-amber-600'} disabled:opacity-60 disabled:cursor-not-allowed`}
           >
-            {confirmLabel}
+            {isSubmitting && <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
+            {isSubmitting ? 'Processando...' : confirmLabel}
           </button>
         </div>
       </div>
@@ -7202,12 +7227,24 @@ function TrashReasonModal({
   onConfirm,
 }: {
   onClose: () => void;
-  onConfirm: (reasonCode: string | null, reasonText: string | null) => void;
+  onConfirm: (reasonCode: string | null, reasonText: string | null) => void | Promise<void>;
 }) {
   const [reasonCode, setReasonCode] = useState<string | null>(null);
   const [reasonText, setReasonText] = useState('');
+  // Ver comentário em ConfirmModal (mesmo achado, 2026-09-08): fica aberto com
+  // spinner até a exclusão de verdade terminar, em vez de fechar na hora.
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const handleConfirmClick = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await onConfirm(reasonCode, reasonText.trim() || null);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={isSubmitting ? undefined : onClose}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 flex flex-col gap-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-red-100">
@@ -7227,6 +7264,7 @@ function TrashReasonModal({
                   type="radio"
                   name="deletion_reason"
                   checked={reasonCode === r.code}
+                  disabled={isSubmitting}
                   onChange={() => setReasonCode(r.code)}
                   className="accent-red-500"
                 />
@@ -7238,19 +7276,22 @@ function TrashReasonModal({
             <textarea
               value={reasonText}
               onChange={(e) => setReasonText(e.target.value)}
+              disabled={isSubmitting}
               placeholder="Detalhes adicionais (opcional)"
               rows={2}
-              className="mt-2 w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-red-200"
+              className="mt-2 w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-red-200 disabled:bg-gray-50"
             />
           )}
         </div>
         <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={onClose} disabled={isSubmitting} className="px-4 py-2 text-sm rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Cancelar</button>
           <button
-            onClick={() => onConfirm(reasonCode, reasonText.trim() || null)}
-            className="px-4 py-2 text-sm rounded-lg text-white font-bold bg-red-600 hover:bg-red-700"
+            onClick={handleConfirmClick}
+            disabled={isSubmitting}
+            className="px-4 py-2 text-sm rounded-lg text-white font-bold bg-red-600 hover:bg-red-700 flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            Mover para Lixeira
+            {isSubmitting && <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
+            {isSubmitting ? 'Movendo...' : 'Mover para Lixeira'}
           </button>
         </div>
       </div>
@@ -7269,12 +7310,24 @@ function PermanentDeleteConfirmModal({
 }: {
   taskTitle: string;
   onClose: () => void;
-  onConfirm: () => void;
+  onConfirm: () => void | Promise<void>;
 }) {
   const [confirmText, setConfirmText] = useState('');
   const canConfirm = confirmText.trim().toUpperCase() === 'EXCLUIR';
+  // Ver comentário em ConfirmModal (mesmo achado, 2026-09-08): fica aberto com
+  // spinner até a exclusão de verdade terminar, em vez de fechar na hora.
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const handleConfirmClick = async () => {
+    if (isSubmitting || !canConfirm) return;
+    setIsSubmitting(true);
+    try {
+      await onConfirm();
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
   return (
-    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+    <div className="fixed inset-0 z-[210] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={isSubmitting ? undefined : onClose}>
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-6 flex flex-col gap-4" onClick={e => e.stopPropagation()}>
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-full flex items-center justify-center shrink-0 bg-red-100">
@@ -7293,19 +7346,21 @@ function PermanentDeleteConfirmModal({
             type="text"
             value={confirmText}
             onChange={(e) => setConfirmText(e.target.value)}
+            disabled={isSubmitting}
             placeholder="EXCLUIR"
             autoFocus
-            className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-red-200"
+            className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-red-200 disabled:bg-gray-50"
           />
         </div>
         <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="px-4 py-2 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={onClose} disabled={isSubmitting} className="px-4 py-2 text-sm rounded-lg border text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">Cancelar</button>
           <button
-            onClick={onConfirm}
-            disabled={!canConfirm}
-            className="px-4 py-2 text-sm rounded-lg text-white font-bold bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            onClick={handleConfirmClick}
+            disabled={!canConfirm || isSubmitting}
+            className="px-4 py-2 text-sm rounded-lg text-white font-bold bg-red-600 hover:bg-red-700 flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Excluir permanentemente
+            {isSubmitting && <span className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin" />}
+            {isSubmitting ? 'Excluindo...' : 'Excluir permanentemente'}
           </button>
         </div>
       </div>
