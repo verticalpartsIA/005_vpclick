@@ -50,6 +50,7 @@ const TASK_ROW_SELECT = [
   'deletion_reason_code',
   'deletion_reason_text',
   'estimated_hours',
+  'actual_delivery_date',
 ].join(',');
 
 // ── Formato cru das linhas do banco (snake_case) ────────────────────────────
@@ -83,6 +84,7 @@ export interface TaskRow {
   deletion_reason_code: string | null;
   deletion_reason_text: string | null;
   estimated_hours: number | string | null;
+  actual_delivery_date: string | null;
 }
 interface AttachmentRow { id: string; task_id: string; name: string; url: string; type: string; size: number; uploaded_at: string; }
 interface CommentRow {
@@ -172,6 +174,7 @@ const mapTaskCore = (d: TaskRow) => ({
   deletionReasonCode: d.deletion_reason_code || undefined,
   deletionReasonText: d.deletion_reason_text || undefined,
   estimatedHours: d.estimated_hours != null ? Number(d.estimated_hours) : undefined,
+  actualDeliveryDate: d.actual_delivery_date || undefined,
 });
 
 // Task "shell": campos preenchidos, sub-entidades vazias. Usado nas listagens,
@@ -972,6 +975,7 @@ export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok:
       extension_count: task.extensionCount,
       is_milestone: task.isMilestone ?? false,
       estimated_hours: task.estimatedHours ?? null,
+      actual_delivery_date: task.actualDeliveryDate || null,
     })
     .eq('id', task.id);
   if (error) return { ok: false, message: error.message };

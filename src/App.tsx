@@ -13843,7 +13843,14 @@ function TaskDetailModal(props: any) {
 
   const handleUpdateStatus = async (status: string) => {
     if (status === task.status) return;
-    onUpdate({ ...task, status });
+    // "Entrega Real" (ver migração 20260908050000): um trigger no banco já
+    // carimba isso sozinho nessa transição — replicamos aqui só pra refletir
+    // na hora no modal, sem esperar um refetch. Não sobrescreve uma data já
+    // preenchida (o trigger também respeita isso só na transição real).
+    const autoDeliveryDate = (!isDoneLikeStatus(task.status) && isDoneLikeStatus(status) && !task.actualDeliveryDate)
+      ? new Date().toISOString().slice(0, 10)
+      : task.actualDeliveryDate;
+    onUpdate({ ...task, status, actualDeliveryDate: autoDeliveryDate });
     logActivitySafe(task.id, 'STATUS_CHANGE', task.status, status);
   };
 
@@ -14465,24 +14472,47 @@ function TaskDetailModal(props: any) {
                 </div>
                 <div className="flex items-center gap-8">
                   <span className="w-24 text-sm font-medium text-gray-400">Datas</span>
-                  <div
-                    onClick={() => { if (!isReadOnly) setIsExtending(true); }}
-                    className={`flex items-center gap-2 text-sm font-medium transition-all ${!isReadOnly ? 'cursor-pointer hover:text-orange-500 hover:bg-orange-50 px-2 py-1 -ml-2 rounded-xl group border-2 border-transparent hover:border-orange-100' : 'text-gray-600'}`}
-                  >
-                    <Icons.Calendar className={`w-4 h-4 ${!isReadOnly ? 'text-orange-400' : 'text-gray-400'}`} />
-                    <div className="flex flex-col">
-                      <div className="flex items-center gap-2">
-                        <span className="text-gray-400">Entrega:</span>
-                        <span className={(task.extensionCount || 0) > 0 ? 'text-red-500 font-bold' : 'text-gray-900 group-hover:text-orange-600'}>
-                          {(() => { const [y, m, d] = (task.dueDate || '').split('T')[0].split('-'); return d ? `${d}/${m}/${y}` : task.dueDate; })()}
+                  <div className="flex items-center gap-4 flex-wrap text-sm font-medium">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-gray-400">Início:</span>
+                      {isReadOnly ? (
+                        <span className="text-gray-900">{task.startDate ? (() => { const [y, m, d] = task.startDate.split('-'); return `${d}/${m}/${y}`; })() : '—'}</span>
+                      ) : (
+                        <DateFieldEditor
+                          value={task.startDate}
+                          onCommit={(v) => onUpdate({ ...task, startDate: v })}
+                          className="w-32 h-7 text-xs border border-gray-200 rounded-lg px-2 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                        />
+                      )}
+                    </div>
+
+                    <div
+                      onClick={() => { if (!isReadOnly) setIsExtending(true); }}
+                      className={`flex items-center gap-1.5 transition-all ${!isReadOnly ? 'cursor-pointer hover:text-orange-500 hover:bg-orange-50 px-2 py-1 -ml-2 rounded-xl group border-2 border-transparent hover:border-orange-100' : 'text-gray-600'}`}
+                    >
+                      <span className="text-gray-400">Prazo:</span>
+                      <span className={(task.extensionCount || 0) > 0 ? 'text-red-500 font-bold' : 'text-gray-900 group-hover:text-orange-600'}>
+                        {(() => { const [y, m, d] = (task.dueDate || '').split('T')[0].split('-'); return d ? `${d}/${m}/${y}` : task.dueDate; })()}
+                      </span>
+                      {(task.extensionCount || 0) > 0 && (
+                        <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full uppercase font-black">
+                          {task.extensionCount}x
                         </span>
-                        {(task.extensionCount || 0) > 0 && (
-                          <span className="text-[10px] bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full uppercase font-black">
-                            {task.extensionCount}x
-                          </span>
-                        )}
-                        {!isReadOnly && <Icons.Edit size={12} className="text-gray-300 group-hover:text-orange-400" />}
-                      </div>
+                      )}
+                      {!isReadOnly && <Icons.Edit size={12} className="text-gray-300 group-hover:text-orange-400" />}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-gray-400">Entrega Real:</span>
+                      {isReadOnly ? (
+                        <span className="text-gray-900">{task.actualDeliveryDate ? (() => { const [y, m, d] = task.actualDeliveryDate.split('-'); return `${d}/${m}/${y}`; })() : '—'}</span>
+                      ) : (
+                        <DateFieldEditor
+                          value={task.actualDeliveryDate}
+                          onCommit={(v) => onUpdate({ ...task, actualDeliveryDate: v })}
+                          className="w-32 h-7 text-xs border border-gray-200 rounded-lg px-2 focus:outline-none focus:ring-2 focus:ring-orange-500/20 focus:border-orange-500"
+                        />
+                      )}
                     </div>
                   </div>
                 </div>

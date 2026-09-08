@@ -250,6 +250,12 @@ export interface Task {
   // pela RPC get_workload_summary. Ausente = tarefa não entra no cálculo de
   // horas planejadas (só na contagem de tarefas).
   estimatedHours?: number;
+  // "Entrega Real" — carimbada sozinha por um trigger no banco quando o
+  // status transiciona pra um status "tipo concluído" (ver migração
+  // 20260908050000_task_actual_delivery_date.sql), continua editável à mão
+  // pra corrigir. Diferente do antigo Campo Personalizado "Data de
+  // conclusão" (manual, ninguém preenchia).
+  actualDeliveryDate?: string;
 }
 
 // Issue #187 — Workload/Capacidade. Jornada semanal configurável por
