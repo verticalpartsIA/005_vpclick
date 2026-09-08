@@ -12,7 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
-import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WhiteboardAccess, WhiteboardDef, WorkloadBucket } from '../types';
+import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, MindMapAccess, MindMapDef, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WhiteboardAccess, WhiteboardDef, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -2222,6 +2222,95 @@ export async function linkWhiteboardTask(whiteboardId: string, taskId: string): 
 
 export async function unlinkWhiteboardTask(whiteboardId: string, taskId: string): Promise<{ ok: true } | { ok: false; message: string }> {
   const { error } = await supabase.from('whiteboard_tasks').delete().eq('whiteboard_id', whiteboardId).eq('task_id', taskId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+// ── Mapa Mental (issue #192) — modo "Forma livre" ────────────────────────
+// Mesmo padrão de Whiteboards (issue #191): tabela própria + canvas tldraw.
+// O modo "Tarefas" não tem funções aqui — é derivado ao vivo de `tasks`
+// (já carregadas em memória no App) via parentId, ver moveTaskParent abaixo.
+
+function mapMindMapRow(r: any): MindMapDef {
+  return {
+    id: r.id, name: r.name, description: r.description, access: r.access,
+    createdBy: r.created_by, createdAt: r.created_at, updatedAt: r.updated_at, archivedAt: r.archived_at,
+    ownerIds: (r.mind_map_owners || []).map((o: any) => o.user_id),
+  };
+}
+
+export async function fetchMindMaps(includeArchived = false): Promise<MindMapDef[]> {
+  let query = supabase.from('mind_maps').select('id, name, description, access, created_by, created_at, updated_at, archived_at, mind_map_owners(user_id)').order('created_at', { ascending: false });
+  if (!includeArchived) query = query.is('archived_at', null);
+  const { data, error } = await query;
+  if (error) { console.error('taskRepo.fetchMindMaps:', error); return []; }
+  return (data || []).map(mapMindMapRow);
+}
+
+export async function createMindMap(input: { name: string; description?: string | null; access: MindMapAccess; createdBy: string; ownerIds: string[] }): Promise<{ ok: true; mindMap: MindMapDef } | { ok: false; message: string }> {
+  const { data, error } = await supabase.from('mind_maps').insert({ name: input.name, description: input.description ?? null, access: input.access, created_by: input.createdBy }).select().single();
+  if (error || !data) return { ok: false, message: error?.message || 'Erro desconhecido' };
+  if (input.ownerIds.length > 0) {
+    const { error: ownersError } = await supabase.from('mind_map_owners').insert(input.ownerIds.map((userId) => ({ mind_map_id: data.id, user_id: userId })));
+    if (ownersError) console.error('taskRepo.createMindMap: erro ao definir donos:', ownersError);
+  }
+  return { ok: true, mindMap: mapMindMapRow({ ...data, mind_map_owners: input.ownerIds.map((id) => ({ user_id: id })) }) };
+}
+
+export async function updateMindMap(mindMapId: string, updates: { name?: string; description?: string | null; access?: MindMapAccess; archivedAt?: string | null }): Promise<{ ok: true } | { ok: false; message: string }> {
+  const payload: any = {};
+  if (updates.name !== undefined) payload.name = updates.name;
+  if (updates.description !== undefined) payload.description = updates.description;
+  if (updates.access !== undefined) payload.access = updates.access;
+  if (updates.archivedAt !== undefined) payload.archived_at = updates.archivedAt;
+  const { error } = await supabase.from('mind_maps').update(payload).eq('id', mindMapId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function updateMindMapOwners(mindMapId: string, ownerIds: string[]): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error: delError } = await supabase.from('mind_map_owners').delete().eq('mind_map_id', mindMapId);
+  if (delError) return { ok: false, message: delError.message };
+  if (ownerIds.length === 0) return { ok: true };
+  const { error } = await supabase.from('mind_map_owners').insert(ownerIds.map((userId) => ({ mind_map_id: mindMapId, user_id: userId })));
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function deleteMindMap(mindMapId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('mind_maps').delete().eq('id', mindMapId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+export async function fetchMindMapDocument(mindMapId: string): Promise<any | null> {
+  const { data, error } = await supabase.from('mind_maps').select('document').eq('id', mindMapId).single();
+  if (error) { console.error('taskRepo.fetchMindMapDocument:', error); return null; }
+  return data?.document ?? null;
+}
+
+export async function saveMindMapDocument(mindMapId: string, document: any): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('mind_maps').update({ document, updated_at: new Date().toISOString() }).eq('id', mindMapId);
+  if (error) return { ok: false, message: error.message };
+  return { ok: true };
+}
+
+// ── Mapa Mental — modo "Tarefas" ─────────────────────────────────────────
+// Busca dedicada por lista: o `tasks` já carregado no App só cobre o escopo
+// de navegação atual (lista aberta, "Minhas Tarefas" etc.) — o Mapa Mental
+// deixa escolher QUALQUER lista acessível, então precisa buscar por conta
+// própria em vez de confiar no que já está em memória.
+export async function fetchTasksForList(listId: string): Promise<Task[]> {
+  const { data, error } = await selectNormalTasks().eq('list_id', listId).order('created_at', { ascending: true });
+  if (error) { console.error('taskRepo.fetchTasksForList:', error); return []; }
+  return (data || []).map(mapRowToTaskShell);
+}
+
+// Reparenta uma tarefa (vira subtarefa de outra, ou vira raiz com null).
+// Prevenção de ciclo fica no chamador (App.tsx), que já tem a árvore inteira
+// em memória — checar aqui exigiria outra ida ao banco sem necessidade.
+export async function moveTaskParent(taskId: string, parentId: string | null): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error } = await supabase.from('tasks').update({ parent_id: parentId }).eq('id', taskId);
   if (error) return { ok: false, message: error.message };
   return { ok: true };
 }

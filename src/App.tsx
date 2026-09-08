@@ -7,7 +7,7 @@ import {
   CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification, DuplicateTaskOptions,
   TaskRecurrenceRule, RecurrenceFrequencyType, RecurrenceWeekendShift, RecurrenceEndMode, RecurrenceOverlapPolicy, RecurrenceMisfirePolicy, RecurrenceInheritOptions,
   Goal, GoalTarget, GoalTargetType, Portfolio, FormDef, FormQuestion, FormQuestionType, FormMapsTo, FormSubmission,
-  WhiteboardDef, WhiteboardAccess
+  WhiteboardDef, WhiteboardAccess, MindMapDef, MindMapAccess
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -139,6 +139,12 @@ const RemindersView = React.lazy(lazyImportWithReload(() =>
 const WhiteboardCanvas = React.lazy(lazyImportWithReload(() =>
   import('./components/views/WhiteboardCanvas').then((m) => ({ default: m.WhiteboardCanvas }))
 ));
+// Issue #192 (Mapa Mental, modo "Forma livre") — mesmo motivo do
+// WhiteboardCanvas acima: isola o import de 'tldraw' num módulo próprio pra
+// não quebrar os testes Vitest (CSS.supports inexistente no jsdom).
+const MindMapCanvas = React.lazy(lazyImportWithReload(() =>
+  import('./components/views/MindMapCanvas').then((m) => ({ default: m.MindMapCanvas }))
+));
 
 const SSOHandler: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   return <>{children}</>;
@@ -152,7 +158,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams' | 'MindMaps';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -4619,6 +4625,14 @@ export default function App() {
                 onUpdateManager={handleAdminUpdateManager}
               />
             )}
+            {activeView === 'MindMaps' && (
+              <MindMapView
+                currentUser={currentUser}
+                users={adminUsers}
+                lists={lists}
+                onOpenTask={setSelectedTaskId}
+              />
+            )}
             {activeView === 'Doc' && activeDocId && (
               <DocView
                 doc={docs.find(d => d.id === activeDocId)!}
@@ -5815,6 +5829,20 @@ function Sidebar({
       icon: <Icons.Layout className="w-3.5 h-3.5 shrink-0" />,
       onSelect: () => { onNavigate('global', null, 'Quadros Brancos'); onViewChange('Whiteboards'); },
       isActive: activeView === 'Whiteboards',
+    },
+    {
+      // No ClickUp real "Mapa mental" é uma visualização por Espaço/Lista
+      // (Overview/Lista/Quadro/... + Mapa mental), com dois modos: "Tarefas"
+      // (espelha a hierarquia real) e "Forma livre" (brainstorming solto) —
+      // testado ao vivo em app.clickup.com, issue #192. VP Click não tem o
+      // conceito de "visualização por lista" pros itens desta sessão (Metas,
+      // Portfolios etc. já viraram página global) — mantido aqui em "Mais"
+      // por consistência, com os dois modos dentro da mesma página.
+      key: 'mindmaps',
+      label: 'Mapa Mental',
+      icon: <Icons.GitBranch className="w-3.5 h-3.5 shrink-0" />,
+      onSelect: () => { onNavigate('global', null, 'Mapa Mental'); onViewChange('MindMaps'); },
+      isActive: activeView === 'MindMaps',
     },
     (userRole === 'ADMIN' || userRole === 'GESTOR') && {
       key: 'admin',
@@ -11617,6 +11645,385 @@ function OrgChartTab({ users, canManage, onUpdateManager }: any) {
       ) : (
         <div className="flex flex-col">{roots.map((u: any) => renderNode(u, 0))}</div>
       )}
+    </div>
+  );
+}
+
+const MIND_MAP_COLORS = ['#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899', '#06b6d4', '#f97316'];
+
+/**
+ * Mapa Mental (issue #192): dois modos, igual ao ClickUp real (testado ao
+ * vivo em app.clickup.com) — "Tarefas" (espelha Lista -> Tarefa -> Subtarefa
+ * via Task.parentId, que já existe, sem tabela nova) e "Forma livre"
+ * (brainstorming solto, canvas tldraw reaproveitado do Whiteboards #191).
+ */
+function MindMapView({ currentUser, users, lists, onOpenTask }: any) {
+  const [tab, setTab] = useState<'tasks' | 'free'>('tasks');
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2"><Icons.GitBranch className="w-5 h-5 text-fuchsia-600" />Mapa Mental</h2>
+        <p className="text-xs text-gray-500 mt-0.5">Modo Tarefas espelha a hierarquia real de uma lista (tarefas e subtarefas). Modo Forma livre é uma tela em branco pra brainstorming solto, com autosave.</p>
+      </div>
+      <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-1 w-fit">
+        <button onClick={() => setTab('tasks')} className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${tab === 'tasks' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>Tarefas</button>
+        <button onClick={() => setTab('free')} className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${tab === 'free' ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>Forma livre</button>
+      </div>
+      {tab === 'tasks' ? (
+        <MindMapTasksTab lists={lists} users={users} onOpenTask={onOpenTask} currentUser={currentUser} />
+      ) : (
+        <MindMapFreeTab currentUser={currentUser} users={users} />
+      )}
+    </div>
+  );
+}
+
+function MindMapTasksTab({ lists, users, onOpenTask, currentUser }: any) {
+  const [selectedListId, setSelectedListId] = useState<string>(() => lists[0]?.id || '');
+  const [tasksInList, setTasksInList] = useState<Task[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [movingTaskId, setMovingTaskId] = useState<string | null>(null);
+  const [moveSearch, setMoveSearch] = useState('');
+  const [isMoving, setIsMoving] = useState(false);
+
+  useEffect(() => {
+    if (!selectedListId && lists.length > 0) setSelectedListId(lists[0].id);
+  }, [lists, selectedListId]);
+
+  // Busca dedicada por lista (ver taskRepo.fetchTasksForList): o `tasks` do
+  // App só tem o escopo de navegação atual, não todas as listas do
+  // workspace, e o Mapa Mental deixa escolher qualquer lista acessível.
+  useEffect(() => {
+    if (!selectedListId) { setTasksInList([]); setIsLoading(false); return; }
+    let cancelled = false;
+    setIsLoading(true);
+    taskRepo.fetchTasksForList(selectedListId).then((rows) => { if (!cancelled) { setTasksInList(rows); setIsLoading(false); } });
+    return () => { cancelled = true; };
+  }, [selectedListId]);
+
+  const childrenByParent = useMemo(() => {
+    const map: Record<string, Task[]> = {};
+    const idsInList = new Set(tasksInList.map((t: Task) => t.id));
+    tasksInList.forEach((t: Task) => {
+      const key = t.parentId && idsInList.has(t.parentId) ? t.parentId : '__root__';
+      if (!map[key]) map[key] = [];
+      map[key].push(t);
+    });
+    Object.values(map).forEach((arr) => arr.sort((a, b) => a.title.localeCompare(b.title, 'pt-BR')));
+    return map;
+  }, [tasksInList]);
+
+  const toggleExpand = (id: string) => setExpandedIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+
+  // Prevenção de ciclo (mover uma tarefa pra dentro da própria descendência
+  // corromperia a hierarquia): calcula todos os descendentes da tarefa que
+  // está sendo movida, pra excluí-los (e ela mesma) das opções de destino.
+  const descendantIds = useCallback((taskId: string): Set<string> => {
+    const result = new Set<string>();
+    const walk = (id: string) => {
+      (childrenByParent[id] || []).forEach((child) => { result.add(child.id); walk(child.id); });
+    };
+    walk(taskId);
+    return result;
+  }, [childrenByParent]);
+
+  const movingTask = movingTaskId ? tasksInList.find((t: Task) => t.id === movingTaskId) : null;
+  const moveCandidates = useMemo(() => {
+    if (!movingTask) return [];
+    const excluded = descendantIds(movingTask.id);
+    excluded.add(movingTask.id);
+    const q = moveSearch.toLowerCase().trim();
+    return tasksInList.filter((t: Task) => !excluded.has(t.id) && (!q || t.title.toLowerCase().includes(q)));
+  }, [movingTask, tasksInList, descendantIds, moveSearch]);
+
+  const handleMove = async (newParentId: string | null) => {
+    if (!movingTask) return;
+    setIsMoving(true);
+    const res = await taskRepo.moveTaskParent(movingTask.id, newParentId);
+    setIsMoving(false);
+    if (!res.ok) { toast.error('Não foi possível mover: ' + res.message); return; }
+    setTasksInList((prev) => prev.map((t) => t.id === movingTask.id ? { ...t, parentId: newParentId ?? undefined } : t));
+    toast.success(newParentId ? 'Tarefa movida.' : 'Tarefa virou raiz.');
+    setMovingTaskId(null);
+    setMoveSearch('');
+  };
+
+  const renderNode = (task: Task, depth: number): React.ReactNode => {
+    if (depth > 30) return null; // rede de segurança, mesma lógica do organograma
+    const children = childrenByParent[task.id] || [];
+    const isExpanded = depth === 0 || expandedIds.has(task.id);
+    const assignee = users.find((u: any) => u.id === task.mainAssigneeId);
+    return (
+      <div key={task.id} className="flex flex-col">
+        <div className="flex items-center gap-2 py-1.5" style={{ paddingLeft: depth * 24 }}>
+          {children.length > 0 ? (
+            <button onClick={() => toggleExpand(task.id)} className="text-gray-400 hover:text-gray-700 shrink-0">
+              <Icons.ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+            </button>
+          ) : <span className="w-3.5 h-3.5 shrink-0" />}
+          <button onClick={() => onOpenTask(task.id)} className="text-sm font-medium text-gray-800 hover:text-fuchsia-600 hover:underline truncate text-left flex-1 min-w-0">{task.title}</button>
+          <span className="text-[10px] text-gray-400 shrink-0">{task.status}</span>
+          {assignee && <img src={avatarThumb(assignee.avatar)} title={assignee.name} className="w-5 h-5 rounded-full shrink-0" alt="" />}
+          {children.length > 0 && <span className="text-[10px] text-gray-400 shrink-0">{children.length} sub{children.length !== 1 ? 's' : ''}</span>}
+          <button onClick={() => { setMovingTaskId(task.id); setMoveSearch(''); }} className="text-[10px] font-semibold text-fuchsia-600 hover:text-fuchsia-800 shrink-0 px-1.5 py-0.5 rounded hover:bg-fuchsia-50">Mover</button>
+        </div>
+        {isExpanded && children.map((c: Task) => renderNode(c, depth + 1))}
+      </div>
+    );
+  };
+
+  const roots = childrenByParent['__root__'] || [];
+
+  return (
+    <div className="flex flex-col gap-3">
+      <select value={selectedListId} onChange={(e) => setSelectedListId(e.target.value)} className="w-full max-w-xs text-sm border rounded-lg px-3 py-2 outline-none">
+        {lists.length === 0 && <option value="">Nenhuma lista disponível</option>}
+        {lists.map((l: any) => (<option key={l.id} value={l.id}>{l.name}</option>))}
+      </select>
+
+      <div className="border rounded-xl bg-white p-4 relative">
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="w-6 h-6 border-2 border-gray-200 border-t-fuchsia-500 rounded-full animate-spin" />
+          </div>
+        ) : roots.length === 0 ? (
+          <p className="text-sm text-gray-400 text-center py-12">Nenhuma tarefa nesta lista ainda.</p>
+        ) : (
+          <div className="flex flex-col">{roots.map((t: Task) => renderNode(t, 0))}</div>
+        )}
+
+        {movingTask && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setMovingTaskId(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 max-h-[70vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className="px-5 py-4 border-b">
+                <p className="font-semibold text-gray-800 text-sm">Mover "{movingTask.title}"</p>
+                <p className="text-xs text-gray-400 mt-0.5">Escolha a nova tarefa-pai, ou deixe como raiz.</p>
+              </div>
+              <div className="p-4 flex flex-col gap-3 flex-1 overflow-auto custom-scrollbar">
+                <button disabled={isMoving || !movingTask.parentId} onClick={() => handleMove(null)} className="text-left text-sm px-3 py-2 rounded-lg border hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed font-medium text-gray-700">
+                  ↑ Tornar tarefa raiz (sem pai)
+                </button>
+                <input autoFocus value={moveSearch} onChange={(e) => setMoveSearch(e.target.value)} placeholder="Buscar tarefa..." className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-fuchsia-200" />
+                <div className="flex flex-col gap-0.5">
+                  {moveCandidates.length === 0 && <p className="text-xs text-gray-400 text-center py-4">Nenhuma tarefa encontrada.</p>}
+                  {moveCandidates.map((t: Task) => (
+                    <button key={t.id} disabled={isMoving} onClick={() => handleMove(t.id)} className="text-left text-sm px-3 py-2 rounded-lg hover:bg-gray-50 truncate disabled:opacity-50">
+                      {t.title}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="px-5 py-3 border-t flex justify-end">
+                <button onClick={() => setMovingTaskId(null)} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MindMapFreeTab({ currentUser, users }: any) {
+  const [mindMaps, setMindMaps] = useState<MindMapDef[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingMindMap, setEditingMindMap] = useState<MindMapDef | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const [openMindMap, setOpenMindMap] = useState<MindMapDef | null>(null);
+
+  const load = useCallback(async () => {
+    setIsLoading(true);
+    try { setMindMaps(await taskRepo.fetchMindMaps(showArchived)); }
+    catch (err) { console.error('MindMapFreeTab: erro ao carregar', err); toast.error('Não foi possível carregar os Mapas Mentais.'); }
+    finally { setIsLoading(false); }
+  }, [showArchived]);
+  useEffect(() => { load(); }, [load]);
+
+  const canEdit = (m: MindMapDef) => m.createdBy === currentUser.id || m.ownerIds.includes(currentUser.id) || currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR;
+
+  const handleDelete = async (m: MindMapDef) => {
+    if (!window.confirm(`Excluir o mapa "${m.name}"? Essa ação não pode ser desfeita.`)) return;
+    const res = await taskRepo.deleteMindMap(m.id);
+    if (!res.ok) { toast.error('Erro ao excluir: ' + res.message); return; }
+    toast.success('Mapa excluído.');
+    load();
+  };
+
+  const handleToggleArchive = async (m: MindMapDef) => {
+    const res = await taskRepo.updateMindMap(m.id, { archivedAt: m.archivedAt ? null : new Date().toISOString() });
+    if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+    toast.success(m.archivedAt ? 'Mapa reativado.' : 'Mapa arquivado.');
+    load();
+  };
+
+  if (openMindMap) {
+    return (
+      <React.Suspense fallback={<div className="fixed inset-0 z-[300] bg-white flex items-center justify-center"><div className="w-8 h-8 border-2 border-gray-200 border-t-fuchsia-500 rounded-full animate-spin" /></div>}>
+        <MindMapCanvas
+          mindMap={openMindMap}
+          onClose={() => { setOpenMindMap(null); load(); }}
+        />
+      </React.Suspense>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-end gap-2">
+        <button
+          onClick={() => setShowArchived((v) => !v)}
+          className={`px-3 py-1.5 text-xs rounded-lg border font-medium transition-colors ${showArchived ? 'bg-gray-800 text-white border-gray-800' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+        >
+          {showArchived ? 'Mostrando arquivados' : 'Mostrar arquivados'}
+        </button>
+        <button
+          onClick={() => { setEditingMindMap(null); setIsFormOpen(true); }}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-medium transition-colors"
+        >
+          <Icons.Plus className="w-4 h-4" />Novo Mapa
+        </button>
+      </div>
+
+      {isLoading ? (
+        <div className="flex items-center justify-center py-24">
+          <div className="w-8 h-8 border-2 border-gray-200 border-t-fuchsia-500 rounded-full animate-spin" />
+        </div>
+      ) : mindMaps.length === 0 ? (
+        <p className="text-sm text-gray-500 text-center py-24">
+          {showArchived ? 'Nenhum mapa arquivado.' : 'Nenhum mapa criado ainda. Clique em "Novo Mapa" pra começar.'}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {mindMaps.map((m: MindMapDef) => {
+            const editable = canEdit(m);
+            return (
+              <div key={m.id} className="border rounded-xl bg-white overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-3">
+                  <Icons.GitBranch className="w-4 h-4 text-fuchsia-500 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold text-gray-800 text-sm truncate">{m.name}</span>
+                      {m.archivedAt && <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">Arquivado</span>}
+                      {m.access === 'private' && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 font-medium">Privado</span>}
+                    </div>
+                    <span className="text-xs text-gray-400">atualizado {new Date(m.updatedAt).toLocaleDateString('pt-BR')}</span>
+                  </div>
+                  <button
+                    onClick={() => setOpenMindMap(m)}
+                    className="px-3 py-1.5 text-xs rounded-lg bg-fuchsia-50 text-fuchsia-700 hover:bg-fuchsia-100 font-medium shrink-0"
+                  >
+                    Abrir mapa
+                  </button>
+                  {editable && (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+                          <Icons.Settings className="w-4 h-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => { setEditingMindMap(m); setIsFormOpen(true); }}><Icons.Edit className="w-3.5 h-3.5 mr-2" />Editar</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleToggleArchive(m)}>{m.archivedAt ? 'Reativar' : 'Arquivar'}</DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onClick={() => handleDelete(m)} className="text-red-600"><Icons.Trash className="w-3.5 h-3.5 mr-2" />Excluir</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {isFormOpen && (
+        <MindMapFormModal
+          mindMap={editingMindMap}
+          users={users}
+          currentUser={currentUser}
+          onClose={() => setIsFormOpen(false)}
+          onSaved={() => { setIsFormOpen(false); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function MindMapFormModal({ mindMap, users, currentUser, onClose, onSaved }: any) {
+  const [name, setName] = useState(mindMap?.name ?? '');
+  const [description, setDescription] = useState(mindMap?.description ?? '');
+  const [access, setAccess] = useState<MindMapAccess>(mindMap?.access ?? 'workspace');
+  const [ownerIds, setOwnerIds] = useState<string[]>(mindMap?.ownerIds ?? []);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const toggleOwner = (id: string) => setOwnerIds((prev) => (prev.includes(id) ? prev.filter((o) => o !== id) : [...prev, id]));
+
+  const handleSave = async () => {
+    if (!name.trim()) { toast.error('Dê um nome pro mapa.'); return; }
+    setIsSaving(true);
+    if (mindMap) {
+      const res = await taskRepo.updateMindMap(mindMap.id, { name: name.trim(), description: description.trim() || null, access });
+      if (res.ok) await taskRepo.updateMindMapOwners(mindMap.id, ownerIds);
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Mapa atualizado.');
+    } else {
+      const res = await taskRepo.createMindMap({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
+      setIsSaving(false);
+      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+      toast.success('Mapa criado.');
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <p className="font-semibold text-gray-800 text-sm">{mindMap ? 'Editar mapa' : 'Novo mapa mental'}</p>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Nome</label>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-fuchsia-200" placeholder="Ex: Brainstorm Roadmap Q1" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Descrição (opcional)</label>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} className="w-full text-sm border rounded-lg px-3 py-2 outline-none focus:ring-2 focus:ring-fuchsia-200 resize-none" />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Acesso</label>
+            <select value={access} onChange={(e) => setAccess(e.target.value as MindMapAccess)} className="w-full text-sm border rounded-lg px-3 py-2 outline-none">
+              <option value="workspace">Workspace</option>
+              <option value="private">Privado</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Dono(s) (opcional)</label>
+            <div className="flex flex-wrap gap-1.5 max-h-28 overflow-auto custom-scrollbar border rounded-lg p-2">
+              {users.map((u: any) => (
+                <button
+                  key={u.id}
+                  onClick={() => toggleOwner(u.id)}
+                  className={`text-xs px-2 py-1 rounded-full border font-medium transition-colors ${ownerIds.includes(u.id) ? 'bg-fuchsia-600 text-white border-fuchsia-600' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`}
+                >
+                  {u.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="px-6 py-4 border-t flex justify-end gap-2">
+          <button onClick={onClose} className="px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Cancelar</button>
+          <button onClick={handleSave} disabled={isSaving} className="px-3 py-1.5 text-sm rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-medium disabled:opacity-50">
+            {isSaving ? 'Salvando...' : 'Salvar'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

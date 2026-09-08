@@ -141,6 +141,9 @@ export const Icons = {
   Target: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="6" /><circle cx="12" cy="12" r="2" /></svg>
   ),
+  GitBranch: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
+    <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="6" x2="6" y1="3" y2="15" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></svg>
+  ),
   Heart: ({ className = "w-4 h-4", size, color = "currentColor", style, onClick }: IconProps) => (
     <svg className={className} width={size} height={size} fill="none" stroke={color} viewBox="0 0 24 24" style={style} onClick={onClick} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z" /></svg>
   ),

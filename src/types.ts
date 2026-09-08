@@ -609,6 +609,25 @@ export interface WhiteboardDef {
   linkedTaskCount?: number;
 }
 
+// ── Mapa Mental (issue #192) ─────────────────────────────────
+// Modo "Tarefas" é derivado ao vivo de Task.parentId (sem tabela própria).
+// `MindMapDef`/`document` são só pro modo "Forma livre" — mesmo padrão de
+// WhiteboardDef, canvas tldraw reaproveitado (issue #191).
+
+export type MindMapAccess = 'workspace' | 'private';
+
+export interface MindMapDef {
+  id: string;
+  name: string;
+  description?: string | null;
+  access: MindMapAccess;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt?: string | null;
+  ownerIds: string[];
+}
+
 // ── Automations ───────────────────────────────────────────
 
 export type AutomationTriggerType =
