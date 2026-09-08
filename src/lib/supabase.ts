@@ -1,4 +1,5 @@
 import { createClient, processLock } from '@supabase/supabase-js';
+import { withLockTimeout } from './lockTimeout';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
@@ -35,6 +36,13 @@ const fetchWithTimeout: typeof fetch = (input, init) => {
     return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
 };
 
+// Ver src/lib/lockTimeout.ts para o porquê (relato real de usuário,
+// 2026-09-08: tela travava durante uso ativo, sem request de rede nenhuma,
+// só resolvia com F5 — processLock não põe teto na operação que já está de
+// posse do lock, só na fila de espera por ela).
+const LOCK_FN_TIMEOUT_MS = 25_000; // > DEFAULT_FETCH_TIMEOUT_MS: dá tempo do fetch interno estourar primeiro, se for esse o caso
+const timeoutLock = withLockTimeout(processLock, LOCK_FN_TIMEOUT_MS);
+
 // Cliente público (para autenticação de usuários)
 // NUNCA crie um cliente com a service_role key aqui: qualquer env VITE_* é
 // embutida em texto claro no bundle JS público. Operações privilegiadas
@@ -56,8 +64,10 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
         // sem esperar outras abas — elimina esse travamento cruzado. O trade-off
         // aceito: duas abas podem, raramente, tentar renovar o token ao mesmo
         // tempo; o pior caso é uma delas precisar buscar sessão de novo, não um
-        // travamento de 10s pro usuário.
-        lock: processLock,
+        // travamento de 10s pro usuário. timeoutLock (acima) envolve processLock
+        // com um teto na própria operação, não só na fila de espera — ver
+        // comentário de LOCK_FN_TIMEOUT_MS.
+        lock: timeoutLock,
     },
     global: {
         fetch: fetchWithTimeout,
