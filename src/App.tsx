@@ -194,6 +194,14 @@ const VIEW_TO_SLUG: Record<ActiveView, string> = {
   MyTasks: 'my-tasks',
   Reminders: 'reminders',
   RecentTasks: 'recent-tasks',
+  Workload: 'workload',
+  Goals: 'goals',
+  Portfolios: 'portfolios',
+  Forms: 'forms',
+  Whiteboards: 'whiteboards',
+  Teams: 'teams',
+  MindMaps: 'mind-maps',
+  Map: 'map',
 };
 
 const SLUG_TO_VIEW: Record<string, ActiveView> = Object.fromEntries(
