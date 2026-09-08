@@ -7,7 +7,7 @@ import {
   CustomField, CustomFieldType, CustomFieldValue, CustomFieldOption, Doc, TaskActivity, WorkspaceTag, Team, AppNotification, DuplicateTaskOptions,
   TaskRecurrenceRule, RecurrenceFrequencyType, RecurrenceWeekendShift, RecurrenceEndMode, RecurrenceOverlapPolicy, RecurrenceMisfirePolicy, RecurrenceInheritOptions,
   Goal, GoalTarget, GoalTargetType, Portfolio, FormDef, FormQuestion, FormQuestionType, FormMapsTo, FormSubmission,
-  WhiteboardDef, WhiteboardAccess, MindMapDef, MindMapAccess
+  WhiteboardDef, WhiteboardAccess, MindMapDef, MindMapAccess, CustomFieldLocationValue
 } from './types';
 // import { MOCK_USERS, INITIAL_WORKSPACE, MOCK_SPACES, MOCK_FOLDERS, MOCK_LISTS, MOCK_TASKS, MOCK_PROJECTS, MOCK_CUSTOM_FIELDS, MOCK_CUSTOM_FIELD_VALUES } from './mockData';
 import { INITIAL_WORKSPACE, MOCK_PROJECTS } from './mockData'; // MOCK_PROJECTS temporário se ainda necessário
@@ -18,11 +18,13 @@ import { WIKI_INTRO_HTML, WIKI_TEMPLATE_SECTIONS } from './wikiTemplate';
 import LoginScreen from './pages/LoginScreen';
 import ChangePasswordModal from './components/ChangePasswordModal';
 import CreateListModal from './components/CreateListModal';
+import { LocationFieldEditor } from './components/LocationFieldEditor';
 import compactLogoWhite from './assets/logo-verticalparts-white.png';
 import bootLogoVideo from './assets/logo-limpo-video.mp4';
 import { recordRecentTaskId } from './lib/recentTasks';
 import { buildSlugIndex, slugify, type SlugIndex } from './lib/slug';
 import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
+import { subscribeSlowConnection } from './lib/connectionStatus';
 import { supabase } from './lib/supabase';
 import * as taskRepo from './lib/taskRepo';
 import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
@@ -131,6 +133,13 @@ const RecentTasksView = React.lazy(lazyImportWithReload(() =>
 const RemindersView = React.lazy(lazyImportWithReload(() =>
   import('./components/views/RemindersView').then((m) => ({ default: m.RemindersView }))
 ));
+// Issue #193 (view "Mapa") — mapbox-gl faz detecção de WebGL/canvas assim que
+// instanciado; jsdom (Vitest) não tem HTMLCanvasElement/WebGL de verdade.
+// Mesmo isolamento em módulo próprio já usado pro tldraw (Whiteboards/Mapas
+// Mentais) acima, por precaução — evita repetir a quebra de testes.
+const MapView = React.lazy(lazyImportWithReload(() =>
+  import('./components/views/MapView').then((m) => ({ default: m.MapView }))
+));
 // Issue #191 (Whiteboards) — separado dos demais lazies acima só por causa da
 // tldraw: o import de 'tldraw' roda uma detecção de ambiente (CSS.supports)
 // assim que o módulo carrega, o que quebrava todo teste Vitest que importasse
@@ -158,7 +167,7 @@ interface NavigationScope {
   name: string;
 }
 
-type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams' | 'MindMaps';
+type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams' | 'MindMaps' | 'Map';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
 // Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
@@ -1403,6 +1412,21 @@ export default function App() {
 
     return () => subscription.unsubscribe();
   }, [checkSession, loadUserProfile]);
+
+  // Aviso visual pra trava de ~25s do lock de auth (ver connectionStatus.ts e
+  // lockTimeout.ts) — sem isso a tela fica muda até o teto liberar à força e
+  // parece quebrada. Toast com id fixo: reaparições reusam o mesmo toast em
+  // vez de empilhar.
+  useEffect(() => {
+    const SLOW_CONNECTION_TOAST_ID = 'slow-connection';
+    return subscribeSlowConnection((isSlow) => {
+      if (isSlow) {
+        toast.loading('Conexão lenta, reconectando...', { id: SLOW_CONNECTION_TOAST_ID, duration: Infinity });
+      } else {
+        toast.dismiss(SLOW_CONNECTION_TOAST_ID);
+      }
+    });
+  }, []);
 
   // --- Rastro de acesso cross-sistema (timeline central do vpsistema) ---
   // Dispara "enter" uma única vez assim que a identidade real do usuário
@@ -4265,6 +4289,7 @@ export default function App() {
                 <ViewTab active={activeView === 'Calendar'} onClick={() => setActiveView('Calendar')} label="Calendário" />
                 <ViewTab active={activeView === 'Gantt'} onClick={() => setActiveView('Gantt')} label="Gantt" />
                 <ViewTab active={activeView === 'Table'} onClick={() => setActiveView('Table')} label="Tabela" />
+                <ViewTab active={activeView === 'Map'} onClick={() => setActiveView('Map')} label="Mapa" />
                 <ViewTab active={activeView === 'Workload'} onClick={() => setActiveView('Workload')} label="Workload" />
                 {activeScope.type !== 'space' && (
                   <ViewTab active={activeView === 'Dashboard'} onClick={() => setActiveView('Dashboard')} label="Dashboards" />
@@ -4471,6 +4496,17 @@ export default function App() {
                 lists={lists}
                 currentUserId={currentUser.id}
                 statusGroups={statusGroups}
+              />
+            )}
+            {activeView === 'Map' && (
+              <MapView
+                tasks={filteredTasks}
+                users={adminUsers}
+                lists={lists}
+                statusGroups={statusGroups}
+                customFields={customFields}
+                fieldValues={fieldValues}
+                onTaskClick={setSelectedTaskId}
               />
             )}
             {activeView === 'Inbox' && (
@@ -8800,6 +8836,12 @@ function ListView({
                                         <BufferedProgressEditor
                                           value={currentValue}
                                           onCommit={(v) => onUpdateFieldValue(field.id, t.id, v)}
+                                          compact
+                                        />
+                                      ) : field.type === CustomFieldType.LOCATION ? (
+                                        <LocationFieldEditor
+                                          value={currentValue}
+                                          onCommit={(v: CustomFieldLocationValue) => onUpdateFieldValue(field.id, t.id, v)}
                                           compact
                                         />
                                       ) : (
@@ -16058,6 +16100,13 @@ function CustomFieldInput({ field, value, onChange, formulaContext }: any) {
             onCommit={onChange}
             className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none transition-shadow"
           />
+        </div>
+      );
+    case CustomFieldType.LOCATION:
+      return (
+        <div>
+          <label className="text-xs font-bold text-gray-400 uppercase">{field.name}</label>
+          <LocationFieldEditor value={value} onCommit={onChange} />
         </div>
       );
     case CustomFieldType.DROPDOWN: {

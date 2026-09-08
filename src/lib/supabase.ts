@@ -1,5 +1,6 @@
 import { createClient, processLock } from '@supabase/supabase-js';
 import { withLockTimeout } from './lockTimeout';
+import { trackRequestForSlowness } from './connectionStatus';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
@@ -33,7 +34,9 @@ const fetchWithTimeout: typeof fetch = (input, init) => {
     // também quando ele abortar, sem perder o timeout acima.
     init?.signal?.addEventListener('abort', () => controller.abort());
 
-    return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+    return trackRequestForSlowness(
+        fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timeoutId))
+    );
 };
 
 // Ver src/lib/lockTimeout.ts para o porquê (relato real de usuário,

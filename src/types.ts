@@ -42,7 +42,18 @@ export enum CustomFieldType {
   RATING = 'Avaliação',
   PROGRESS = 'Progresso',
   FORMULA = 'Fórmula',
-  CURRENCY = 'Moeda'
+  CURRENCY = 'Moeda',
+  LOCATION = 'Localização'
+}
+
+// Formato salvo em CustomFieldValue.value quando field.type === CustomFieldType.LOCATION.
+// lat/lng ficam null enquanto o endereço não geocodificar (ou geocodificação falhar —
+// "fallback para endereço inválido" da issue #193: o campo continua salvo como texto).
+export interface CustomFieldLocationValue {
+  address: string;
+  lat: number | null;
+  lng: number | null;
+  geocodedAt: string | null;
 }
 
 export interface CustomFieldOption {
