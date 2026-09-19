@@ -11,6 +11,7 @@ import {
   Filter,
   FolderOpen,
   GripVertical,
+  Layers,
   MoreHorizontal,
   Plus,
   RotateCcw,
@@ -40,6 +41,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
@@ -53,6 +55,7 @@ import { toast } from 'sonner';
 import { DateFieldEditor } from '@/components/DateFieldEditor';
 import { parseLocalDate, formatDateBR } from '@/lib/dates';
 import { supabase, reorderTasksInList } from '@/lib/supabase';
+import * as taskRepo from '@/lib/taskRepo';
 import { useIsMobile } from '@/hooks/use-mobile';
 
 interface TableViewProps {
@@ -153,6 +156,37 @@ const normalize = (value: unknown) =>
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
 
+// Issue #165: filtro de contexto (Space/Pasta/Lista) combin\u00e1vel com os
+// demais filtros da Tabela, independente de qual seja o "escopo" ativo
+// (contexto atual, agregado, ou a sele\u00e7\u00e3o manual de listas abaixo). Extra\u00edda
+// como fun\u00e7\u00e3o pura (em vez de inline no useMemo de displayedTasks) pra dar
+// pra testar sem montar o componente inteiro.
+export function taskMatchesContextFilters(
+  context: { list?: { id: string } | null; folder?: { id: string } | null; space?: { id: string } | null },
+  filters: { spaceId?: string; folderId?: string; listId?: string }
+): boolean {
+  if (filters.listId && context.list?.id !== filters.listId) return false;
+  if (filters.folderId && context.folder?.id !== filters.folderId) return false;
+  if (filters.spaceId && context.space?.id !== filters.spaceId) return false;
+  return true;
+}
+
+// Issue #165: resolve o conjunto de tarefas do escopo ativo. Uma sele\u00e7\u00e3o
+// manual de listas espec\u00edficas (`multiListIds` n\u00e3o vazio) tem prioridade
+// sobre o `scopeId` cl\u00e1ssico (Contexto atual/Todos os contextos/Space/
+// Pasta/Lista) \u2014 os dois mecanismos n\u00e3o se combinam, escolher listas
+// espec\u00edficas substitui o escopo hier\u00e1rquico enquanto estiver ativo.
+export function resolveScopedTasks<T>(
+  scopeId: string,
+  scopeOptions: { id: string; taskSource: T[] }[],
+  fallbackTasks: T[],
+  multiListIds: string[],
+  multiListTasks: T[]
+): T[] {
+  if (multiListIds.length > 0) return multiListTasks;
+  return scopeOptions.find((option) => option.id === scopeId)?.taskSource ?? fallbackTasks;
+}
+
 export const TableView: React.FC<TableViewProps> = ({
   tasks,
   allTasks,
@@ -218,7 +252,51 @@ export const TableView: React.FC<TableViewProps> = ({
     setScopeId(activeListId ? `list:${activeListId}` : 'current');
   }, [activeListId, activeScope?.id, activeScope?.type]);
 
-  const scopedTasks = useMemo(() => scopeOptions.find((option) => option.id === scopeId)?.taskSource || tasks, [scopeId, scopeOptions, tasks]);
+  // Issue #165: "Listas específicas" — multi-seleção arbitrária de Lists,
+  // sem depender de compartilharem Space/Pasta. Diferente do escopo
+  // hierárquico acima (que só reagrupa tarefas já carregadas pela navegação
+  // atual em `tasks`/`allTasks`), busca as tarefas dessas listas direto do
+  // Supabase, então funciona mesmo pra listas fora do contexto de navegação
+  // atual. RLS (tasks_select) filtra o resultado normalmente — pedir uma
+  // lista sem acesso simplesmente não traz linha nenhuma dela, não é um
+  // buraco de segurança novo.
+  const [multiListIds, setMultiListIds] = useState<string[]>([]);
+  const [multiListSearch, setMultiListSearch] = useState('');
+  const [multiListTasks, setMultiListTasks] = useState<Task[]>([]);
+  const [isMultiListLoading, setIsMultiListLoading] = useState(false);
+
+  useEffect(() => {
+    if (multiListIds.length === 0) {
+      setMultiListTasks([]);
+      return;
+    }
+    let cancelled = false;
+    setIsMultiListLoading(true);
+    (async () => {
+      try {
+        const firstRows = await taskRepo.fetchInitialTaskRowsByListIds(multiListIds);
+        if (cancelled) return;
+        let rows = firstRows;
+        if (firstRows.length >= taskRepo.INITIAL_TASK_PAGE_SIZE) {
+          const remainingRows = await taskRepo.fetchRemainingTaskRowsByListIds(multiListIds);
+          if (cancelled) return;
+          rows = [...firstRows, ...remainingRows];
+        }
+        setMultiListTasks(rows.map(taskRepo.mapRowToTaskShell));
+      } catch (err) {
+        console.error('Erro ao carregar tarefas das listas selecionadas:', err);
+        if (!cancelled) toast.error('Não foi possível carregar as tarefas das listas selecionadas.');
+      } finally {
+        if (!cancelled) setIsMultiListLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [multiListIds]);
+
+  const scopedTasks = useMemo(
+    () => resolveScopedTasks(scopeId, scopeOptions, tasks, multiListIds, multiListTasks),
+    [scopeId, scopeOptions, tasks, multiListIds, multiListTasks]
+  );
 
   const taskFields = useMemo(() => {
     return customFields.filter((field) => {
@@ -229,7 +307,11 @@ export const TableView: React.FC<TableViewProps> = ({
   }, [customFields, currentUser?.role]);
 
   const allColumns = useMemo<ColumnDef[]>(() => {
-    const contextColumns: ColumnDef[] = scopeId === 'current' && activeListId
+    // Issue #165: colunas de contexto (Space/Pasta/Lista) também aparecem
+    // com uma seleção manual de "Listas específicas" ativa — as tarefas
+    // exibidas podem vir de listas em pastas/spaces diferentes, então
+    // esconder essas colunas deixaria o contexto de cada linha invisível.
+    const contextColumns: ColumnDef[] = scopeId === 'current' && activeListId && multiListIds.length === 0
       ? []
       : [
           { id: 'space', label: 'Space', kind: 'context', defaultWidth: DEFAULT_WIDTHS.space },
@@ -247,7 +329,7 @@ export const TableView: React.FC<TableViewProps> = ({
       { id: 'tags', label: 'Tags', kind: 'system', defaultWidth: DEFAULT_WIDTHS.tags },
       ...taskFields.map((field) => ({ id: `cf_${field.id}`, label: field.name, kind: 'custom' as const, defaultWidth: 170 })),
     ];
-  }, [activeListId, scopeId, taskFields]);
+  }, [activeListId, multiListIds, scopeId, taskFields]);
 
   const prefsKey = `vp_table_prefs_${currentUser?.id || 'anon'}_${scopeId}`;
   const defaultPrefs = useMemo<TablePrefs>(() => ({
@@ -268,6 +350,13 @@ export const TableView: React.FC<TableViewProps> = ({
   // (toggle, mesmo padrão já usado pelo filtro de Status).
   const [filterTag, setFilterTag] = useState<string[]>([]);
   const [filterDue, setFilterDue] = useState('');
+  // Issue #165: filtro dedicado por contexto (Space/Pasta/Lista) — antes só
+  // dava pra "achar" o contexto pela busca textual, que casa com o NOME e
+  // não distingue contexto de conteúdo. Cada um é single-select porque é
+  // hierárquico (escolher uma Lista já implica o Space/Pasta dela).
+  const [filterSpaceId, setFilterSpaceId] = useState('');
+  const [filterFolderId, setFilterFolderId] = useState('');
+  const [filterListId, setFilterListId] = useState('');
   // Issue #139: antes só dava pra filtrar por 1 campo customizado por vez;
   // agora é uma lista de filtros combináveis (AND entre eles, como os demais).
   const [customFilters, setCustomFilters] = useState<{ fieldId: string; value: string }[]>([]);
@@ -465,7 +554,7 @@ export const TableView: React.FC<TableViewProps> = ({
     return visibleColumns.filter((column) => column.required || MOBILE_ESSENTIAL_COLUMNS.includes(column.id));
   }, [visibleColumns, isMobile]);
 
-  const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag.length || filterDue || customFilters.some((filter) => filter.fieldId && filter.value));
+  const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag.length || filterDue || filterSpaceId || filterFolderId || filterListId || customFilters.some((filter) => filter.fieldId && filter.value));
 
   const displayedTasks = useMemo(() => {
     let result = scopedTasks.filter((task) => !task.parentId);
@@ -497,6 +586,9 @@ export const TableView: React.FC<TableViewProps> = ({
     if (filterPriority.length > 0) result = result.filter((task) => filterPriority.includes(task.priority));
     if (filterAssignee) result = result.filter((task) => task.mainAssigneeId === filterAssignee || task.secondaryAssigneeIds?.includes(filterAssignee));
     if (filterTag.length > 0) result = result.filter((task) => task.tags?.some((tag) => filterTag.includes(tag)));
+    if (filterSpaceId || filterFolderId || filterListId) {
+      result = result.filter((task) => taskMatchesContextFilters(getTaskContext(task), { spaceId: filterSpaceId, folderId: filterFolderId, listId: filterListId }));
+    }
     if (filterDue === 'overdue') result = result.filter(isOverdue);
     if (filterDue === 'without') result = result.filter((task) => !task.dueDate);
     if (filterDue === 'with') result = result.filter((task) => Boolean(task.dueDate));
@@ -552,7 +644,7 @@ export const TableView: React.FC<TableViewProps> = ({
     }
 
     return result;
-  }, [customFilters, filterAssignee, filterDue, filterPriority, filterStatus, filterTag, getFieldValue, getTaskContext, hasActiveFilters, rowOrder, scopedTasks, search, sortDir, sortField, taskFields, userById]);
+  }, [customFilters, filterAssignee, filterDue, filterFolderId, filterListId, filterPriority, filterSpaceId, filterStatus, filterTag, getFieldValue, getTaskContext, hasActiveFilters, rowOrder, scopedTasks, search, sortDir, sortField, taskFields, userById]);
 
   useEffect(() => {
     setSelectedTaskIds((prev) => {
@@ -569,6 +661,9 @@ export const TableView: React.FC<TableViewProps> = ({
     setFilterAssignee('');
     setFilterTag([]);
     setFilterDue('');
+    setFilterSpaceId('');
+    setFilterFolderId('');
+    setFilterListId('');
     setCustomFilters([]);
   };
 
@@ -957,9 +1052,77 @@ export const TableView: React.FC<TableViewProps> = ({
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar na tabela" className="h-9 w-full rounded-md border border-border bg-background pl-8 pr-3 text-sm outline-none focus:border-primary" />
           </div>
-          <select value={scopeId} onChange={(e) => setScopeId(e.target.value)} className="h-9 max-w-[260px] rounded-md border border-border bg-background px-2 text-sm">
+          <select value={scopeId} disabled={multiListIds.length > 0} onChange={(e) => setScopeId(e.target.value)} className="h-9 max-w-[260px] rounded-md border border-border bg-background px-2 text-sm disabled:opacity-50">
             {scopeOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
           </select>
+          {/* Issue #165: "Listas específicas" — agrega Lists arbitrárias
+              (não precisam compartilhar Space/Pasta), tipo Table View do
+              Trello. Substitui o escopo hierárquico acima enquanto ativo
+              (por isso o <select> fica desabilitado); busca as tarefas
+              dessas listas direto do backend, então funciona mesmo fora do
+              contexto de navegação atual. */}
+          <DropdownMenu onOpenChange={(open) => { if (!open) setMultiListSearch(''); }}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className={multiListIds.length > 0 ? 'border-primary text-primary' : ''}>
+                <Layers className="mr-2 h-4 w-4" />
+                {multiListIds.length > 0 ? `${multiListIds.length} lista${multiListIds.length > 1 ? 's' : ''}${isMultiListLoading ? '…' : ''}` : 'Listas específicas'}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-72">
+              <div className="sticky top-0 z-10 bg-popover p-1">
+                <input
+                  type="text"
+                  autoFocus
+                  value={multiListSearch}
+                  onChange={(e) => setMultiListSearch(e.target.value)}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                  placeholder="Buscar lista..."
+                  className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                />
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {(() => {
+                  const query = multiListSearch.trim().toLowerCase();
+                  const groups = spaces
+                    .map((space) => ({
+                      space,
+                      listOptions: lists
+                        .filter((list) => folderById.get(list.folderId)?.spaceId === space.id)
+                        .filter((list) => !query || list.name.toLowerCase().includes(query)),
+                    }))
+                    .filter((group) => group.listOptions.length > 0);
+                  if (groups.length === 0) {
+                    return <div className="px-2 py-3 text-xs text-gray-400 text-center">Nenhuma lista encontrada.</div>;
+                  }
+                  return groups.map(({ space, listOptions }) => (
+                    <div key={space.id}>
+                      <p className="px-2 pt-1.5 pb-0.5 text-[10px] font-bold uppercase text-muted-foreground">{space.name}</p>
+                      {listOptions.map((list) => (
+                        <DropdownMenuCheckboxItem
+                          key={list.id}
+                          checked={multiListIds.includes(list.id)}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={(checked) => setMultiListIds((prev) => checked ? [...prev, list.id] : prev.filter((id) => id !== list.id))}
+                          className="text-xs"
+                        >
+                          {list.name}
+                        </DropdownMenuCheckboxItem>
+                      ))}
+                    </div>
+                  ));
+                })()}
+              </div>
+              {multiListIds.length > 0 && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setMultiListIds([]); }} className="text-xs text-muted-foreground">
+                    <RotateCcw className="mr-2 h-4 w-4" />Limpar seleção
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" className={hasActiveFilters ? 'border-primary text-primary' : ''}><Filter className="mr-2 h-4 w-4" />Filtros{hasActiveFilters && <span className="ml-2 rounded-full bg-primary px-1.5 text-[10px] font-bold text-primary-foreground">ativo</span>}</Button>
@@ -988,6 +1151,20 @@ export const TableView: React.FC<TableViewProps> = ({
                   </div>
                 </div>
               )}
+              <div>
+                {/* Issue #165: filtro dedicado por contexto — antes só dava
+                    pra "achar" o contexto pela busca textual (casa com o
+                    NOME, não distingue contexto de conteúdo). Cada select
+                    reseta os de baixo ao mudar, pra nunca ficar numa
+                    combinação impossível (ex.: pasta de um space diferente
+                    do escolhido). */}
+                <p className="mb-1.5 text-[10px] font-bold uppercase text-muted-foreground">Contexto</p>
+                <div className="grid grid-cols-3 gap-2">
+                  <select value={filterSpaceId} onChange={(e) => { setFilterSpaceId(e.target.value); setFilterFolderId(''); setFilterListId(''); }} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Space</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select>
+                  <select value={filterFolderId} onChange={(e) => { setFilterFolderId(e.target.value); setFilterListId(''); }} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Pasta</option>{folders.filter((folder) => !filterSpaceId || folder.spaceId === filterSpaceId).map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select>
+                  <select value={filterListId} onChange={(e) => setFilterListId(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Lista</option>{lists.filter((list) => (!filterFolderId || list.folderId === filterFolderId) && (!filterSpaceId || folderById.get(list.folderId)?.spaceId === filterSpaceId)).map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select>
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-2">
                 <select value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Responsável</option>{users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select>
                 <select value={filterDue} onChange={(e) => setFilterDue(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Prazo</option><option value="overdue">Atrasadas</option><option value="week">Próximos 7 dias</option><option value="with">Com prazo</option><option value="without">Sem prazo</option></select>
@@ -1051,6 +1228,9 @@ export const TableView: React.FC<TableViewProps> = ({
           {filterAssignee && <Badge variant="outline"><UserCircle className="mr-1 h-3 w-3" />{userById.get(filterAssignee)?.name}</Badge>}
           {filterTag.map((tag) => <Badge key={tag} variant="outline"><Tags className="mr-1 h-3 w-3" />{tag}</Badge>)}
           {filterDue && <Badge variant="outline"><Calendar className="mr-1 h-3 w-3" />{filterDue}</Badge>}
+          {filterSpaceId && <Badge variant="outline"><Layers className="mr-1 h-3 w-3" />{spaceById.get(filterSpaceId)?.name}</Badge>}
+          {filterFolderId && <Badge variant="outline"><FolderOpen className="mr-1 h-3 w-3" />{folderById.get(filterFolderId)?.name}</Badge>}
+          {filterListId && <Badge variant="outline"><Layers className="mr-1 h-3 w-3" />{listById.get(filterListId)?.name}</Badge>}
           {customFilters.filter((filter) => filter.fieldId && filter.value).map((filter, index) => (
             <Badge key={`${filter.fieldId}-${index}`} variant="outline">{taskFields.find((field) => field.id === filter.fieldId)?.name}: {filter.value}</Badge>
           ))}
