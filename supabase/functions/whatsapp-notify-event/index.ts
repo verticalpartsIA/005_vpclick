@@ -1,18 +1,20 @@
-// whatsapp-notify-event — fases 2 e 3 da migração do motor de avisos
+// whatsapp-notify-event — fases 2, 3 e 4 da migração do motor de avisos
 // WhatsApp pra evento (fase 1: migration whatsapp_notify_event_phase1_schema).
 //
-// Disparada por trigger AFTER INSERT (pg_net, fire-and-forget) em vez do
-// polling a cada 15 min do motor antigo (fora deste repo, em
+// Disparada por trigger AFTER INSERT/UPDATE (pg_net, fire-and-forget) em vez
+// do polling a cada 15 min do motor antigo (fora deste repo, em
 // /root/vpclick-cobranca/ na VPS). Autenticada por segredo compartilhado
 // (Vault: whatsapp_notify_event_secret), mesmo padrão do
 // task-recurrence-scheduler — verify_jwt=false no deploy, a própria função
 // valida o header x-whatsapp-notify-secret.
 //
-// Tipos de evento implementados: 'watcher_added' (fase 2) e 'mention'
-// (fase 3, cobre notifications.type IN ('mention','team_mention') — ver
+// Tipos de evento implementados: 'watcher_added' (fase 2), 'mention' (fase
+// 3, cobre notifications.type IN ('mention','team_mention') — ver
 // comentário na migration da fase 3 sobre por que os dois, não só
-// team_mention como o motor antigo fazia). Conclusão fica pra uma fase
-// seguinte.
+// team_mention como o motor antigo fazia) e 'task_completed' (fase 4, tarefa
+// concluída ou cancelada — ver comentário na migration da fase 4 sobre por
+// que o gatilho fica em tasks, não em task_activities, e por que o
+// destinatário é quem criou a tarefa).
 //
 // DRY-RUN por padrão: grava em notification_dispatch_log quem seria
 // notificado, com qual telefone e qual mensagem, mas NÃO chama a Evolution
@@ -28,6 +30,8 @@ interface EventPayload {
   task_id?: string;
   user_id?: string;
   notification_id?: string;
+  actor_id?: string | null;
+  status_type?: string;
 }
 
 // internal_contacts vive num projeto Supabase DIFERENTE (vpposvenda360),
@@ -171,6 +175,30 @@ async function handleMention(admin: ReturnType<typeof createClient>, payload: Ev
   return logDryRun(admin, payload, recipientProfile.id, recipientProfile.name, bodyLines);
 }
 
+async function handleTaskCompleted(admin: ReturnType<typeof createClient>, payload: EventPayload) {
+  const { data: task } = await admin
+    .from('tasks')
+    .select('id, title, created_by')
+    .eq('id', payload.task_id!)
+    .maybeSingle();
+  if (!task || !task.created_by) return { skipped: 'tarefa não encontrada ou sem criador registrado' };
+  if (task.created_by === payload.actor_id) return { skipped: 'quem concluiu é quem criou — sem aviso' };
+
+  const [{ data: recipientProfile }, { data: actorProfile }] = await Promise.all([
+    admin.from('profiles').select('id, name').eq('id', task.created_by).maybeSingle(),
+    payload.actor_id
+      ? admin.from('profiles').select('name').eq('id', payload.actor_id).maybeSingle()
+      : Promise.resolve({ data: null }),
+  ]);
+  if (!recipientProfile) return { skipped: 'perfil de quem criou a tarefa não encontrado' };
+
+  const verb = payload.status_type === 'CANCELLED' ? 'cancelou' : 'concluiu';
+  const bodyLines = [
+    `📋 VP Click aqui! Oi ${recipientProfile.name.split(' ')[0]}, ${actorProfile?.name ?? 'alguém'} ${verb} a tarefa "${task.title}".`,
+  ];
+  return logDryRun(admin, payload, recipientProfile.id, recipientProfile.name, bodyLines);
+}
+
 Deno.serve(async (req: Request) => {
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
@@ -199,9 +227,11 @@ Deno.serve(async (req: Request) => {
     result = await handleWatcherAdded(admin, payload);
   } else if (payload.event_type === 'mention') {
     result = await handleMention(admin, payload);
+  } else if (payload.event_type === 'task_completed') {
+    result = await handleTaskCompleted(admin, payload);
   } else {
-    // Próximas fases plugam conclusão aqui. Por ora, qualquer outro tipo é
-    // um 400 explícito — não um "sucesso" silencioso enganoso.
+    // Qualquer outro tipo é um 400 explícito — não um "sucesso" silencioso
+    // enganoso.
     return json({ error: `event_type '${payload.event_type}' ainda não implementado nesta função` }, 400);
   }
 
