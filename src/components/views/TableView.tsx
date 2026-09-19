@@ -53,6 +53,7 @@ import { toast } from 'sonner';
 import { DateFieldEditor } from '@/components/DateFieldEditor';
 import { parseLocalDate, formatDateBR } from '@/lib/dates';
 import { supabase, reorderTasksInList } from '@/lib/supabase';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 interface TableViewProps {
   tasks: Task[];
@@ -105,6 +106,9 @@ type TablePrefs = {
 };
 
 const DEFAULT_COLUMNS = ['title', 'status', 'priority', 'assignee', 'dueDate'];
+// Issue #144: recorte de colunas mostrado abaixo do breakpoint mobile, além
+// das colunas `required` (hoje só "title"). Ver uso em `effectiveVisibleColumns`.
+const MOBILE_ESSENTIAL_COLUMNS = ['status', 'priority', 'dueDate'];
 const DEFAULT_WIDTHS: Record<string, number> = {
   title: 320,
   status: 150,
@@ -447,6 +451,20 @@ export const TableView: React.FC<TableViewProps> = ({
       });
   }, [allColumns, prefs.columnOrder, prefs.visibleColumns, hiddenFieldIdsForList]);
 
+  // Issue #144: abaixo do breakpoint mobile, renderiza só um recorte
+  // essencial de colunas — a alternativa (todas as colunas com as mesmas
+  // larguras mínimas de desktop) força scroll horizontal constante e
+  // dificulta achar a informação principal. É um filtro só de EXIBIÇÃO,
+  // aplicado por cima de `visibleColumns`: nunca mexe em `prefs`, então a
+  // preferência de colunas do usuário (persistida em table_view_prefs) não
+  // é alterada nem sobrescrita — ao voltar pro desktop, tudo volta como
+  // estava configurado.
+  const isMobile = useIsMobile();
+  const effectiveVisibleColumns = useMemo(() => {
+    if (!isMobile) return visibleColumns;
+    return visibleColumns.filter((column) => column.required || MOBILE_ESSENTIAL_COLUMNS.includes(column.id));
+  }, [visibleColumns, isMobile]);
+
   const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag.length || filterDue || customFilters.some((filter) => filter.fieldId && filter.value));
 
   const displayedTasks = useMemo(() => {
@@ -616,31 +634,38 @@ export const TableView: React.FC<TableViewProps> = ({
     }
   };
 
-  const handleResizeMouseDown = useCallback((e: React.MouseEvent, colId: string) => {
+  // Issue #144: Pointer Events (em vez de mouse-only) fazem o mesmo handler
+  // funcionar com mouse, caneta e toque — sem isso, redimensionar coluna era
+  // impossível em tablet/celular. `setPointerCapture` no próprio elemento
+  // evita perder o arraste quando o dedo/cursor sai da faixa fina do handle.
+  const handleResizeMouseDown = useCallback((e: React.PointerEvent<HTMLDivElement>, colId: string) => {
     e.preventDefault();
     e.stopPropagation();
     const startWidth = prefs.columnWidths[colId] ?? allColumns.find((column) => column.id === colId)?.defaultWidth ?? 150;
     resizingRef.current = { colId, startX: e.clientX, startWidth };
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
 
-    const handleMouseMove = (ev: MouseEvent) => {
+    const handlePointerMove = (ev: PointerEvent) => {
       if (!resizingRef.current) return;
       const delta = ev.clientX - resizingRef.current.startX;
       const newWidth = Math.max(resizingRef.current.colId === 'title' ? 220 : 90, resizingRef.current.startWidth + delta);
       setPrefs((prev) => ({ ...prev, columnWidths: { ...prev.columnWidths, [resizingRef.current!.colId]: newWidth } }));
     };
 
-    const handleMouseUp = () => {
+    const handlePointerUp = (ev: PointerEvent) => {
       resizingRef.current = null;
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
+      handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener('pointermove', handlePointerMove);
+      handle.removeEventListener('pointerup', handlePointerUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
 
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
+    handle.addEventListener('pointermove', handlePointerMove);
+    handle.addEventListener('pointerup', handlePointerUp);
   }, [allColumns, prefs.columnWidths]);
 
   const reorderColumn = (targetId: string) => {
@@ -1037,10 +1062,14 @@ export const TableView: React.FC<TableViewProps> = ({
         <table className="border-collapse text-left" style={{ width: 'max-content', minWidth: '100%' }}>
           <thead className="sticky top-0 z-20 bg-muted">
             <tr>
-              <th className="sticky left-0 z-30 border border-border bg-muted px-2 py-2" style={{ width: 44, minWidth: 44 }}>
-                <input type="checkbox" checked={displayedTasks.length > 0 && displayedTasks.every((task) => selectedTaskIds.has(task.id))} onChange={selectAllVisible} className="h-4 w-4 rounded border-border" aria-label="Selecionar tarefas visíveis" />
+              <th className="sticky left-0 z-30 border border-border bg-muted p-0" style={{ width: 44, minWidth: 44 }}>
+                {/* Issue #144: label preenchendo os 44px da célula em vez de
+                    só o checkbox (16px) — área de toque confiável em mobile. */}
+                <label className="flex h-11 w-11 cursor-pointer items-center justify-center">
+                  <input type="checkbox" checked={displayedTasks.length > 0 && displayedTasks.every((task) => selectedTaskIds.has(task.id))} onChange={selectAllVisible} className="h-4 w-4 rounded border-border" aria-label="Selecionar tarefas visíveis" />
+                </label>
               </th>
-              {visibleColumns.map((column) => {
+              {effectiveVisibleColumns.map((column) => {
                 const width = prefs.columnWidths[column.id] ?? column.defaultWidth;
                 const stickyClass = column.id === 'title' && prefs.stickyTitle ? 'sticky left-[44px] z-30 shadow-[8px_0_10px_-12px_rgba(0,0,0,0.45)]' : '';
                 return (
@@ -1049,7 +1078,7 @@ export const TableView: React.FC<TableViewProps> = ({
                       {!column.required && <GripVertical className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
                       <span className="flex-1 truncate text-xs font-semibold uppercase text-muted-foreground">{column.label}</span>
                     </div>
-                    <div className="absolute right-0 top-0 z-40 h-full w-2 cursor-col-resize hover:bg-primary/40" onMouseDown={(e) => handleResizeMouseDown(e, column.id)} />
+                    <div className="absolute right-0 top-0 z-40 h-full w-3 touch-none cursor-col-resize hover:bg-primary/40" onPointerDown={(e) => handleResizeMouseDown(e, column.id)} />
                   </th>
                 );
               })}
@@ -1074,24 +1103,28 @@ export const TableView: React.FC<TableViewProps> = ({
                   className={`group cursor-pointer hover:bg-muted/40 ${dragOverRowId === task.id ? 'outline outline-2 outline-primary/40' : ''}`}
                   style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start}px)` }}
                 >
-                  <td className="sticky left-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 44, minWidth: 44 }}>
-                    <div className="flex items-center justify-center gap-1">
-                      <GripVertical className={`h-4 w-4 ${canReorderRows ? 'text-muted-foreground' : 'text-muted-foreground/30'}`} />
-                      <input
-                        type="checkbox"
-                        checked={selectedTaskIds.has(task.id)}
-                        disabled={!canEditTaskInTable(task)}
-                        title={canEditTaskInTable(task) ? undefined : 'Você não tem permissão para editar esta tarefa'}
-                        onClick={(e) => e.stopPropagation()}
-                        onChange={() => toggleSelected(task.id)}
-                        className="h-4 w-4 rounded border-border disabled:cursor-not-allowed disabled:opacity-40"
-                      />
+                  <td className="sticky left-0 z-10 border border-border bg-background px-1 py-2 text-center group-hover:bg-muted/40" style={{ width: 44, minWidth: 44 }}>
+                    <div className="flex items-center justify-center gap-0.5">
+                      <GripVertical className={`h-4 w-4 shrink-0 ${canReorderRows ? 'text-muted-foreground' : 'text-muted-foreground/30'}`} />
+                      {/* Issue #144: label aumenta a área de toque do checkbox
+                          sem mudar a largura fixa da célula (44px, compartida
+                          com o ícone de arrastar). */}
+                      <label className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedTaskIds.has(task.id)}
+                          disabled={!canEditTaskInTable(task)}
+                          title={canEditTaskInTable(task) ? undefined : 'Você não tem permissão para editar esta tarefa'}
+                          onChange={() => toggleSelected(task.id)}
+                          className="h-4 w-4 rounded border-border disabled:cursor-not-allowed disabled:opacity-40"
+                        />
+                      </label>
                     </div>
                   </td>
-                  {visibleColumns.map((column) => renderCell(task, column))}
+                  {effectiveVisibleColumns.map((column) => renderCell(task, column))}
                   <td className="sticky right-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 48, minWidth: 48 }} onClick={(e) => e.stopPropagation()}>
                     <DropdownMenu>
-                      <DropdownMenuTrigger asChild><button type="button" className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Ações da tarefa"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
+                      <DropdownMenuTrigger asChild><button type="button" className="rounded p-2.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Ações da tarefa"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-52">
                         <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Abrir tarefa</DropdownMenuItem>
                         {/* Issue #163: "Editar detalhes"/Duplicar/Mover/Excluir escondidos
@@ -1111,13 +1144,13 @@ export const TableView: React.FC<TableViewProps> = ({
             })}
           </tbody>
           <tbody>
-            {displayedTasks.length === 0 && <tr><td colSpan={visibleColumns.length + 2} className="border border-border px-4 py-12 text-center text-sm text-muted-foreground">Nenhuma tarefa encontrada na Tabela.</td></tr>}
+            {displayedTasks.length === 0 && <tr><td colSpan={effectiveVisibleColumns.length + 2} className="border border-border px-4 py-12 text-center text-sm text-muted-foreground">Nenhuma tarefa encontrada na Tabela.</td></tr>}
             <tr className="bg-muted/20">
               <td className="sticky left-0 z-10 border border-border bg-muted/20 px-2 py-2" style={{ width: 44, minWidth: 44 }} />
               <td className={`${prefs.stickyTitle ? 'sticky left-[44px] z-10 bg-muted/20' : ''} border border-border px-3 py-2`} style={{ minWidth: prefs.columnWidths.title ?? DEFAULT_WIDTHS.title }}>
                 <div className="flex min-w-[260px] items-center gap-2"><Plus className="h-4 w-4 shrink-0 text-muted-foreground" /><input value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') createInlineTask(); if (e.key === 'Escape') setNewTaskTitle(''); }} placeholder="Adicionar tarefa" className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm outline-none focus:border-primary" /></div>
               </td>
-              <td className="border border-border px-3 py-2" colSpan={Math.max(visibleColumns.length - 1, 1)}>
+              <td className="border border-border px-3 py-2" colSpan={Math.max(effectiveVisibleColumns.length - 1, 1)}>
                 <div className="flex flex-wrap items-center gap-2">
                   <select value={newTaskListId} onChange={(e) => setNewTaskListId(e.target.value)} className="h-9 max-w-[240px] rounded-md border border-border bg-background px-2 text-sm"><option value="">Escolher lista</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select>
                   <Button size="sm" onClick={createInlineTask} disabled={!newTaskTitle.trim() || !onCreateTask}><Check className="mr-2 h-4 w-4" />Criar</Button>
