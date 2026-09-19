@@ -26,7 +26,6 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
           VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
       - name: ESLint (avisos existentes no App.tsx - nao bloqueia)
         run: npm run lint
@@ -36,7 +35,6 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
           VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
       - name: Resumo Quality Gate
         if: always()
@@ -87,7 +85,7 @@ jobs:
         env:
           CYPRESS_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           CYPRESS_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          CYPRESS_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
+          CYPRESS_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           CYPRESS_ADMIN_EMAIL: ${{ secrets.TEST_ADMIN_EMAIL }}
           CYPRESS_ADMIN_PASSWORD: ${{ secrets.TEST_ADMIN_PASSWORD }}
           CYPRESS_COLLAB_EMAIL: ${{ secrets.TEST_COLLAB_EMAIL }}

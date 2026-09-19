@@ -31,7 +31,9 @@ jobs:
         env:
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
-          VITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.VITE_SUPABASE_SERVICE_ROLE_KEY }}
+          # NUNCA passar a service_role key aqui: qualquer env VITE_* referenciada
+          # em src/ é embutida em texto puro no bundle JS público. `npm run build`
+          # não lê essa chave (nada em src/ a referencia) — só existia aqui à toa.
           VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
 
       # A VPS NÃO usa Traefik pra tráfego real (o container Traefik existe
