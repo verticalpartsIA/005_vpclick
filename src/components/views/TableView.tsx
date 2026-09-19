@@ -32,6 +32,7 @@ import {
   Task,
   TaskPriority,
   User,
+  UserRole,
   WorkspaceTag,
 } from '../../types';
 import { TagBadge } from '@/components/TagBadge';
@@ -79,6 +80,12 @@ interface TableViewProps {
   workspaceTags?: WorkspaceTag[];
   hiddenTaskFieldIdsByList?: Record<string, string[]>;
   onHideTaskFieldForList?: (listId: string, fieldId: string) => void;
+  // Issues #137/#143/#162/#163: `null` = acesso total (admin, mesmo
+  // sentinela usado em App.tsx); um Set = ids de pasta liberados pro
+  // usuário (via espaço ou pasta concedida direto). Usado só pra ESCONDER
+  // ações que a RLS já bloquearia de qualquer jeito — nunca é a fonte de
+  // verdade de permissão, só evita cliques que dariam em erro.
+  allowedFolderIdSet?: Set<string> | null;
 }
 
 type ColumnDef = {
@@ -168,6 +175,7 @@ export const TableView: React.FC<TableViewProps> = ({
   workspaceTags = [],
   hiddenTaskFieldIdsByList = {},
   onHideTaskFieldForList,
+  allowedFolderIdSet = null,
 }) => {
   const scopeOptions = useMemo(() => {
     const source = allTasks || tasks;
@@ -360,6 +368,7 @@ export const TableView: React.FC<TableViewProps> = ({
 
   const getFieldValue = useCallback((taskId: string, fieldId: string) => fieldValueMap.get(`${taskId}:${fieldId}`), [fieldValueMap]);
   const listById = useMemo(() => new Map(lists.map((list) => [list.id, list])), [lists]);
+  const taskById = useMemo(() => new Map(scopedTasks.map((task) => [task.id, task])), [scopedTasks]);
   const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
   const spaceById = useMemo(() => new Map(spaces.map((space) => [space.id, space])), [spaces]);
   const userById = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
@@ -370,6 +379,37 @@ export const TableView: React.FC<TableViewProps> = ({
     const space = folder ? spaceById.get(folder.spaceId) : undefined;
     return { list, folder, space };
   }, [folderById, listById, spaceById]);
+
+  // Issues #137/#143/#162/#163: só pra ESCONDER ações que a RLS de qualquer
+  // jeito bloquearia (evita cliques que dão em erro) — nunca é a fonte de
+  // verdade. Cobre 4 das 5 condições reais de tasks_upd (ADMIN/GESTOR,
+  // responsável principal/secundário, criador, acesso à lista via
+  // pasta/espaço); a 5ª (observador) não dá pra checar aqui porque a linha
+  // "leve" que a Tabela recebe não traz watcherIds (só carregado sob
+  // demanda ao abrir o detalhe) — um observador puro, sem nenhuma das
+  // outras 4 condições, pode ver uma ação escondida que o backend na
+  // verdade permitiria. Caso raro e sem risco de segurança (só esconde
+  // ação de mais, nunca de menos do que a RLS já barraria).
+  const canEditTaskInTable = useCallback((task: Task) => {
+    if (!currentUser) return false;
+    if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) return true;
+    if (task.mainAssigneeId === currentUser.id) return true;
+    if ((task.secondaryAssigneeIds || []).includes(currentUser.id)) return true;
+    if (task.createdBy === currentUser.id) return true;
+    if (allowedFolderIdSet === null) return true;
+    const list = listById.get(task.listId);
+    return Boolean(list && allowedFolderIdSet.has(list.folderId));
+  }, [allowedFolderIdSet, currentUser, listById]);
+
+  // Issue #162: criar tarefa depende só de acesso à LISTA (tasks_ins =
+  // can_access_list), não das condições de dono/responsável acima.
+  const canCreateInList = useCallback((listId: string) => {
+    if (!currentUser) return false;
+    if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) return true;
+    if (allowedFolderIdSet === null) return true;
+    const list = listById.get(listId);
+    return Boolean(list && allowedFolderIdSet.has(list.folderId));
+  }, [allowedFolderIdSet, currentUser, listById]);
 
   const availableStatuses = useMemo(() => {
     const fromGroups = statusGroups.flatMap((group) => group.options.map((option) => option.label));
@@ -530,7 +570,15 @@ export const TableView: React.FC<TableViewProps> = ({
     setCustomFilters((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // Issue #137: choque único de permissão pra toda edição de célula (inline
+  // e em lote, que passam por aqui) — evita repetir a checagem em cada tipo
+  // de coluna/editor.
   const commitTaskUpdate = async (taskId: string, updates: Partial<Task>) => {
+    const task = taskById.get(taskId);
+    if (task && !canEditTaskInTable(task)) {
+      toast.error('Você não tem permissão para editar esta tarefa.');
+      return;
+    }
     try {
       await onUpdateTask(taskId, updates);
     } catch {
@@ -539,6 +587,11 @@ export const TableView: React.FC<TableViewProps> = ({
   };
 
   const commitFieldUpdate = async (taskId: string, fieldId: string, value: any) => {
+    const task = taskById.get(taskId);
+    if (task && !canEditTaskInTable(task)) {
+      toast.error('Você não tem permissão para editar esta tarefa.');
+      return;
+    }
     try {
       await onUpdateFieldValue(fieldId, taskId, value);
     } catch {
@@ -674,8 +727,11 @@ export const TableView: React.FC<TableViewProps> = ({
     });
   };
 
+  // Issue #143: só seleciona (e portanto só permite ação em lote sobre)
+  // tarefas que o usuário pode editar — evita marcar tudo e a ação falhar
+  // silenciosamente por linha na RLS.
   const selectAllVisible = () => {
-    const visibleIds = displayedTasks.map((task) => task.id);
+    const visibleIds = displayedTasks.filter(canEditTaskInTable).map((task) => task.id);
     const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedTaskIds.has(id));
     setSelectedTaskIds(allSelected ? new Set() : new Set(visibleIds));
   };
@@ -701,6 +757,12 @@ export const TableView: React.FC<TableViewProps> = ({
     const targetListId = newTaskListId || activeListId || (scopeId.startsWith('list:') ? scopeId.replace('list:', '') : '');
     if (!targetListId) {
       toast.error('Escolha uma lista para criar a tarefa.');
+      return;
+    }
+    // Issue #162: criar depende de acesso à lista (tasks_ins), não das
+    // condições de dono/responsável de canEditTaskInTable.
+    if (!canCreateInList(targetListId)) {
+      toast.error('Você não tem permissão para criar tarefas nesta lista.');
       return;
     }
     await onCreateTask({ title: newTaskTitle.trim(), listId: targetListId });
@@ -1015,7 +1077,15 @@ export const TableView: React.FC<TableViewProps> = ({
                   <td className="sticky left-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 44, minWidth: 44 }}>
                     <div className="flex items-center justify-center gap-1">
                       <GripVertical className={`h-4 w-4 ${canReorderRows ? 'text-muted-foreground' : 'text-muted-foreground/30'}`} />
-                      <input type="checkbox" checked={selectedTaskIds.has(task.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleSelected(task.id)} className="h-4 w-4 rounded border-border" />
+                      <input
+                        type="checkbox"
+                        checked={selectedTaskIds.has(task.id)}
+                        disabled={!canEditTaskInTable(task)}
+                        title={canEditTaskInTable(task) ? undefined : 'Você não tem permissão para editar esta tarefa'}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={() => toggleSelected(task.id)}
+                        className="h-4 w-4 rounded border-border disabled:cursor-not-allowed disabled:opacity-40"
+                      />
                     </div>
                   </td>
                   {visibleColumns.map((column) => renderCell(task, column))}
@@ -1024,11 +1094,15 @@ export const TableView: React.FC<TableViewProps> = ({
                       <DropdownMenuTrigger asChild><button type="button" className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Ações da tarefa"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-52">
                         <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Abrir tarefa</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Editar detalhes</DropdownMenuItem>
-                        {onDuplicateTask && <DropdownMenuItem onClick={() => onDuplicateTask(task)}><Copy className="mr-2 h-4 w-4" />Duplicar</DropdownMenuItem>}
+                        {/* Issue #163: "Editar detalhes"/Duplicar/Mover/Excluir escondidos
+                            quando o usuário não pode editar a tarefa — "Abrir"/"Copiar
+                            link" continuam sempre disponíveis (visualizar é mais
+                            permissivo que editar, mesma lógica da RLS tasks_select). */}
+                        {canEditTaskInTable(task) && <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Editar detalhes</DropdownMenuItem>}
+                        {canEditTaskInTable(task) && onDuplicateTask && <DropdownMenuItem onClick={() => onDuplicateTask(task)}><Copy className="mr-2 h-4 w-4" />Duplicar</DropdownMenuItem>}
                         <DropdownMenuItem onClick={() => copyTaskLink(task.id)}><Copy className="mr-2 h-4 w-4" />Copiar link</DropdownMenuItem>
-                        {onBulkMove && <><DropdownMenuSeparator />{lists.map((list) => <DropdownMenuItem key={list.id} onClick={() => onBulkMove([task.id], list.id)}><FolderOpen className="mr-2 h-4 w-4" />Mover para {list.name}</DropdownMenuItem>)}</>}
-                        {onDeleteTask && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => onDeleteTask(task.id)}><Trash2 className="mr-2 h-4 w-4" />Excluir</DropdownMenuItem></>}
+                        {canEditTaskInTable(task) && onBulkMove && <><DropdownMenuSeparator />{lists.map((list) => <DropdownMenuItem key={list.id} onClick={() => onBulkMove([task.id], list.id)}><FolderOpen className="mr-2 h-4 w-4" />Mover para {list.name}</DropdownMenuItem>)}</>}
+                        {canEditTaskInTable(task) && onDeleteTask && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => onDeleteTask(task.id)}><Trash2 className="mr-2 h-4 w-4" />Excluir</DropdownMenuItem></>}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </td>

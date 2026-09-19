@@ -4672,6 +4672,7 @@ export default function App() {
                 workspaceTags={workspaceTags}
                 hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
                 onHideTaskFieldForList={handleToggleTaskFieldForList}
+                allowedFolderIdSet={allowedFolderIdSet}
               />
             )}
             {activeView === 'Workload' && (
