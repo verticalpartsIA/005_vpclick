@@ -250,10 +250,14 @@ export const TableView: React.FC<TableViewProps> = ({
   const [filterStatus, setFilterStatus] = useState<string[]>([]);
   const [filterPriority, setFilterPriority] = useState<TaskPriority[]>([]);
   const [filterAssignee, setFilterAssignee] = useState('');
-  const [filterTag, setFilterTag] = useState('');
+  // Issue #139: era valor único (string) mesmo o filtro se comportando como
+  // "combinável" no resto do app — agora aceita múltiplos valores de verdade
+  // (toggle, mesmo padrão já usado pelo filtro de Status).
+  const [filterTag, setFilterTag] = useState<string[]>([]);
   const [filterDue, setFilterDue] = useState('');
-  const [customFilterFieldId, setCustomFilterFieldId] = useState('');
-  const [customFilterValue, setCustomFilterValue] = useState('');
+  // Issue #139: antes só dava pra filtrar por 1 campo customizado por vez;
+  // agora é uma lista de filtros combináveis (AND entre eles, como os demais).
+  const [customFilters, setCustomFilters] = useState<{ fieldId: string; value: string }[]>([]);
   const [sortField, setSortField] = useState<'dueDate' | 'priority' | 'title' | 'list' | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
@@ -354,7 +358,7 @@ export const TableView: React.FC<TableViewProps> = ({
       });
   }, [allColumns, prefs.columnOrder, prefs.visibleColumns, hiddenFieldIdsForList]);
 
-  const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag || filterDue || (customFilterFieldId && customFilterValue));
+  const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag.length || filterDue || customFilters.some((filter) => filter.fieldId && filter.value));
 
   const displayedTasks = useMemo(() => {
     let result = scopedTasks.filter((task) => !task.parentId);
@@ -385,7 +389,7 @@ export const TableView: React.FC<TableViewProps> = ({
     if (filterStatus.length > 0) result = result.filter((task) => filterStatus.includes(task.status));
     if (filterPriority.length > 0) result = result.filter((task) => filterPriority.includes(task.priority));
     if (filterAssignee) result = result.filter((task) => task.mainAssigneeId === filterAssignee || task.secondaryAssigneeIds?.includes(filterAssignee));
-    if (filterTag) result = result.filter((task) => task.tags?.includes(filterTag));
+    if (filterTag.length > 0) result = result.filter((task) => task.tags?.some((tag) => filterTag.includes(tag)));
     if (filterDue === 'overdue') result = result.filter(isOverdue);
     if (filterDue === 'without') result = result.filter((task) => !task.dueDate);
     if (filterDue === 'with') result = result.filter((task) => Boolean(task.dueDate));
@@ -400,14 +404,17 @@ export const TableView: React.FC<TableViewProps> = ({
       });
     }
 
-    if (customFilterFieldId && customFilterValue) {
-      const query = normalize(customFilterValue);
-      result = result.filter((task) => {
-        const field = taskFields.find((item) => item.id === customFilterFieldId);
-        const value = getFieldValue(task.id, customFilterFieldId);
-        const option = field?.config?.options?.find((item) => item.id === value);
-        return normalize(option?.label || value).includes(query);
-      });
+    const activeCustomFilters = customFilters.filter((filter) => filter.fieldId && filter.value);
+    if (activeCustomFilters.length > 0) {
+      result = result.filter((task) =>
+        activeCustomFilters.every(({ fieldId, value }) => {
+          const query = normalize(value);
+          const field = taskFields.find((item) => item.id === fieldId);
+          const fieldValue = getFieldValue(task.id, fieldId);
+          const option = field?.config?.options?.find((item) => item.id === fieldValue);
+          return normalize(option?.label || fieldValue).includes(query);
+        })
+      );
     }
 
     if (sortField) {
@@ -438,7 +445,7 @@ export const TableView: React.FC<TableViewProps> = ({
     }
 
     return result;
-  }, [customFilterFieldId, customFilterValue, filterAssignee, filterDue, filterPriority, filterStatus, filterTag, getFieldValue, getTaskContext, hasActiveFilters, rowOrder, scopedTasks, search, sortDir, sortField, taskFields, userById]);
+  }, [customFilters, filterAssignee, filterDue, filterPriority, filterStatus, filterTag, getFieldValue, getTaskContext, hasActiveFilters, rowOrder, scopedTasks, search, sortDir, sortField, taskFields, userById]);
 
   useEffect(() => {
     setSelectedTaskIds((prev) => {
@@ -453,10 +460,25 @@ export const TableView: React.FC<TableViewProps> = ({
     setFilterStatus([]);
     setFilterPriority([]);
     setFilterAssignee('');
-    setFilterTag('');
+    setFilterTag([]);
     setFilterDue('');
-    setCustomFilterFieldId('');
-    setCustomFilterValue('');
+    setCustomFilters([]);
+  };
+
+  const toggleFilterTag = (tag: string) => {
+    setFilterTag((prev) => (prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]));
+  };
+
+  const addCustomFilter = () => {
+    setCustomFilters((prev) => [...prev, { fieldId: '', value: '' }]);
+  };
+
+  const updateCustomFilter = (index: number, patch: Partial<{ fieldId: string; value: string }>) => {
+    setCustomFilters((prev) => prev.map((filter, i) => (i === index ? { ...filter, ...patch } : filter)));
+  };
+
+  const removeCustomFilter = (index: number) => {
+    setCustomFilters((prev) => prev.filter((_, i) => i !== index));
   };
 
   const commitTaskUpdate = async (taskId: string, updates: Partial<Task>) => {
@@ -784,15 +806,39 @@ export const TableView: React.FC<TableViewProps> = ({
                   {availableStatuses.map((status) => <button key={status} type="button" onClick={() => setFilterStatus((prev) => prev.includes(status) ? prev.filter((item) => item !== status) : [...prev, status])} className={`rounded-full border px-2 py-1 text-[11px] ${filterStatus.includes(status) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>{status}</button>)}
                 </div>
               </div>
+              <div>
+                {/* Issue #139: era um <select> de valor único — agora, mesmo
+                    padrão de toggle do Status acima, dá pra combinar mais de
+                    uma prioridade no filtro. */}
+                <p className="mb-1.5 text-[10px] font-bold uppercase text-muted-foreground">Prioridade</p>
+                <div className="flex flex-wrap gap-1">
+                  {PRIORITY_VALUES.map((priority) => <button key={priority} type="button" onClick={() => setFilterPriority((prev) => prev.includes(priority) ? prev.filter((item) => item !== priority) : [...prev, priority])} className={`rounded-full border px-2 py-1 text-[11px] ${filterPriority.includes(priority) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>{priority}</button>)}
+                </div>
+              </div>
+              {availableTags.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[10px] font-bold uppercase text-muted-foreground">Tags</p>
+                  <div className="flex flex-wrap gap-1">
+                    {availableTags.map((tag) => <button key={tag} type="button" onClick={() => toggleFilterTag(tag)} className={`rounded-full border px-2 py-1 text-[11px] ${filterTag.includes(tag) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>{tag}</button>)}
+                  </div>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-2">
-                <select value={filterPriority[0] || ''} onChange={(e) => setFilterPriority(e.target.value ? [e.target.value as TaskPriority] : [])} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Prioridade</option>{PRIORITY_VALUES.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select>
                 <select value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Responsável</option>{users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select>
-                <select value={filterTag} onChange={(e) => setFilterTag(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Tags</option>{availableTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select>
                 <select value={filterDue} onChange={(e) => setFilterDue(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Prazo</option><option value="overdue">Atrasadas</option><option value="week">Próximos 7 dias</option><option value="with">Com prazo</option><option value="without">Sem prazo</option></select>
               </div>
-              <div className="grid grid-cols-[1fr_1fr] gap-2">
-                <select value={customFilterFieldId} onChange={(e) => setCustomFilterFieldId(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Campo customizado</option>{taskFields.filter((field) => field.type !== CustomFieldType.FORMULA).map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
-                <input value={customFilterValue} onChange={(e) => setCustomFilterValue(e.target.value)} placeholder="Valor" className="h-9 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary" />
+              <div className="space-y-2">
+                {/* Issue #139: antes só dava pra filtrar por 1 campo
+                    customizado de cada vez — agora é uma lista, combinável
+                    (AND) com os demais filtros. */}
+                {customFilters.map((filter, index) => (
+                  <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+                    <select value={filter.fieldId} onChange={(e) => updateCustomFilter(index, { fieldId: e.target.value })} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Campo customizado</option>{taskFields.filter((field) => field.type !== CustomFieldType.FORMULA).map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
+                    <input value={filter.value} onChange={(e) => updateCustomFilter(index, { value: e.target.value })} placeholder="Valor" className="h-9 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary" />
+                    <button type="button" onClick={() => removeCustomFilter(index)} className="flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted" aria-label="Remover filtro de campo customizado"><X className="h-4 w-4" /></button>
+                  </div>
+                ))}
+                <Button variant="ghost" size="sm" onClick={addCustomFilter} className="w-full justify-center text-muted-foreground"><Plus className="mr-2 h-4 w-4" />Adicionar filtro de campo</Button>
               </div>
               {hasActiveFilters && <Button variant="ghost" size="sm" onClick={resetFilters} className="w-full justify-center text-muted-foreground"><RotateCcw className="mr-2 h-4 w-4" />Limpar filtros</Button>}
             </DropdownMenuContent>
@@ -836,9 +882,13 @@ export const TableView: React.FC<TableViewProps> = ({
         <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
           <span>{displayedTasks.length} de {scopedTasks.length} tarefas</span>
           {search && <Badge variant="outline">Busca: {search}</Badge>}
+          {filterPriority.map((priority) => <Badge key={priority} variant="outline">{priority}</Badge>)}
           {filterAssignee && <Badge variant="outline"><UserCircle className="mr-1 h-3 w-3" />{userById.get(filterAssignee)?.name}</Badge>}
-          {filterTag && <Badge variant="outline"><Tags className="mr-1 h-3 w-3" />{filterTag}</Badge>}
+          {filterTag.map((tag) => <Badge key={tag} variant="outline"><Tags className="mr-1 h-3 w-3" />{tag}</Badge>)}
           {filterDue && <Badge variant="outline"><Calendar className="mr-1 h-3 w-3" />{filterDue}</Badge>}
+          {customFilters.filter((filter) => filter.fieldId && filter.value).map((filter, index) => (
+            <Badge key={`${filter.fieldId}-${index}`} variant="outline">{taskFields.find((field) => field.id === filter.fieldId)?.name}: {filter.value}</Badge>
+          ))}
           <button type="button" onClick={resetFilters} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted"><X className="h-3 w-3" />Limpar</button>
         </div>
       )}
