@@ -5872,6 +5872,10 @@ function Sidebar({
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
   const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
+  // Issue #125: busca do submenu "Mover para" — fica no componente (não
+  // dentro do .map() de listas, que violaria as regras de hooks) já que só
+  // um desses submenus fica aberto por vez; reseta ao fechar o menu pai.
+  const [moveToFolderSearch, setMoveToFolderSearch] = useState('');
 
   // "Mais" (item 9 do Início, estilo ClickUp): escolher um item no dropdown
   // "fixa" ele na sidebar, substituindo o que estava fixado antes — só o
@@ -6698,7 +6702,7 @@ function Sidebar({
                                               >
                                                 <svg className="w-3 h-3" fill={favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
                                               </button>
-                                              <DropdownMenu>
+                                              <DropdownMenu onOpenChange={(open: boolean) => { if (!open) setMoveToFolderSearch(''); }}>
                                                 <DropdownMenuTrigger asChild>
                                                   <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground"><MoreHorizontal className="h-3 w-3" /></button>
                                                 </DropdownMenuTrigger>
@@ -6711,15 +6715,47 @@ function Sidebar({
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
                                                   <DropdownMenuSub>
                                                     <DropdownMenuSubTrigger className="text-xs">Mover para</DropdownMenuSubTrigger>
-                                                    <DropdownMenuSubContent>
-                                                      {(folders as any[]).filter((f: any) => f.id !== list.folderId).map((f: any) => (
-                                                        <DropdownMenuItem key={f.id} className="text-xs" onClick={(e) => { e.stopPropagation(); onMoveList?.(list.id, f.id); }}>
-                                                          {f.name}
-                                                        </DropdownMenuItem>
-                                                      ))}
-                                                      {(folders as any[]).filter((f: any) => f.id !== list.folderId).length === 0 && (
-                                                        <DropdownMenuItem className="text-xs text-gray-400" disabled>Nenhuma outra pasta</DropdownMenuItem>
-                                                      )}
+                                                    <DropdownMenuSubContent className="w-64">
+                                                      {/* Issue #125: antes era uma lista plana com pastas de espaços não
+                                                          relacionados misturadas — agora agrupa por espaço (ordem
+                                                          alfabética) e tem busca por nome da pasta. */}
+                                                      <div className="sticky top-0 z-10 bg-popover p-1">
+                                                        <input
+                                                          type="text"
+                                                          autoFocus
+                                                          value={moveToFolderSearch}
+                                                          onChange={(e) => setMoveToFolderSearch(e.target.value)}
+                                                          onKeyDown={(e) => e.stopPropagation()}
+                                                          onClick={(e) => e.stopPropagation()}
+                                                          placeholder="Buscar pasta..."
+                                                          className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                                                        />
+                                                      </div>
+                                                      {(() => {
+                                                        const query = moveToFolderSearch.trim().toLowerCase();
+                                                        const groups = (spaces as any[])
+                                                          .map((space: any) => ({
+                                                            space,
+                                                            folderList: (folders as any[])
+                                                              .filter((f: any) => f.spaceId === space.id && f.id !== list.folderId)
+                                                              .filter((f: any) => !query || f.name.toLowerCase().includes(query)),
+                                                          }))
+                                                          .filter((group: any) => group.folderList.length > 0)
+                                                          .sort((a: any, b: any) => a.space.name.localeCompare(b.space.name, 'pt-BR'));
+                                                        if (groups.length === 0) {
+                                                          return <DropdownMenuItem className="text-xs text-gray-400" disabled>Nenhuma pasta encontrada</DropdownMenuItem>;
+                                                        }
+                                                        return groups.map(({ space, folderList }: any) => (
+                                                          <div key={space.id}>
+                                                            <p className="px-2 pt-1.5 pb-0.5 text-[10px] font-bold uppercase text-muted-foreground">{space.name}</p>
+                                                            {folderList.map((f: any) => (
+                                                              <DropdownMenuItem key={f.id} className="text-xs" onClick={(e) => { e.stopPropagation(); onMoveList?.(list.id, f.id); }}>
+                                                                {f.name}
+                                                              </DropdownMenuItem>
+                                                            ))}
+                                                          </div>
+                                                        ));
+                                                      })()}
                                                     </DropdownMenuSubContent>
                                                   </DropdownMenuSub>
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onDuplicateList?.(list.id, list.name); }}>Duplicar projeto</DropdownMenuItem>
