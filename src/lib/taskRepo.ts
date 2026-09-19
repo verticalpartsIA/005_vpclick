@@ -51,6 +51,7 @@ const TASK_ROW_SELECT = [
   'deletion_reason_text',
   'estimated_hours',
   'actual_delivery_date',
+  'sort_index',
 ].join(',');
 
 // ── Formato cru das linhas do banco (snake_case) ────────────────────────────
@@ -85,6 +86,7 @@ export interface TaskRow {
   deletion_reason_text: string | null;
   estimated_hours: number | string | null;
   actual_delivery_date: string | null;
+  sort_index: number | null;
 }
 interface AttachmentRow { id: string; task_id: string; name: string; url: string; type: string; size: number; uploaded_at: string; }
 interface CommentRow {
@@ -175,6 +177,7 @@ const mapTaskCore = (d: TaskRow) => ({
   deletionReasonText: d.deletion_reason_text || undefined,
   estimatedHours: d.estimated_hours != null ? Number(d.estimated_hours) : undefined,
   actualDeliveryDate: d.actual_delivery_date || undefined,
+  sortIndex: d.sort_index ?? undefined,
 });
 
 // Task "shell": campos preenchidos, sub-entidades vazias. Usado nas listagens,
