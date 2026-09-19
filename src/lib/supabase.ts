@@ -163,6 +163,26 @@ export async function shiftTaskDates(taskIds: string[], deltaDays: number): Prom
   return ((data ?? []) as { id: string }[]).map((row) => row.id);
 }
 
+// Issue #138 — persiste a ordem manual de linhas da Tabela (drag&drop). RPC
+// `reorder_tasks_in_list` seta sort_index = posição no array, um UPDATE só
+// (não N chamadas), respeitando RLS por linha (RETURNING só os ids que a
+// policy de UPDATE de fato deixou passar) — mesmo padrão de shiftTaskDates
+// acima. `null` sinaliza pro chamador que a RPC não está disponível (ex.:
+// ambiente sem a migration ainda aplicada); a Tabela mantém rowOrder local
+// como fallback nesse caso.
+export async function reorderTasksInList(listId: string, orderedTaskIds: string[]): Promise<string[] | null> {
+  if (orderedTaskIds.length === 0) return [];
+  const { data, error } = await supabase.rpc('reorder_tasks_in_list', {
+    p_list_id: listId,
+    p_ordered_ids: orderedTaskIds,
+  });
+  if (error) {
+    console.warn('supabase.reorderTasksInList: RPC indisponível, mantendo ordem só local:', error);
+    return null;
+  }
+  return ((data ?? []) as { id: string }[]).map((row) => row.id);
+}
+
 export async function removeTaskDependency(dependencyId: string): Promise<void> {
   const { error } = await supabase
     .from('task_dependencies')

@@ -256,6 +256,11 @@ export interface Task {
   // pra corrigir. Diferente do antigo Campo Personalizado "Data de
   // conclusão" (manual, ninguém preenchia).
   actualDeliveryDate?: string;
+  // Issue #138 — ordem manual dentro da lista (drag&drop na Tabela).
+  // Ausente/null = tarefa nunca foi reordenada manualmente (cai no fallback
+  // de created_at). Campo canônico de domínio — outras views podem passar a
+  // usá-lo depois, evitando um segundo mecanismo de ordenação.
+  sortIndex?: number | null;
 }
 
 // Issue #187 — Workload/Capacidade. Jornada semanal configurável por

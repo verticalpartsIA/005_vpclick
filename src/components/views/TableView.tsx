@@ -51,7 +51,7 @@ import { toast } from 'sonner';
 // Ver issue #102, achado 1.
 import { DateFieldEditor } from '@/components/DateFieldEditor';
 import { parseLocalDate, formatDateBR } from '@/lib/dates';
-import { supabase } from '@/lib/supabase';
+import { supabase, reorderTasksInList } from '@/lib/supabase';
 
 interface TableViewProps {
   tasks: Task[];
@@ -328,11 +328,25 @@ export const TableView: React.FC<TableViewProps> = ({
   useEffect(() => {
     try {
       const saved = localStorage.getItem(rowOrderKey);
-      setRowOrder(saved ? JSON.parse(saved) : []);
+      if (saved) {
+        setRowOrder(JSON.parse(saved));
+        return;
+      }
     } catch {
-      setRowOrder([]);
+      // cai no fallback do backend abaixo
     }
-  }, [rowOrderKey]);
+    // Issue #138: sem cache local (primeiro acesso neste navegador, ou dados
+    // limpos), usa a ordem já persistida no backend (sort_index) como ponto
+    // de partida — é o que faz a ordem sobreviver a troca de dispositivo.
+    const withOrder = scopedTasks.filter((task) => task.sortIndex != null);
+    if (withOrder.length === 0) {
+      setRowOrder([]);
+      return;
+    }
+    const ordered = [...withOrder].sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0)).map((task) => task.id);
+    const withoutOrder = scopedTasks.filter((task) => task.sortIndex == null).map((task) => task.id);
+    setRowOrder([...ordered, ...withoutOrder]);
+  }, [rowOrderKey, scopedTasks]);
 
   useEffect(() => {
     setNewTaskListId(activeListId || '');
@@ -591,8 +605,9 @@ export const TableView: React.FC<TableViewProps> = ({
   };
 
   const canReorderRows = !sortField && !hasActiveFilters;
-  const reorderRow = (targetId: string) => {
+  const reorderRow = async (targetId: string) => {
     if (!draggedRowId || draggedRowId === targetId || !canReorderRows) return;
+    const previousIds = rowOrder.length > 0 ? rowOrder : displayedTasks.map((task) => task.id);
     const currentIds = displayedTasks.map((task) => task.id);
     const from = currentIds.indexOf(draggedRowId);
     const to = currentIds.indexOf(targetId);
@@ -604,6 +619,34 @@ export const TableView: React.FC<TableViewProps> = ({
       localStorage.setItem(rowOrderKey, JSON.stringify(currentIds));
     } catch {
       toast.error('A ordem foi alterada, mas não foi possível salvar a preferência local.');
+    }
+
+    // Issue #138: persiste no backend (sort_index) pra sobreviver a
+    // reload/troca de dispositivo. sort_index é por lista — um escopo
+    // agregando várias listas (ex.: "Todos os contextos") precisa de uma
+    // chamada por lista, cada uma só com a ordem relativa das SUAS tarefas
+    // dentro da sequência nova. Atualização otimista com rollback: se
+    // qualquer lista falhar em persistir, desfaz a mudança local inteira.
+    const taskById = new Map(scopedTasks.map((task) => [task.id, task]));
+    const idsByList = new Map<string, string[]>();
+    currentIds.forEach((id) => {
+      const listId = taskById.get(id)?.listId;
+      if (!listId) return;
+      const arr = idsByList.get(listId) || [];
+      arr.push(id);
+      idsByList.set(listId, arr);
+    });
+    const results = await Promise.all(
+      Array.from(idsByList.entries()).map(([listId, ids]) => reorderTasksInList(listId, ids))
+    );
+    if (results.some((result) => result === null)) {
+      setRowOrder(previousIds);
+      try {
+        localStorage.setItem(rowOrderKey, JSON.stringify(previousIds));
+      } catch {
+        // preferência local não é crítica pro rollback funcionar
+      }
+      toast.error('Não foi possível salvar a nova ordem. A ordem anterior foi restaurada.');
     }
   };
 
