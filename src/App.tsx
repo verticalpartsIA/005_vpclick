@@ -4798,6 +4798,7 @@ export default function App() {
               fieldValues={fieldValues}
               onUpdateFieldValue={handleUpdateFieldValue}
               hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
+              onHideTaskFieldForList={handleToggleTaskFieldForList}
               onManageFields={(listId: string) => {
                 setFieldManagerListIdOverride(listId || null);
                 setIsFieldManagerOpen(true);
@@ -13767,6 +13768,7 @@ function TaskDetailModal(props: any) {
     onUpdateFieldValue,
     onManageFields,
     hiddenTaskFieldIdsByList,
+    onHideTaskFieldForList,
     onDelete,
     onDuplicate,
     onArchive,
@@ -13977,6 +13979,23 @@ function TaskDetailModal(props: any) {
       !hiddenForList.includes(f.id)
     );
   }, [customFields, currentUser.role, task.listId, hiddenTaskFieldIdsByList]);
+
+  // Issue #97 (MVP): "Adicionar um existente" do modal "Gerenciar Campos
+  // Personalizados", trazido pra dentro da própria seção — sem duplicar a
+  // regra de escopo, é o mesmo array de ocultos por lista que já existe.
+  const [addFieldSearch, setAddFieldSearch] = useState('');
+  const availableFieldsToAdd = useMemo(() => {
+    const hiddenForList: string[] = (task.listId && hiddenTaskFieldIdsByList?.[task.listId]) || [];
+    const query = addFieldSearch.trim().toLowerCase();
+    return (customFields || [])
+      .filter((f: CustomField) =>
+        f.target === 'TASK' &&
+        (f.visibleTo ?? []).includes(currentUser.role) &&
+        hiddenForList.includes(f.id) &&
+        (!query || f.name.toLowerCase().includes(query))
+      )
+      .sort((a: CustomField, b: CustomField) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [customFields, currentUser.role, task.listId, hiddenTaskFieldIdsByList, addFieldSearch]);
 
   // Registro de atividade é auxiliar (histórico/auditoria) — nunca deve impedir
   // a mudança real (status, prioridade, responsável) de acontecer. Antes, uma
@@ -14793,16 +14812,79 @@ function TaskDetailModal(props: any) {
                   <section>
                     <div className="flex items-center justify-between mb-6">
                       <h3 className="text-sm font-bold text-gray-900">Campos personalizados</h3>
-                      {!isReadOnly && onManageFields && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
-                        <button
-                          type="button"
-                          onClick={() => onManageFields(task.listId)}
-                          className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
-                          title="Criar, adicionar, mostrar/ocultar e reordenar campos desta lista"
-                        >
-                          <Icons.Settings className="w-3.5 h-3.5" />
-                          Gerenciar campos
-                        </button>
+                      {!isReadOnly && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
+                        <div className="flex items-center gap-3">
+                          {onHideTaskFieldForList && task.listId && (
+                            <DropdownMenu onOpenChange={(open: boolean) => { if (!open) setAddFieldSearch(''); }}>
+                              <DropdownMenuTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
+                                  title="Adicionar um campo personalizado já existente a esta lista"
+                                >
+                                  <Icons.Plus className="w-3.5 h-3.5" />
+                                  Adicionar campo
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-64">
+                                <div className="sticky top-0 z-10 bg-popover p-1">
+                                  <input
+                                    type="text"
+                                    autoFocus
+                                    value={addFieldSearch}
+                                    onChange={(e) => setAddFieldSearch(e.target.value)}
+                                    onKeyDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => e.stopPropagation()}
+                                    placeholder="Pesquisar campo existente..."
+                                    className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                                  />
+                                </div>
+                                <div className="max-h-64 overflow-y-auto">
+                                  {availableFieldsToAdd.length === 0 ? (
+                                    <div className="px-2 py-3 text-xs text-gray-400 text-center">
+                                      {addFieldSearch.trim()
+                                        ? 'Nenhum campo encontrado.'
+                                        : 'Todos os campos existentes já estão nesta lista.'}
+                                    </div>
+                                  ) : (
+                                    availableFieldsToAdd.map((field: CustomField) => (
+                                      <DropdownMenuItem
+                                        key={field.id}
+                                        className="text-xs"
+                                        onSelect={(e) => {
+                                          // preventDefault mantém o menu aberto: dá pra adicionar
+                                          // vários campos seguidos sem reabrir o dropdown a cada um.
+                                          e.preventDefault();
+                                          onHideTaskFieldForList(task.listId, field.id);
+                                        }}
+                                      >
+                                        {field.name}
+                                      </DropdownMenuItem>
+                                    ))
+                                  )}
+                                </div>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  className="text-xs text-gray-500"
+                                  onSelect={(e) => { e.preventDefault(); onManageFields?.(task.listId); }}
+                                >
+                                  Criar novo campo ou gerenciar todos...
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                          {onManageFields && (
+                            <button
+                              type="button"
+                              onClick={() => onManageFields(task.listId)}
+                              className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
+                              title="Criar, adicionar, mostrar/ocultar e reordenar campos desta lista"
+                            >
+                              <Icons.Settings className="w-3.5 h-3.5" />
+                              Gerenciar campos
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
                     <div className="space-y-6">
