@@ -3162,7 +3162,13 @@ export default function App() {
     }
   }, []);
 
-  const handleCreateField = useCallback(async (newField: CustomField) => {
+  // Issue #97: retorna o campo criado (com o id de verdade gerado pelo
+  // Supabase — o id que o chamador manda em `newField` nunca é usado no
+  // insert, então sem esse retorno não haveria como saber o id real).
+  // Criação inline na tela de detalhes usa isso pra reexibir o campo na
+  // lista atual assim que ele é criado, sem esperar o usuário abrir o
+  // modal "Gerenciar campos" e ligar o toggle manualmente.
+  const handleCreateField = useCallback(async (newField: CustomField): Promise<CustomField | null> => {
     const { data, error } = await supabase
       .from('custom_fields')
       .insert({
@@ -3208,8 +3214,10 @@ export default function App() {
         const hiddenStandardKeys = hiddenStandardColumnKeysByList[l.id] ?? [];
         return taskRepo.upsertListColumnPrefs(l.id, hiddenFieldIds, hiddenStandardKeys, currentUser.id);
       })).catch((err) => console.error('Erro ao salvar preferência de coluna do campo novo:', err));
+      return field;
     } else {
       console.error('Erro ao criar campo personalizado:', error);
+      return null;
     }
   }, [currentUser.id, lists, hiddenTaskFieldIdsByList, hiddenStandardColumnKeysByList]);
 
@@ -4799,6 +4807,9 @@ export default function App() {
               onUpdateFieldValue={handleUpdateFieldValue}
               hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
               onHideTaskFieldForList={handleToggleTaskFieldForList}
+              onCreateField={handleCreateField}
+              onUpdateField={handleUpdateField}
+              onDeleteField={handleDeleteField}
               onManageFields={(listId: string) => {
                 setFieldManagerListIdOverride(listId || null);
                 setIsFieldManagerOpen(true);
@@ -13769,6 +13780,9 @@ function TaskDetailModal(props: any) {
     onManageFields,
     hiddenTaskFieldIdsByList,
     onHideTaskFieldForList,
+    onCreateField,
+    onUpdateField,
+    onDeleteField,
     onDelete,
     onDuplicate,
     onArchive,
@@ -13996,6 +14010,94 @@ function TaskDetailModal(props: any) {
       )
       .sort((a: CustomField, b: CustomField) => a.name.localeCompare(b.name, 'pt-BR'));
   }, [customFields, currentUser.role, task.listId, hiddenTaskFieldIdsByList, addFieldSearch]);
+
+  // Issue #97 (resto do escopo): criar/editar campo direto na seção,
+  // reaproveitando o mesmo formulário do modal (CustomFieldFormFields) e os
+  // mesmos handlers (onCreateField/onUpdateField) que "Gerenciar Campos
+  // Personalizados" já usa — sem lógica de negócio nova, só uma UI inline
+  // pra essas ações. Remover da lista (onHideTaskFieldForList, já usado
+  // acima) e excluir (onDeleteField) ficam diretos por linha, sem precisar
+  // de estado de formulário.
+  //
+  // Reordenar (onReorderField) NÃO foi exposto aqui: é uma reordenação
+  // GLOBAL (todas as listas, não por lista) e só em memória — nunca
+  // persistida (comentário no próprio handleReorderField admite ser
+  // "protótipo"), e hoje não é chamado por NENHUMA UI (nem o modal
+  // "Gerenciar campos" tem botão de mover). Expor isso aqui, numa visão
+  // filtrada por lista, quebraria de um jeito sutil: mover "para cima"
+  // trocaria de posição com o vizinho GLOBAL, que pode ser um campo oculto
+  // nesta lista — o clique pareceria não fazer nada. Implementar direito
+  // exige uma ordem por lista persistida no banco, fora do escopo de reuso
+  // desta issue (que pede reaproveitar o que já existe, não construir
+  // mecanismo novo).
+  const [fieldFormMode, setFieldFormMode] = useState<'closed' | 'create' | 'edit'>('closed');
+  const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
+  const [fieldFormName, setFieldFormName] = useState('');
+  const [fieldFormType, setFieldFormType] = useState<CustomFieldType>(CustomFieldType.TEXT);
+  const [fieldFormOptions, setFieldFormOptions] = useState<CustomFieldOption[]>([]);
+  const [fieldFormOptionSearch, setFieldFormOptionSearch] = useState('');
+  const [fieldFormFormula, setFieldFormFormula] = useState('');
+  const [fieldFormCurrency, setFieldFormCurrency] = useState('R$');
+  const [isSavingField, setIsSavingField] = useState(false);
+
+  const openCreateFieldForm = () => {
+    setEditingFieldId(null);
+    setFieldFormName('');
+    setFieldFormType(CustomFieldType.TEXT);
+    setFieldFormOptions([]);
+    setFieldFormOptionSearch('');
+    setFieldFormFormula('');
+    setFieldFormCurrency('R$');
+    setFieldFormMode('create');
+  };
+
+  const openEditFieldForm = (field: CustomField) => {
+    setEditingFieldId(field.id);
+    setFieldFormName(field.name);
+    setFieldFormType(field.type);
+    setFieldFormOptions(field.config?.options || []);
+    setFieldFormFormula(field.config?.formula || '');
+    setFieldFormCurrency(field.config?.currency || 'R$');
+    setFieldFormMode('edit');
+  };
+
+  const closeFieldForm = () => setFieldFormMode('closed');
+
+  const handleSaveInlineField = async () => {
+    if (!fieldFormName.trim()) return;
+    setIsSavingField(true);
+    try {
+      const config = buildCustomFieldConfig(fieldFormType, fieldFormOptions, fieldFormFormula, fieldFormCurrency);
+      if (editingFieldId) {
+        const existingField = (customFields || []).find((f: CustomField) => f.id === editingFieldId);
+        await onUpdateField?.({ ...existingField, name: fieldFormName.trim(), type: fieldFormType, config });
+      } else {
+        const created = await onCreateField?.({
+          id: Math.random().toString(36).substr(2, 9),
+          name: fieldFormName.trim(),
+          type: fieldFormType,
+          target: 'TASK',
+          config,
+          isMandatory: false,
+          visibleTo: [UserRole.ADMIN, UserRole.GESTOR, UserRole.COLABORADOR],
+          createdBy: currentUser.id,
+          createdAt: new Date().toISOString(),
+        });
+        // Critério de aceite da issue: o campo criado aparece imediatamente
+        // aqui. handleCreateField oculta campo novo em TODAS as listas por
+        // padrão (opt-in) — sem isso, "criar" pareceria não ter feito nada
+        // nesta tela.
+        if (created && task.listId && onHideTaskFieldForList) {
+          onHideTaskFieldForList(task.listId, created.id);
+        }
+      }
+      closeFieldForm();
+    } catch {
+      toast.error('Não foi possível salvar o campo personalizado.');
+    } finally {
+      setIsSavingField(false);
+    }
+  };
 
   // Registro de atividade é auxiliar (histórico/auditoria) — nunca deve impedir
   // a mudança real (status, prioridade, responsável) de acontecer. Antes, uma
@@ -14814,6 +14916,37 @@ function TaskDetailModal(props: any) {
                       <h3 className="text-sm font-bold text-gray-900">Campos personalizados</h3>
                       {!isReadOnly && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
                         <div className="flex items-center gap-3">
+                          {onCreateField && (
+                            <Popover open={fieldFormMode === 'create'} onOpenChange={(open) => { if (!open) closeFieldForm(); else openCreateFieldForm(); }}>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
+                                  title="Criar um novo campo personalizado"
+                                >
+                                  <Icons.Plus className="w-3.5 h-3.5" />
+                                  Criar campo
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent align="end" className="w-80 max-h-[70vh] overflow-y-auto space-y-4" onClick={(e) => e.stopPropagation()}>
+                                <h4 className="font-bold text-gray-800 text-sm">Criar Novo Campo</h4>
+                                <CustomFieldFormFields
+                                  name={fieldFormName} setName={setFieldFormName}
+                                  type={fieldFormType} setType={setFieldFormType}
+                                  options={fieldFormOptions} setOptions={setFieldFormOptions}
+                                  optionSearch={fieldFormOptionSearch} setOptionSearch={setFieldFormOptionSearch}
+                                  formula={fieldFormFormula} setFormula={setFieldFormFormula}
+                                  currencySymbol={fieldFormCurrency} setCurrencySymbol={setFieldFormCurrency}
+                                />
+                                <div className="flex justify-end gap-2 pt-2 border-t">
+                                  <button type="button" onClick={closeFieldForm} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded font-medium">Cancelar</button>
+                                  <button type="button" onClick={handleSaveInlineField} disabled={!fieldFormName.trim() || isSavingField} className="px-3 py-1.5 text-xs bg-[var(--primary-color)] text-[#2c3e50] font-bold rounded hover:shadow-md disabled:opacity-50 transition-all">
+                                    {isSavingField ? 'Salvando...' : 'Criar Campo'}
+                                  </button>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
+                          )}
                           {onHideTaskFieldForList && task.listId && (
                             <DropdownMenu onOpenChange={(open: boolean) => { if (!open) setAddFieldSearch(''); }}>
                               <DropdownMenuTrigger asChild>
@@ -14890,6 +15023,7 @@ function TaskDetailModal(props: any) {
                     <div className="space-y-6">
                       {(taskCustomFields || []).map((field: CustomField) => {
                         const currentValue = (fieldValues || []).find(v => v.fieldId === field.id && v.entityId === task.id)?.value;
+                        const canManage = !isReadOnly && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR);
                         return (
                           <div key={field.id} className="flex items-center gap-12 group">
                             <span className="w-48 flex items-center gap-2 text-sm text-gray-400 group-hover:text-gray-600 transition-colors">
@@ -14911,6 +15045,40 @@ function TaskDetailModal(props: any) {
                                 }}
                               />
                             </div>
+                            {canManage && (
+                              <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                                {(onCreateField || onUpdateField) && (
+                                  <Popover open={fieldFormMode === 'edit' && editingFieldId === field.id} onOpenChange={(open) => { if (!open) closeFieldForm(); else openEditFieldForm(field); }}>
+                                    <PopoverTrigger asChild>
+                                      <button type="button" className="p-1 text-gray-400 hover:text-blue-500" title="Editar configurações do campo"><Icons.Edit className="w-3.5 h-3.5" /></button>
+                                    </PopoverTrigger>
+                                    <PopoverContent align="end" className="w-80 max-h-[70vh] overflow-y-auto space-y-4" onClick={(e) => e.stopPropagation()}>
+                                      <h4 className="font-bold text-gray-800 text-sm">Editar Campo</h4>
+                                      <CustomFieldFormFields
+                                        name={fieldFormName} setName={setFieldFormName}
+                                        type={fieldFormType} setType={setFieldFormType}
+                                        options={fieldFormOptions} setOptions={setFieldFormOptions}
+                                        optionSearch={fieldFormOptionSearch} setOptionSearch={setFieldFormOptionSearch}
+                                        formula={fieldFormFormula} setFormula={setFieldFormFormula}
+                                        currencySymbol={fieldFormCurrency} setCurrencySymbol={setFieldFormCurrency}
+                                      />
+                                      <div className="flex justify-end gap-2 pt-2 border-t">
+                                        <button type="button" onClick={closeFieldForm} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded font-medium">Cancelar</button>
+                                        <button type="button" onClick={handleSaveInlineField} disabled={!fieldFormName.trim() || isSavingField} className="px-3 py-1.5 text-xs bg-blue-600 text-white font-bold rounded hover:shadow-md disabled:opacity-50 transition-all">
+                                          {isSavingField ? 'Salvando...' : 'Salvar Alterações'}
+                                        </button>
+                                      </div>
+                                    </PopoverContent>
+                                  </Popover>
+                                )}
+                                {onHideTaskFieldForList && task.listId && (
+                                  <button type="button" onClick={() => onHideTaskFieldForList(task.listId, field.id)} className="p-1 text-gray-400 hover:text-amber-500" title="Remover desta lista (o campo continua existindo, só some daqui)"><Icons.EyeOff className="w-3.5 h-3.5" /></button>
+                                )}
+                                {onDeleteField && (
+                                  <button type="button" onClick={() => onDeleteField(field.id)} className="p-1 text-gray-400 hover:text-red-500" title="Excluir campo permanentemente (todas as listas e tarefas)"><Icons.Trash className="w-3.5 h-3.5" /></button>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -15429,6 +15597,199 @@ const PRESET_COLORS = [
   '#fbcfe8', '#f472b6', '#ec4899', '#db2777', '#be185d', // Pinks
 ];
 
+// Issue #97: config de cada campo depende do tipo — regra de negócio única,
+// usada tanto pelo modal "Gerenciar Campos Personalizados" quanto pela
+// criação/edição inline na tela de detalhes da tarefa, pra não duas
+// implementações divergirem sobre "que shape de config cada tipo salva".
+function buildCustomFieldConfig(type: CustomFieldType, options: CustomFieldOption[], formula: string, currencySymbol: string) {
+  if (type === CustomFieldType.DROPDOWN) return { options: options.filter((o) => o.label.trim() !== '') };
+  if (type === CustomFieldType.FORMULA) return { formula };
+  if (type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) return { currency: currencySymbol.trim() || 'R$' };
+  return undefined;
+}
+
+// Issue #97: nome + tipo + configuração específica do tipo (opções da lista,
+// fórmula, símbolo de moeda) — o "miolo" do formulário de criar/editar campo,
+// extraído do modal "Gerenciar Campos Personalizados" pra ser consumido
+// também pela criação/adição inline na tela de detalhes da tarefa, sem
+// duplicar a UI de opções (drag/cor/exclusão) nem a de fórmula/moeda.
+function CustomFieldFormFields({
+  name, setName, type, setType, options, setOptions, optionSearch, setOptionSearch, formula, setFormula, currencySymbol, setCurrencySymbol,
+}: {
+  name: string; setName: (v: string) => void;
+  type: CustomFieldType; setType: (v: CustomFieldType) => void;
+  options: CustomFieldOption[]; setOptions: (v: CustomFieldOption[]) => void;
+  optionSearch: string; setOptionSearch: (v: string) => void;
+  formula: string; setFormula: (v: string) => void;
+  currencySymbol: string; setCurrencySymbol: (v: string) => void;
+}) {
+  const handleAddOption = (label: string) => {
+    if (!label.trim()) return;
+    const newOption: CustomFieldOption = {
+      id: Math.random().toString(36).substr(2, 9),
+      label: label.trim(),
+      color: PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)]
+    };
+    setOptions([...options, newOption]);
+    setOptionSearch('');
+  };
+
+  const updateOption = (id: string, updates: Partial<CustomFieldOption>) => {
+    setOptions(options.map(o => o.id === id ? { ...o, ...updates } : o));
+  };
+
+  const removeOption = (id: string) => {
+    setOptions(options.filter(o => o.id !== id));
+  };
+
+  return (
+    <>
+      <div>
+        <label className="text-xs font-bold text-gray-500 uppercase">Nome do Campo</label>
+        <input
+          type="text"
+          className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Ex: Orçamento Estimado"
+        />
+      </div>
+      <div>
+        <label className="text-xs font-bold text-gray-500 uppercase">Tipo de Dado</label>
+        <select
+          className="w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+          value={type}
+          onChange={(e) => setType(e.target.value as CustomFieldType)}
+        >
+          {Object.values(CustomFieldType).map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>
+
+      {type === CustomFieldType.DROPDOWN && (
+        <div className="space-y-3 bg-gray-50 p-4 rounded-lg border border-gray-100">
+          <div className="space-y-4">
+            <label className="text-xs font-bold text-gray-500 uppercase">Opções da Lista</label>
+
+            {/* Quick Add Input */}
+            <div className="relative">
+              <input
+                type="text"
+                className="w-full p-2.5 pl-3 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none shadow-sm transition-all"
+                placeholder="Pesquise ou adicione opções..."
+                value={optionSearch}
+                onChange={(e) => setOptionSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleAddOption(optionSearch);
+                  }
+                }}
+              />
+              {optionSearch.trim() && !options.some(o => o.label.toLowerCase() === optionSearch.toLowerCase()) && (
+                <button
+                  onClick={() => handleAddOption(optionSearch)}
+                  className="absolute right-2 top-2 px-2 py-0.5 bg-gray-100 hover:bg-gray-200 rounded text-[10px] font-bold text-gray-600 transition-colors"
+                >
+                  Enter para adicionar
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-1.5 max-h-60 overflow-y-auto custom-scrollbar pr-1">
+              {options.map((opt, idx) => (
+                <div key={opt.id} className="flex items-center gap-2 group/opt animate-in slide-in-from-left duration-200" style={{ '--delay': `${idx * 40}ms` } as any}>
+                  <div className="p-1 cursor-grab active:cursor-grabbing text-gray-300">
+                    <Icons.Grip size={14} />
+                  </div>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className="flex-1 py-1.5 px-4 rounded font-bold text-white text-xs text-center shadow-sm hover:brightness-95 active:scale-[0.98] transition-all truncate"
+                        style={{ backgroundColor: opt.color }}
+                      >
+                        {opt.label}
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="p-4 w-64 shadow-2xl rounded-xl border-gray-200 z-[250]" align="center" side="right">
+                      <div className="space-y-4">
+                        <input
+                          type="text"
+                          value={opt.label}
+                          onChange={(e) => updateOption(opt.id, { label: e.target.value })}
+                          className="w-full p-2 border border-orange-500 rounded-lg text-sm font-medium focus:ring-0 outline-none"
+                          autoFocus
+                        />
+
+                        <div className="grid grid-cols-6 gap-2">
+                          {PRESET_COLORS.map(c => (
+                            <button
+                              key={c}
+                              onClick={() => updateOption(opt.id, { color: c })}
+                              className={`w-6 h-6 rounded-full border transition-all hover:scale-125 ${opt.color === c ? 'ring-2 ring-offset-2 ring-blue-500 scale-125 z-10' : 'border-transparent'}`}
+                              style={{ backgroundColor: c }}
+                            />
+                          ))}
+                        </div>
+
+                        <div className="pt-2 border-t">
+                          <button
+                            onClick={() => removeOption(opt.id)}
+                            className="w-full flex items-center justify-center gap-2 py-2 text-xs font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          >
+                            <Icons.Trash size={14} />
+                            Excluir
+                          </button>
+                        </div>
+                      </div>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ))}
+              {options.length === 0 && (
+                <div className="text-center py-8 border-2 border-dashed border-gray-100 rounded-xl bg-white/50">
+                  <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">
+                    Nenhuma opção definida
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {type === CustomFieldType.FORMULA && (
+        <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+          <label className="text-xs font-bold text-gray-500 uppercase">Fórmula</label>
+          <input
+            type="text"
+            className="w-full p-2 border rounded text-sm font-mono focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+            value={formula}
+            onChange={(e) => setFormula(e.target.value)}
+            placeholder="Ex: {{Preço}} * {{Quantidade}}"
+          />
+          <p className="text-[11px] text-gray-400">
+            Use <code className="bg-white border rounded px-1">{'{{Nome do Campo}}'}</code> para referenciar outros campos numéricos da tarefa. Calculado automaticamente, não é editável.
+          </p>
+        </div>
+      )}
+
+      {(type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) && (
+        <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+          <label className="text-xs font-bold text-gray-500 uppercase">Símbolo da Moeda</label>
+          <input
+            type="text"
+            className="w-24 p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+            value={currencySymbol}
+            onChange={(e) => setCurrencySymbol(e.target.value)}
+            placeholder="R$"
+            maxLength={5}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
 function CustomFieldsManager(props: any) {
   const {
     onClose,
@@ -15482,25 +15843,6 @@ function CustomFieldsManager(props: any) {
     return (hiddenStandardColumnKeysByList[activeListId] || []).includes(key);
   };
 
-  const handleAddOption = (label: string) => {
-    if (!label.trim()) return;
-    const newOption: CustomFieldOption = {
-      id: Math.random().toString(36).substr(2, 9),
-      label: label.trim(),
-      color: PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)]
-    };
-    setOptions([...options, newOption]);
-    setOptionSearch('');
-  };
-
-  const updateOption = (id: string, updates: Partial<CustomFieldOption>) => {
-    setOptions(options.map(o => o.id === id ? { ...o, ...updates } : o));
-  };
-
-  const removeOption = (id: string) => {
-    setOptions(options.filter(o => o.id !== id));
-  };
-
   const startEditing = (field: CustomField) => {
     setEditingFieldId(field.id);
     setName(field.name);
@@ -15522,11 +15864,7 @@ function CustomFieldsManager(props: any) {
 
   const handleSave = () => {
     if (!name) return;
-    const config =
-      type === CustomFieldType.DROPDOWN ? { options: options.filter(o => o.label.trim() !== '') } :
-      type === CustomFieldType.FORMULA ? { formula } :
-      (type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) ? { currency: currencySymbol.trim() || 'R$' } :
-      undefined;
+    const config = buildCustomFieldConfig(type, options, formula, currencySymbol);
     const fieldData: any = {
       name,
       type,
@@ -15680,148 +16018,14 @@ function CustomFieldsManager(props: any) {
               <h4 className="font-bold text-gray-800 text-sm">
                 {editingFieldId ? 'Editar Campo' : 'Criar Novo Campo'}
               </h4>
-              <div>
-                <label className="text-xs font-bold text-gray-500 uppercase">Nome do Campo</label>
-                <input
-                  type="text"
-                  className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Ex: Orçamento Estimado"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-gray-500 uppercase">Tipo de Dado</label>
-                <select
-                  className="w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                  value={type}
-                  onChange={(e) => setType(e.target.value as CustomFieldType)}
-                >
-                  {Object.values(CustomFieldType).map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-
-              {type === CustomFieldType.DROPDOWN && (
-                <div className="space-y-3 bg-gray-50 p-4 rounded-lg border border-gray-100">
-                  <div className="space-y-4">
-                    <label className="text-xs font-bold text-gray-500 uppercase">Opções da Lista</label>
-
-                    {/* Quick Add Input */}
-                    <div className="relative">
-                      <input
-                        type="text"
-                        className="w-full p-2.5 pl-3 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none shadow-sm transition-all"
-                        placeholder="Pesquise ou adicione opções..."
-                        value={optionSearch}
-                        onChange={(e) => setOptionSearch(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            handleAddOption(optionSearch);
-                          }
-                        }}
-                      />
-                      {optionSearch.trim() && !options.some(o => o.label.toLowerCase() === optionSearch.toLowerCase()) && (
-                        <button
-                          onClick={() => handleAddOption(optionSearch)}
-                          className="absolute right-2 top-2 px-2 py-0.5 bg-gray-100 hover:bg-gray-200 rounded text-[10px] font-bold text-gray-600 transition-colors"
-                        >
-                          Enter para adicionar
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="space-y-1.5 max-h-60 overflow-y-auto custom-scrollbar pr-1">
-                      {options.map((opt, idx) => (
-                        <div key={opt.id} className="flex items-center gap-2 group/opt animate-in slide-in-from-left duration-200" style={{ '--delay': `${idx * 40}ms` } as any}>
-                          <div className="p-1 cursor-grab active:cursor-grabbing text-gray-300">
-                            <Icons.Grip size={14} />
-                          </div>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <button
-                                className="flex-1 py-1.5 px-4 rounded font-bold text-white text-xs text-center shadow-sm hover:brightness-95 active:scale-[0.98] transition-all truncate"
-                                style={{ backgroundColor: opt.color }}
-                              >
-                                {opt.label}
-                              </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent className="p-4 w-64 shadow-2xl rounded-xl border-gray-200 z-[250]" align="center" side="right">
-                              <div className="space-y-4">
-                                <input
-                                  type="text"
-                                  value={opt.label}
-                                  onChange={(e) => updateOption(opt.id, { label: e.target.value })}
-                                  className="w-full p-2 border border-orange-500 rounded-lg text-sm font-medium focus:ring-0 outline-none"
-                                  autoFocus
-                                />
-
-                                <div className="grid grid-cols-6 gap-2">
-                                  {PRESET_COLORS.map(c => (
-                                    <button
-                                      key={c}
-                                      onClick={() => updateOption(opt.id, { color: c })}
-                                      className={`w-6 h-6 rounded-full border transition-all hover:scale-125 ${opt.color === c ? 'ring-2 ring-offset-2 ring-blue-500 scale-125 z-10' : 'border-transparent'}`}
-                                      style={{ backgroundColor: c }}
-                                    />
-                                  ))}
-                                </div>
-
-                                <div className="pt-2 border-t">
-                                  <button
-                                    onClick={() => removeOption(opt.id)}
-                                    className="w-full flex items-center justify-center gap-2 py-2 text-xs font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                                  >
-                                    <Icons.Trash size={14} />
-                                    Excluir
-                                  </button>
-                                </div>
-                              </div>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
-                      ))}
-                      {options.length === 0 && (
-                        <div className="text-center py-8 border-2 border-dashed border-gray-100 rounded-xl bg-white/50">
-                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">
-                            Nenhuma opção definida
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {type === CustomFieldType.FORMULA && (
-                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Fórmula</label>
-                  <input
-                    type="text"
-                    className="w-full p-2 border rounded text-sm font-mono focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                    value={formula}
-                    onChange={(e) => setFormula(e.target.value)}
-                    placeholder="Ex: {{Preço}} * {{Quantidade}}"
-                  />
-                  <p className="text-[11px] text-gray-400">
-                    Use <code className="bg-white border rounded px-1">{'{{Nome do Campo}}'}</code> para referenciar outros campos numéricos da tarefa. Calculado automaticamente, não é editável.
-                  </p>
-                </div>
-              )}
-
-              {(type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) && (
-                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Símbolo da Moeda</label>
-                  <input
-                    type="text"
-                    className="w-24 p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                    value={currencySymbol}
-                    onChange={(e) => setCurrencySymbol(e.target.value)}
-                    placeholder="R$"
-                    maxLength={5}
-                  />
-                </div>
-              )}
+              <CustomFieldFormFields
+                name={name} setName={setName}
+                type={type} setType={setType}
+                options={options} setOptions={setOptions}
+                optionSearch={optionSearch} setOptionSearch={setOptionSearch}
+                formula={formula} setFormula={setFormula}
+                currencySymbol={currencySymbol} setCurrencySymbol={setCurrencySymbol}
+              />
             </div>
           )}
         </div>
