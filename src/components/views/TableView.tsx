@@ -51,6 +51,7 @@ import { toast } from 'sonner';
 // Ver issue #102, achado 1.
 import { DateFieldEditor } from '@/components/DateFieldEditor';
 import { parseLocalDate, formatDateBR } from '@/lib/dates';
+import { supabase } from '@/lib/supabase';
 
 interface TableViewProps {
   tasks: Task[];
@@ -273,14 +274,33 @@ export const TableView: React.FC<TableViewProps> = ({
   const resizingRef = useRef<{ colId: string; startX: number; startWidth: number } | null>(null);
   const rowOrderKey = `vp_table_row_order_${currentUser?.id || 'anon'}_${scopeId}`;
 
+  // Issue #140: localStorage sozinho não sobrevive a troca de
+  // navegador/dispositivo nem a limpeza de dados do site. Lê do cache local
+  // primeiro (pinta na hora, sem esperar rede) e depois reconcilia com o
+  // backend (table_view_prefs, por usuário+escopo — fonte de verdade pra
+  // sincronizar entre dispositivos). Local continua sendo escrito também,
+  // como cache rápido, não como única fonte.
   useEffect(() => {
+    let cancelled = false;
     try {
       const saved = localStorage.getItem(prefsKey);
       setPrefs(saved ? { ...defaultPrefs, ...JSON.parse(saved) } : defaultPrefs);
     } catch {
       setPrefs(defaultPrefs);
     }
-  }, [defaultPrefs, prefsKey]);
+    if (!currentUser?.id) return;
+    supabase
+      .from('table_view_prefs')
+      .select('prefs')
+      .eq('user_id', currentUser.id)
+      .eq('scope_id', scopeId)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled || error || !data?.prefs) return;
+        setPrefs({ ...defaultPrefs, ...(data.prefs as Partial<TablePrefs>) });
+      });
+    return () => { cancelled = true; };
+  }, [currentUser?.id, defaultPrefs, prefsKey, scopeId]);
 
   useEffect(() => {
     try {
@@ -288,7 +308,22 @@ export const TableView: React.FC<TableViewProps> = ({
     } catch {
       // Preferencias visuais continuam funcionais na sessao mesmo sem storage.
     }
-  }, [prefs, prefsKey]);
+    if (!currentUser?.id) return;
+    // Debounce: resize de coluna dispara mudança de prefs a cada pixel
+    // arrastado — sem isso, cada frame do drag viraria uma escrita no banco.
+    const timeout = setTimeout(() => {
+      supabase
+        .from('table_view_prefs')
+        .upsert(
+          { user_id: currentUser.id, scope_id: scopeId, prefs, updated_at: new Date().toISOString() },
+          { onConflict: 'user_id,scope_id' }
+        )
+        .then(({ error }) => {
+          if (error) console.error('Erro ao salvar preferências da Tabela:', error);
+        });
+    }, 600);
+    return () => clearTimeout(timeout);
+  }, [currentUser?.id, prefs, prefsKey, scopeId]);
 
   useEffect(() => {
     try {
