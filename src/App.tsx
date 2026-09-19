@@ -8590,7 +8590,10 @@ function ListView({
       </div>
 
       {tasks.length === 0 ? (
-        <div className="px-4 py-12 text-center text-gray-400 italic">
+        // Issue #127: usava cor cinza fixa + itálico, divergente do padrão de
+        // "vazio" do resto do app (ex.: "Nenhuma lista criada" mais abaixo),
+        // que usa os tokens de tema (`text-muted-foreground`, sem itálico).
+        <div className="px-4 py-12 text-center text-muted-foreground">
           {isLoading ? 'Carregando tarefas deste contexto...' : 'Nenhuma tarefa encontrada neste contexto.'}
         </div>
       ) : (

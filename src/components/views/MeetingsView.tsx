@@ -140,19 +140,32 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [creatingTaskFor, setCreatingTaskFor] = useState<string | null>(null);
 
+  // Issue #83 (bug #4 da #81): sem try/catch, um soluço de rede (mesma causa
+  // do lock de sessão que trava a fila do Supabase em outras telas) fazia o
+  // await rejeitar em vez de resolver com `{error}` — o `setIsLoading(false)`
+  // nunca era alcançado e a tela ficava em "Carregando..." pra sempre, sem
+  // aviso nenhum. `finally` garante que o loading sempre termina.
   const loadMeetings = useCallback(async () => {
     setIsLoading(true);
-    const { data: meetingsData } = await supabase
-      .from('meetings')
-      .select('*')
-      .order('meeting_date', { ascending: false })
-      .limit(200);
-    const ids = (meetingsData || []).map((m: any) => m.id);
-    const { data: itemsData } = ids.length
-      ? await supabase.from('meeting_action_items').select('*').in('meeting_id', ids)
-      : { data: [] as any[] };
-    setMeetings((meetingsData || []).map((m: any) => mapMeetingRow(m, itemsData || [])));
-    setIsLoading(false);
+    try {
+      const { data: meetingsData, error: meetingsError } = await supabase
+        .from('meetings')
+        .select('*')
+        .order('meeting_date', { ascending: false })
+        .limit(200);
+      if (meetingsError) throw meetingsError;
+      const ids = (meetingsData || []).map((m: any) => m.id);
+      const { data: itemsData, error: itemsError } = ids.length
+        ? await supabase.from('meeting_action_items').select('*').in('meeting_id', ids)
+        : { data: [] as any[], error: null };
+      if (itemsError) throw itemsError;
+      setMeetings((meetingsData || []).map((m: any) => mapMeetingRow(m, itemsData || [])));
+    } catch (err) {
+      console.error('Erro ao carregar reuniões:', err);
+      toast.error('Não foi possível carregar as reuniões. Tente novamente.');
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
   // Carrega todas as salas (inclusive arquivadas) — o seletor de criação só
@@ -276,45 +289,61 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     setNewNotes('');
   };
 
+  // Issue #83 (bugs #5/#6 da #81): #5 — sem try/catch, um await que rejeita
+  // (mesma causa do lock de sessão, ver loadMeetings acima) deixava o botão
+  // preso em "..." pra sempre, sem toast nem teto de espera; `finally`
+  // garante que `isCreating` sempre é liberado. Também faltava toast no
+  // caminho de erro retornado normalmente (`error || !data`) — falhava muda.
+  // #6 — o botão só validava o título (ver disabled mais abaixo, agora exige
+  // `newDate` também).
   const createMeeting = async () => {
     if (!newTitle.trim()) return;
     setIsCreating(true);
-    const start = newDate ? new Date(newDate) : new Date();
-    const end = new Date(start.getTime() + newDurationMinutes * 60_000);
-    const { data, error } = await supabase
-      .from('meetings')
-      .insert({
-        title: newTitle.trim(),
-        meeting_date: start.toISOString(),
-        end_date: end.toISOString(),
-        room_id: newRoomId || null,
-        participant_ids: newParticipantIds,
-        notes: newNotes,
-        created_by: currentUser.id,
-      })
-      .select()
-      .single();
-    setIsCreating(false);
-    if (error || !data) return;
-    setMeetings((prev) => [mapMeetingRow(data, []), ...prev]);
-    setSelectedId(data.id);
+    try {
+      const start = newDate ? new Date(newDate) : new Date();
+      const end = new Date(start.getTime() + newDurationMinutes * 60_000);
+      const { data, error } = await supabase
+        .from('meetings')
+        .insert({
+          title: newTitle.trim(),
+          meeting_date: start.toISOString(),
+          end_date: end.toISOString(),
+          room_id: newRoomId || null,
+          participant_ids: newParticipantIds,
+          notes: newNotes,
+          created_by: currentUser.id,
+        })
+        .select()
+        .single();
+      if (error || !data) {
+        toast.error('Não consegui criar a reunião. Tente novamente.');
+        return;
+      }
+      setMeetings((prev) => [mapMeetingRow(data, []), ...prev]);
+      setSelectedId(data.id);
 
-    const room = newRoomId ? rooms.find((r) => r.id === newRoomId) : undefined;
-    const recipients = newParticipantIds.filter((id) => id !== currentUser.id);
-    if (recipients.length > 0) {
-      await supabase.from('notifications').insert(
-        recipients.map((userId) => ({
-          user_id: userId,
-          actor_id: currentUser.id,
-          type: 'meeting',
-          title: `${currentUser.name} te adicionou na reunião "${newTitle.trim()}"`,
-          body: `${formatMeetingDate(start.toISOString())}${room ? ` · ${room.name}` : ''}`,
-          meeting_id: data.id,
-        }))
-      );
+      const room = newRoomId ? rooms.find((r) => r.id === newRoomId) : undefined;
+      const recipients = newParticipantIds.filter((id) => id !== currentUser.id);
+      if (recipients.length > 0) {
+        await supabase.from('notifications').insert(
+          recipients.map((userId) => ({
+            user_id: userId,
+            actor_id: currentUser.id,
+            type: 'meeting',
+            title: `${currentUser.name} te adicionou na reunião "${newTitle.trim()}"`,
+            body: `${formatMeetingDate(start.toISOString())}${room ? ` · ${room.name}` : ''}`,
+            meeting_id: data.id,
+          }))
+        );
+      }
+
+      resetCreateForm();
+    } catch (err) {
+      console.error('Erro ao criar reunião:', err);
+      toast.error('Não consegui criar a reunião. Tente novamente.');
+    } finally {
+      setIsCreating(false);
     }
-
-    resetCreateForm();
   };
 
   const saveNotes = async () => {
@@ -656,7 +685,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
           />
           <div className="flex justify-end gap-2">
             <button onClick={resetCreateForm} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
-            <button onClick={createMeeting} disabled={isCreating || !newTitle.trim()} className="text-xs bg-orange-500 text-white font-bold px-3 py-1.5 rounded-lg hover:brightness-110 disabled:opacity-50">
+            <button onClick={createMeeting} disabled={isCreating || !newTitle.trim() || !newDate} className="text-xs bg-orange-500 text-white font-bold px-3 py-1.5 rounded-lg hover:brightness-110 disabled:opacity-50">
               {isCreating ? '...' : 'Criar'}
             </button>
           </div>
