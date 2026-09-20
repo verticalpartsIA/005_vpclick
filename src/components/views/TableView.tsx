@@ -55,6 +55,7 @@ import { toast } from 'sonner';
 import { DateFieldEditor } from '@/components/DateFieldEditor';
 import { parseLocalDate, formatDateBR } from '@/lib/dates';
 import { supabase, reorderTasksInList } from '@/lib/supabase';
+import { isTaskLate } from '@/lib/taskService';
 import * as taskRepo from '@/lib/taskRepo';
 import { useIsMobile } from '@/hooks/use-mobile';
 
@@ -141,14 +142,13 @@ const formatDate = (value?: string) => formatDateBR(value) || '-';
 
 const toInputDate = (value?: string) => value?.split('T')[0] || '';
 
-const isOverdue = (task: Task) => {
-  const due = parseDate(task.dueDate);
-  if (!due) return false;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  due.setHours(23, 59, 59, 999);
-  return due < today && !task.status?.toLowerCase().includes('conclu');
-};
+// isTaskLate (lib/taskService) em vez de um check local: mesma classificação
+// do card "Atrasadas" do Dashboard (SQL get_dashboard_summary) — o check
+// anterior só excluía status "concluído", contando tarefas
+// canceladas/reprovadas/aguardando com prazo vencido como atrasadas aqui, o
+// que o Dashboard corretamente não fazia (achado real: números divergiam
+// entre a Tabela e o Dashboard).
+const isOverdue = isTaskLate;
 
 const normalize = (value: unknown) =>
   String(value ?? '')

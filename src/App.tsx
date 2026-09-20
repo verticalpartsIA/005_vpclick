@@ -33,7 +33,7 @@ import {
 } from './lib/dates';
 import { ErrorSummary } from './components/ui/error-summary';
 import { DateFieldEditor } from './components/DateFieldEditor';
-import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
+import { isDoneLikeStatus, isTaskLate, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
 import { useDashboard } from './hooks/useDashboard';
 import { useTaskCountIndex } from './hooks/useTaskCountIndex';
 import { useUsers } from './hooks/useUsers';
@@ -12379,12 +12379,11 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
       if (filterPriority && task.priority !== filterPriority) return false;
       if (filterAssignee && task.mainAssigneeId !== filterAssignee && !(task.secondaryAssigneeIds || []).includes(filterAssignee)) return false;
       if (filterTag && !(task.tags || []).includes(filterTag)) return false;
-      if (showOnlyOverdue) {
-        if (!task.dueDate) return false;
-        const due = parseLocalDate(task.dueDate);
-        due.setHours(23, 59, 59, 999);
-        if (due >= new Date()) return false;
-      }
+      // isTaskLate (não um check cru de due_date < hoje): mesma classificação
+      // do card "Atrasadas" do Dashboard — sem isso o filtro aqui contava
+      // tarefas concluídas/canceladas/aguardando com prazo vencido como
+      // atrasadas, coisa que o Dashboard corretamente não conta.
+      if (showOnlyOverdue && !isTaskLate(task)) return false;
       return true;
     });
   }, [tasks, boardSearch, filterPriority, filterAssignee, filterTag, showOnlyOverdue, lists]);
@@ -12749,11 +12748,13 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
                     .filter(Boolean);
                   const allAssignees = [assignee, ...secondaryAssignees].filter(Boolean);
                   const hasDueDate = task.dueDate && !isNaN(parseLocalDate(task.dueDate).getTime());
-                  const dueEnd = hasDueDate ? parseLocalDate(task.dueDate) : null;
-                  if (dueEnd) dueEnd.setHours(23, 59, 59, 999);
-                  const isOverdue = !!dueEnd && dueEnd < new Date() && !isDoneLikeStatus(task.status || '');
-                  const priorityFlag = PRIORITY_FLAG[task.priority];
                   const h = getTaskHealth(task);
+                  // Mesma classificação do card "Atrasadas" do Dashboard (h?.emoji
+                  // === '😡') — antes usava um check próprio que não excluía
+                  // status cancelado/aguardando, contando mais tarefas como
+                  // atrasadas aqui do que no Dashboard.
+                  const isOverdue = h?.emoji === '😡';
+                  const priorityFlag = PRIORITY_FLAG[task.priority];
                   const isQuickEditing = quickEditTaskId === task.id && quickDraft;
 
                   return (
