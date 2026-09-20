@@ -9391,11 +9391,16 @@ function ManualTimeEntryForm({ taskId, currentUser, onClose, onAdded }: any) {
     const totalMinutes = h * 60 + m;
     if (totalMinutes <= 0) { toast.error('Informe uma duração válida.'); return; }
     setIsSaving(true);
-    const res = await taskRepo.addManualTimeEntry(taskId, currentUser.id, new Date(date + 'T09:00:00').toISOString(), totalMinutes, isBillable, description || null);
-    setIsSaving(false);
-    if (!res.ok) { toast.error('Erro ao lançar tempo: ' + res.message); return; }
-    toast.success('Tempo lançado.');
-    onAdded();
+    try {
+      const res = await taskRepo.addManualTimeEntry(taskId, currentUser.id, new Date(date + 'T09:00:00').toISOString(), totalMinutes, isBillable, description || null);
+      if (!res.ok) { toast.error('Erro ao lançar tempo: ' + res.message); return; }
+      toast.success('Tempo lançado.');
+      onAdded();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -10011,19 +10016,26 @@ function GoalFormModal({ goal, users, currentUser, onClose, onSaved }: any) {
   const handleSave = async () => {
     if (!name.trim()) { toast.error('Dê um nome pra meta.'); return; }
     setIsSaving(true);
-    if (goal) {
-      const res = await taskRepo.updateGoal(goal.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
-      if (res.ok) await taskRepo.updateGoalOwners(goal.id, ownerIds);
+    try {
+      if (goal) {
+        const res = await taskRepo.updateGoal(goal.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
+        if (res.ok) await taskRepo.updateGoalOwners(goal.id, ownerIds);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Meta atualizada.');
+      } else {
+        const res = await taskRepo.createGoal({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Meta criada.');
+      }
+      onSaved();
+    } catch (err) {
+      // Sem isto, uma falha de rede (não um erro controlado com {ok:false})
+      // nunca chegava a chamar setIsSaving(false) — o botão "Salvar" ficava
+      // desabilitado pra sempre, só voltava fechando e reabrindo o modal.
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Meta atualizada.');
-    } else {
-      const res = await taskRepo.createGoal({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Meta criada.');
     }
-    onSaved();
   };
 
   return (
@@ -10115,26 +10127,30 @@ function GoalTargetFormModal({ goal, target, onClose, onSaved }: any) {
     if (!name.trim()) { toast.error('Dê um nome pro target.'); return; }
     if (type === 'task' && !selectedTask && !target?.taskId) { toast.error('Escolha uma tarefa.'); return; }
     setIsSaving(true);
-    const payload = {
-      name: name.trim(),
-      unit: (type === 'number' || type === 'currency') ? (unit.trim() || null) : null,
-      startValue: (type === 'number' || type === 'currency') ? Number(startValue) || 0 : null,
-      targetValue: (type === 'number' || type === 'currency') ? Number(targetValue) || 0 : null,
-      currentValue: (type === 'number' || type === 'currency') ? Number(currentValue) || 0 : null,
-      taskId: type === 'task' ? (selectedTask?.id ?? target?.taskId ?? null) : null,
-    };
-    if (target) {
-      const res = await taskRepo.updateGoalTarget(target.id, payload);
+    try {
+      const payload = {
+        name: name.trim(),
+        unit: (type === 'number' || type === 'currency') ? (unit.trim() || null) : null,
+        startValue: (type === 'number' || type === 'currency') ? Number(startValue) || 0 : null,
+        targetValue: (type === 'number' || type === 'currency') ? Number(targetValue) || 0 : null,
+        currentValue: (type === 'number' || type === 'currency') ? Number(currentValue) || 0 : null,
+        taskId: type === 'task' ? (selectedTask?.id ?? target?.taskId ?? null) : null,
+      };
+      if (target) {
+        const res = await taskRepo.updateGoalTarget(target.id, payload);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Target atualizado.');
+      } else {
+        const res = await taskRepo.createGoalTarget(goal.id, { type, ...payload, orderIndex: goal.targets.length });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Target criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Target atualizado.');
-    } else {
-      const res = await taskRepo.createGoalTarget(goal.id, { type, ...payload, orderIndex: goal.targets.length });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Target criado.');
     }
-    onSaved();
   };
 
   return (
@@ -10461,22 +10477,26 @@ function PortfolioFormModal({ portfolio, users, lists, folders, spaces, currentU
     if (!name.trim()) { toast.error('Dê um nome pro portfolio.'); return; }
     if (listIds.length === 0) { toast.error('Escolha pelo menos uma lista.'); return; }
     setIsSaving(true);
-    if (portfolio) {
-      const res = await taskRepo.updatePortfolio(portfolio.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
-      if (res.ok) {
-        await taskRepo.updatePortfolioOwners(portfolio.id, ownerIds);
-        await taskRepo.updatePortfolioLists(portfolio.id, listIds);
+    try {
+      if (portfolio) {
+        const res = await taskRepo.updatePortfolio(portfolio.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
+        if (res.ok) {
+          await taskRepo.updatePortfolioOwners(portfolio.id, ownerIds);
+          await taskRepo.updatePortfolioLists(portfolio.id, listIds);
+        }
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Portfolio atualizado.');
+      } else {
+        const res = await taskRepo.createPortfolio({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds, listIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Portfolio criado.');
       }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Portfolio atualizado.');
-    } else {
-      const res = await taskRepo.createPortfolio({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds, listIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Portfolio criado.');
     }
-    onSaved();
   };
 
   return (
@@ -10875,25 +10895,29 @@ function FormBuilderModal({ form, lists, folders, spaces, users, statusGroups, c
     if (!name.trim()) { toast.error('Dê um nome pro formulário.'); return; }
     if (!listId) { toast.error('Escolha a lista de destino.'); return; }
     setIsSaving(true);
-    const payload = {
-      name: name.trim(), description: description.trim() || null,
-      defaultAssigneeId: defaultAssigneeId || null, defaultStatus: defaultStatus || null,
-      defaultPriority: defaultPriority || null, submitLabel: submitLabel.trim() || 'Enviar',
-      redirectUrl: redirectUrl.trim() || null, allowResubmit, requireConsent,
-      consentText: requireConsent ? (consentText.trim() || null) : null,
-    };
-    if (form) {
-      const res = await taskRepo.updateForm(form.id, payload);
+    try {
+      const payload = {
+        name: name.trim(), description: description.trim() || null,
+        defaultAssigneeId: defaultAssigneeId || null, defaultStatus: defaultStatus || null,
+        defaultPriority: defaultPriority || null, submitLabel: submitLabel.trim() || 'Enviar',
+        redirectUrl: redirectUrl.trim() || null, allowResubmit, requireConsent,
+        consentText: requireConsent ? (consentText.trim() || null) : null,
+      };
+      if (form) {
+        const res = await taskRepo.updateForm(form.id, payload);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Formulário atualizado.');
+      } else {
+        const res = await taskRepo.createForm({ ...payload, listId, createdBy: currentUser.id });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Formulário criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Formulário atualizado.');
-    } else {
-      const res = await taskRepo.createForm({ ...payload, listId, createdBy: currentUser.id });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Formulário criado.');
     }
-    onSaved();
   };
 
   return (
@@ -11010,23 +11034,27 @@ function FormQuestionModal({ form, question, customFields, onClose, onSaved }: a
     if (!label.trim()) { toast.error('Dê um nome pra pergunta.'); return; }
     if (mapsTo === 'custom_field' && !customFieldId) { toast.error('Escolha o campo personalizado.'); return; }
     setIsSaving(true);
-    const options = isChoiceType ? optionsText.split('\n').map((s) => s.trim()).filter(Boolean) : null;
-    const payload = {
-      label: label.trim(), helpText: helpText.trim() || null, isRequired,
-      mapsTo: (mapsTo || null) as FormMapsTo | null, customFieldId: mapsTo === 'custom_field' ? customFieldId : null, options,
-    };
-    if (question) {
-      const res = await taskRepo.updateFormQuestion(question.id, payload);
+    try {
+      const options = isChoiceType ? optionsText.split('\n').map((s) => s.trim()).filter(Boolean) : null;
+      const payload = {
+        label: label.trim(), helpText: helpText.trim() || null, isRequired,
+        mapsTo: (mapsTo || null) as FormMapsTo | null, customFieldId: mapsTo === 'custom_field' ? customFieldId : null, options,
+      };
+      if (question) {
+        const res = await taskRepo.updateFormQuestion(question.id, payload);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Pergunta atualizada.');
+      } else {
+        const res = await taskRepo.createFormQuestion(form.id, { ...payload, type, orderIndex: form.questions.length });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Pergunta criada.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Pergunta atualizada.');
-    } else {
-      const res = await taskRepo.createFormQuestion(form.id, { ...payload, type, orderIndex: form.questions.length });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Pergunta criada.');
     }
-    onSaved();
   };
 
   return (
@@ -11121,17 +11149,26 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
     }
     if (form.requireConsent && !consentChecked) { toast.error('Confirme o consentimento pra continuar.'); return; }
     setIsSubmitting(true);
-    const res = await taskRepo.submitForm({
-      formId: form.id, listId: form.listId, questions: form.questions, answers,
-      defaultAssigneeId: form.defaultAssigneeId || currentUser.id,
-      defaultStatus: resolvedStatus,
-      defaultPriority: (form.defaultPriority || TaskPriority.MEDIA) as TaskPriority,
-      currentUserId: currentUser.id,
-    });
-    setIsSubmitting(false);
-    if (!res.ok) { toast.error('Erro ao enviar: ' + res.message); return; }
-    toast.success('Formulário enviado — tarefa criada!');
-    onSubmitted();
+    try {
+      const res = await taskRepo.submitForm({
+        formId: form.id, listId: form.listId, questions: form.questions, answers,
+        defaultAssigneeId: form.defaultAssigneeId || currentUser.id,
+        defaultStatus: resolvedStatus,
+        defaultPriority: (form.defaultPriority || TaskPriority.MEDIA) as TaskPriority,
+        currentUserId: currentUser.id,
+      });
+      if (!res.ok) { toast.error('Erro ao enviar: ' + res.message); return; }
+      toast.success('Formulário enviado — tarefa criada!');
+      onSubmitted();
+    } catch (err) {
+      // Achado real: sem isto, uma falha de rede no meio do envio (comum em
+      // formulário grande, muitas perguntas) deixava o botão "Enviar" preso
+      // pra sempre — sem fechar o modal, o preenchimento inteiro se perdia se
+      // a pessoa desistisse e recarregasse a página.
+      toast.error('Erro inesperado ao enviar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -11451,19 +11488,23 @@ function WhiteboardFormModal({ whiteboard, users, currentUser, onClose, onSaved 
   const handleSave = async () => {
     if (!name.trim()) { toast.error('Dê um nome pro quadro.'); return; }
     setIsSaving(true);
-    if (whiteboard) {
-      const res = await taskRepo.updateWhiteboard(whiteboard.id, { name: name.trim(), description: description.trim() || null, access });
-      if (res.ok) await taskRepo.updateWhiteboardOwners(whiteboard.id, ownerIds);
+    try {
+      if (whiteboard) {
+        const res = await taskRepo.updateWhiteboard(whiteboard.id, { name: name.trim(), description: description.trim() || null, access });
+        if (res.ok) await taskRepo.updateWhiteboardOwners(whiteboard.id, ownerIds);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Quadro atualizado.');
+      } else {
+        const res = await taskRepo.createWhiteboard({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Quadro criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Quadro atualizado.');
-    } else {
-      const res = await taskRepo.createWhiteboard({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Quadro criado.');
     }
-    onSaved();
   };
 
   return (
@@ -12223,19 +12264,23 @@ function MindMapFormModal({ mindMap, users, currentUser, onClose, onSaved }: any
   const handleSave = async () => {
     if (!name.trim()) { toast.error('Dê um nome pro mapa.'); return; }
     setIsSaving(true);
-    if (mindMap) {
-      const res = await taskRepo.updateMindMap(mindMap.id, { name: name.trim(), description: description.trim() || null, access });
-      if (res.ok) await taskRepo.updateMindMapOwners(mindMap.id, ownerIds);
+    try {
+      if (mindMap) {
+        const res = await taskRepo.updateMindMap(mindMap.id, { name: name.trim(), description: description.trim() || null, access });
+        if (res.ok) await taskRepo.updateMindMapOwners(mindMap.id, ownerIds);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Mapa atualizado.');
+      } else {
+        const res = await taskRepo.createMindMap({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Mapa criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Mapa atualizado.');
-    } else {
-      const res = await taskRepo.createMindMap({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Mapa criado.');
     }
-    onSaved();
   };
 
   return (
