@@ -2076,14 +2076,27 @@ export default function App() {
   // reload) enquanto uma chamada de loadTasks() ainda está em andamento, uma
   // resposta antiga que chegue depois de uma mais nova sobrescreveria `tasks`
   // com os dados do escopo errado — a lista parece ter tarefas e "fecha"
-  // sozinha (some) pouco depois, até um F5 disparar uma única chamada limpa.
-  // Cada chamada carimba um id crescente; só grava quem tiver um id mais novo
-  // que o da última chamada que efetivamente gravou (loadTasksCommittedIdRef)
-  // — não simplesmente "quem for a mais recente em voo", pra uma chamada mais
-  // nova que falhe (erro de rede) não invalidar/descartar o resultado bom de
-  // uma mais antiga que ainda está terminando.
+  // sozinha (some) pouco depois, até um F5 disparar uma única chamada limpa
+  // (achado real, 2026-09: era exatamente o "o link muda mas a tela não"
+  // relatado pelo usuário — navegar rápido entre duas listas podia deixar a
+  // tela travada em "Carregando..." ou mostrar os dados da lista ERRADA).
+  //
+  // A versão anterior comparava só pelo id da última chamada que efetivamente
+  // GRAVOU dado (loadTasksCommittedIdRef), não pela mais recente EM VOO — de
+  // propósito, pra uma chamada nova que falhasse (erro de rede) não descartar
+  // o resultado bom de uma mais antiga ainda terminando. Mas isso também
+  // deixava passar o problema oposto: se a chamada antiga (escopo já trocado)
+  // terminasse ANTES da nova ainda estar em voo, nada a impedia de gravar —
+  // exatamente o cenário do achado acima.
+  //
+  // A chave certa não é "qual chamada é mais nova", e sim "essa resposta
+  // ainda é do escopo que está na tela agora" — só grava se o escopo (lista/
+  // scope/view) da resposta bater com o escopo atual no momento em que ela
+  // chega, não importa a ordem de chegada. Uma nova tentativa (retry) do
+  // MESMO escopo continua podendo gravar (a chave não muda); só uma
+  // NAVEGAÇÃO de verdade invalida respostas antigas.
   const loadTasksRequestIdRef = useRef(0);
-  const loadTasksCommittedIdRef = useRef(0);
+  const loadTasksScopeKeyRef = useRef('');
   // Uma segunda tentativa automática por falha (não por request): erros de
   // rede/RLS logo após o login costumam ser transitórios e sumiam sem deixar
   // rastro (array vazio ficava travado até um F5 manual).
@@ -2174,6 +2187,11 @@ export default function App() {
     if (!hasResolvedInitialUrlRef.current) return;
 
     const requestId = ++loadTasksRequestIdRef.current;
+    // Escopo desta chamada especificamente — não `scopedListIds` (array
+    // derivado, pode trocar de referência sem o escopo ter mudado de
+    // verdade), só os valores primitivos que definem "que tela é essa".
+    const scopeKey = `${activeListId ?? ''}|${activeScope.type}|${activeScope.id ?? ''}|${activeView}`;
+    loadTasksScopeKeyRef.current = scopeKey;
     // "Tarefa não existe mais" (ver efeito logo abaixo) só pode confiar em
     // `tasks` depois que a carga estiver DE VERDADE completa — a 1ª página
     // (100 linhas) já dispara `tasks.length > 0` bem antes das páginas
@@ -2196,8 +2214,7 @@ export default function App() {
         const rows = await taskRepo.fetchMyTaskRows(currentUser.id);
         const mappedTasks = rows.map(taskRepo.mapRowToTaskShell);
 
-        if (requestId < loadTasksCommittedIdRef.current) return;
-        loadTasksCommittedIdRef.current = requestId;
+        if (loadTasksScopeKeyRef.current !== scopeKey) return;
         loadTasksRetriedRef.current = false;
         setMyTasks(mappedTasks);
         setTasks(prev => {
@@ -2235,8 +2252,7 @@ export default function App() {
         ? await taskRepo.fetchInitialTaskRowsByListId(activeListId)
         : await taskRepo.fetchInitialTaskRowsByListIds(listIds);
 
-      if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
-      loadTasksCommittedIdRef.current = requestId;
+      if (loadTasksScopeKeyRef.current !== scopeKey) return; // a tela já navegou pra outro escopo
       setTasks(prev => {
         // Map em vez de prev.find() dentro do .map() — O(n) em vez de O(n×m).
         // Recarrega a cada evento realtime (qualquer tarefa da empresa, debounce
@@ -2265,7 +2281,7 @@ export default function App() {
         ? await taskRepo.fetchRemainingTaskRowsByListId(activeListId)
         : await taskRepo.fetchRemainingTaskRowsByListIds(listIds);
 
-      if (requestId !== loadTasksRequestIdRef.current) return;
+      if (loadTasksScopeKeyRef.current !== scopeKey) return;
       setTasks(prev => {
         const prevById = new Map(prev.map(t => [t.id, t]));
         return [...firstRows, ...remainingRows]
@@ -3802,16 +3818,26 @@ export default function App() {
     }
 
     let result = baseTasks;
-    if (activeScope.type === 'folder' && activeScope.id) {
+    // Uma lista selecionada na sidebar (activeListId) é independente do
+    // activeScope de pasta/espaço — `onSetActiveListId` só seta activeListId,
+    // sem tocar activeScope (mesmo padrão do handleNavigate fazer o
+    // contrário: ele zera activeListId ao trocar de escopo). Sem esse
+    // `!activeListId` aqui, um activeScope "preso" numa pasta/espaço anterior
+    // filtrava a lista escolhida pra fora do resultado — achado real (2026-09):
+    // clicar numa lista de uma pasta diferente da última pasta/espaço visitada
+    // mostrava "Nenhuma tarefa encontrada", mesmo a lista tendo tarefas, porque
+    // esse filtro (que roda ANTES do filtro por activeListId em filteredTasks
+    // logo abaixo) já tinha zerado o resultado.
+    if (!activeListId && activeScope.type === 'folder' && activeScope.id) {
       const folderListIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
       result = result.filter(t => folderListIds.includes(t.listId));
-    } else if (activeScope.type === 'space' && activeScope.id) {
+    } else if (!activeListId && activeScope.type === 'space' && activeScope.id) {
       const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
       const spaceListIds = lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
       result = result.filter(t => spaceListIds.includes(t.listId));
     }
     return result;
-  }, [tasks, activeScope, lists, folders, currentUser, allowedFolderIdSet]);
+  }, [tasks, activeScope, activeListId, lists, folders, currentUser, allowedFolderIdSet]);
 
   // ── Favorites (Supabase-synced, localStorage como seed inicial) ──────────
   const [favorites, setFavorites] = useState<{ type: 'list' | 'folder' | 'space'; id: string; name: string }[]>(() => {
