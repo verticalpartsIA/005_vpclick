@@ -29,7 +29,7 @@
 // livre. Continua dry-run enquanto o secret não existir/for false; isso
 // não muda nada do comportamento atual até alguém ligar o flag de
 // propósito.
-import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2';
 
 interface EventPayload {
   event_type: string;
@@ -147,7 +147,7 @@ async function sendViaGateway(
 // tipos de evento, pra não duplicar checagem de horário comercial/telefone/
 // idempotência a cada novo tipo adicionado.
 async function dispatchNotification(
-  admin: ReturnType<typeof createClient>,
+  admin: any,
   payload: EventPayload,
   recipientUserId: string,
   recipientName: string,
@@ -194,7 +194,7 @@ async function dispatchNotification(
   return { dry_run: false, ...result, logged: inserted };
 }
 
-async function handleWatcherAdded(admin: ReturnType<typeof createClient>, payload: EventPayload) {
+async function handleWatcherAdded(admin: any, payload: EventPayload) {
   const { data: existing } = await admin
     .from('task_watchers')
     .select('task_id, user_id')
@@ -229,7 +229,7 @@ async function handleWatcherAdded(admin: ReturnType<typeof createClient>, payloa
   });
 }
 
-async function handleMention(admin: ReturnType<typeof createClient>, payload: EventPayload) {
+async function handleMention(admin: any, payload: EventPayload) {
   const { data: notification } = await admin
     .from('notifications')
     .select('id, user_id, actor_id, type, title, body, task_id')
@@ -257,7 +257,7 @@ async function handleMention(admin: ReturnType<typeof createClient>, payload: Ev
   });
 }
 
-async function handleTaskCompleted(admin: ReturnType<typeof createClient>, payload: EventPayload) {
+async function handleTaskCompleted(admin: any, payload: EventPayload) {
   const { data: task } = await admin
     .from('tasks')
     .select('id, title, created_by')
