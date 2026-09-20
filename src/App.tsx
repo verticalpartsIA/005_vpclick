@@ -12375,6 +12375,19 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
     });
   }, [tasks, boardSearch, filterPriority, filterAssignee, filterTag, showOnlyOverdue, lists]);
 
+  // Contagem de subtarefas por pai, pré-computada uma vez (O(n)) em vez de
+  // um tasks.filter() por CARD renderizado (O(n) por card => O(n²) no total
+  // da coluna) — com milhares de tarefas isso sozinho já é dezenas de
+  // milhões de comparações a cada render do Kanban.
+  const subtaskCountByParentId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const t of tasks) {
+      if (!t.parentId) continue;
+      map.set(t.parentId, (map.get(t.parentId) || 0) + 1);
+    }
+    return map;
+  }, [tasks]);
+
   const getOrderedColumnTasks = (status: string) => {
     const columnTasks = boardTasks.filter((t: Task) => t.status?.toLowerCase() === status.toLowerCase());
     const savedOrder = localTaskOrder[status] || [];
@@ -12586,6 +12599,23 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
     ) : null
   );
 
+  // Sem uma lista específica selecionada, o Kanban tentaria desenhar TODAS as
+  // tarefas visíveis (empresa inteira) numa coluna só — achado real (2026-09):
+  // ~9 mil tarefas, coluna "A Fazer" sozinha com 5.133 cartões, ~20s de
+  // travamento montando esse tanto de DOM de uma vez. Além do custo técnico,
+  // uma coluna com 5 mil cartões não é usável por ninguém de qualquer jeito —
+  // por isso pedir uma lista em vez de tentar renderizar tudo mesmo.
+  if (!activeListId) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 px-4 text-center">
+        <p className="text-sm font-semibold text-gray-600">Selecione uma lista para ver o Kanban</p>
+        <p className="max-w-sm text-xs text-gray-400">
+          O quadro Kanban mostra tarefas de uma lista por vez. Escolha uma lista na barra lateral — a visão geral (sem lista selecionada) tentaria juntar as tarefas da empresa inteira numa coluna só, o que trava a tela sem ser útil.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 px-2 pb-4" onClick={(e) => e.stopPropagation()}>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-sm">
@@ -12694,7 +12724,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
                   const editable = canEditTask(task);
                   const isDragging = draggingTaskId === task.id;
                   const listName = lists?.find((l: any) => l.id === task.listId)?.name;
-                  const subtaskCount = tasks.filter((t: Task) => t.parentId === task.id).length;
+                  const subtaskCount = subtaskCountByParentId.get(task.id) || 0;
                   const completedChecklist = (task.checklists || []).filter((item: ChecklistItem) => item.completed).length;
                   const assignee = users?.find((u: User) => u.id === task.mainAssigneeId);
                   const secondaryAssignees = (task.secondaryAssigneeIds || [])
