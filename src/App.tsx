@@ -8401,9 +8401,12 @@ function ListView({
       });
     }
     return order;
-    // Usamos JSON.stringify para evitar novos arrays idênticos disparando o useEffect
-    // Adicionamos t.status para que mudanças de status disparem a re-calculação mesmo se tasks.length não mudar
-  }, [tasks.length, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(tasks.map(t => t.status)), JSON.stringify(statusGroups?.[0]?.options)]);
+    // `tasks` (não tasks.length + JSON.stringify) como dependência: o app já
+    // substitui o array de forma imutável a cada mudança real, então a
+    // referência já é suficiente pra disparar o recálculo — sem pagar um
+    // `.map()` + `JSON.stringify()` sobre TODAS as tarefas em todo render
+    // do ListView só para montar a chave de comparação do useMemo.
+  }, [tasks, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(statusGroups?.[0]?.options)]);
 
   const [expandedStatuses, setExpandedStatuses] = useState<string[]>([]);
 
@@ -8503,13 +8506,23 @@ function ListView({
     [hiddenStandardColumnsForActiveList],
   );
 
+  // Indexado por entityId uma vez (O(n)) em vez de escanear TODOS os
+  // fieldValues da empresa a cada célula de custom field renderizada — com
+  // milhares de valores isso era O(linhas × colunas × fieldValues).
+  const fieldValuesByEntity = useMemo(() => {
+    const map = new Map<string, CustomFieldValue[]>();
+    for (const v of fieldValues as CustomFieldValue[]) {
+      const list = map.get(v.entityId);
+      if (list) list.push(v); else map.set(v.entityId, [v]);
+    }
+    return map;
+  }, [fieldValues]);
+
   const getFieldValue = useCallback(
     (fieldId: string, entityId: string) => {
-      return (fieldValues as CustomFieldValue[]).find(
-        (v) => v.fieldId === fieldId && v.entityId === entityId,
-      )?.value;
+      return fieldValuesByEntity.get(entityId)?.find((v) => v.fieldId === fieldId)?.value;
     },
-    [fieldValues],
+    [fieldValuesByEntity],
   );
 
 
@@ -8943,7 +8956,7 @@ function ListView({
                                       <div className="text-xs font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded border border-blue-100 italic">
                                         <FormulaValue
                                           formula={field.config?.formula || ''}
-                                          context={{ ...t, ...Object.fromEntries(fieldValues.filter(fv => fv.entityId === t.id).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) }}
+                                          context={{ ...t, ...Object.fromEntries((fieldValuesByEntity.get(t.id) || []).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) }}
                                         />
                                       </div>
                                     ) : field.type === CustomFieldType.DROPDOWN ? (
@@ -12393,9 +12406,12 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
     const savedOrder = localTaskOrder[status] || [];
     if (savedOrder.length === 0) return columnTasks;
     const byId = new Map(columnTasks.map((task: Task) => [task.id, task]));
+    // Set em vez de savedOrder.includes() dentro do filter — .includes() ali
+    // é O(n) por tarefa, virando O(n²) numa coluna reordenada manualmente.
+    const savedOrderSet = new Set(savedOrder);
     return [
       ...savedOrder.map(id => byId.get(id)).filter(Boolean),
-      ...columnTasks.filter((task: Task) => !savedOrder.includes(task.id)),
+      ...columnTasks.filter((task: Task) => !savedOrderSet.has(task.id)),
     ] as Task[];
   };
 
