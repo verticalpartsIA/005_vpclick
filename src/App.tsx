@@ -11999,7 +11999,19 @@ function MindMapTasksTab({ lists, users, onOpenTask, currentUser }: any) {
     if (!selectedListId) { setTasksInList([]); setIsLoading(false); return; }
     let cancelled = false;
     setIsLoading(true);
-    taskRepo.fetchTasksForList(selectedListId).then((rows) => { if (!cancelled) { setTasksInList(rows); setIsLoading(false); } });
+    taskRepo.fetchTasksForList(selectedListId).then((rows) => {
+      if (cancelled) return;
+      setTasksInList(rows);
+      setIsLoading(false);
+      // Raízes vêm abertas por padrão (mesmo efeito visual de antes), mas só
+      // como estado INICIAL — antes disso era travado via `depth === 0` no
+      // isExpanded do renderNode, o que ignorava o clique do usuário pra
+      // sempre nas tarefas de topo (achado real: botão de recolher/expandir
+      // "sem efeito" era exatamente essas tarefas raiz).
+      const idsInList = new Set(rows.map((t) => t.id));
+      const rootIds = rows.filter((t) => !t.parentId || !idsInList.has(t.parentId)).map((t) => t.id);
+      setExpandedIds(new Set(rootIds));
+    });
     return () => { cancelled = true; };
   }, [selectedListId]);
 
@@ -12053,7 +12065,7 @@ function MindMapTasksTab({ lists, users, onOpenTask, currentUser }: any) {
   const renderNode = (task: Task, depth: number): React.ReactNode => {
     if (depth > 30) return null; // rede de segurança, mesma lógica do organograma
     const children = childrenByParent[task.id] || [];
-    const isExpanded = depth === 0 || expandedIds.has(task.id);
+    const isExpanded = expandedIds.has(task.id);
     const assignee = users.find((u: any) => u.id === task.mainAssigneeId);
     return (
       <div key={task.id} className="flex flex-col">
