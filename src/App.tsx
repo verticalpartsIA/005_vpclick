@@ -4599,6 +4599,7 @@ export default function App() {
                 lists={lists}
                 currentUserId={currentUser.id}
                 statusGroups={statusGroups}
+                activeListId={activeListId}
               />
             )}
             {activeView === 'Map' && (
