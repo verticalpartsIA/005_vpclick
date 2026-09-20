@@ -298,6 +298,14 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   // `newDate` também).
   const createMeeting = async () => {
     if (!newTitle.trim()) return;
+    // Checagem otimista (evita a ida ao banco no caso comum) — a garantia de
+    // verdade é a constraint de exclusão em meetings_no_room_overlap
+    // (migration 20260920030000), que pega mesmo duas pessoas reservando a
+    // mesma sala quase ao mesmo tempo, o que essa checagem sozinha não pega.
+    if (roomConflicts.length > 0) {
+      toast.error('Essa sala já está reservada nesse horário. Escolha outro horário ou outra sala.');
+      return;
+    }
     setIsCreating(true);
     try {
       const start = newDate ? new Date(newDate) : new Date();
@@ -315,6 +323,10 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
         })
         .select()
         .single();
+      if (error?.code === '23P01') {
+        toast.error('Essa sala acabou de ser reservada por outra pessoa nesse horário. Escolha outro horário ou outra sala.');
+        return;
+      }
       if (error || !data) {
         toast.error('Não consegui criar a reunião. Tente novamente.');
         return;
@@ -636,8 +648,8 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
               </div>
             )}
             {roomConflicts.length > 0 && (
-              <div className="mt-2 text-[11px] bg-amber-50 border border-amber-200 text-amber-700 rounded-lg p-2">
-                ⚠️ Sala já reservada nesse horário por:
+              <div className="mt-2 text-[11px] bg-red-50 border border-red-200 text-red-700 rounded-lg p-2">
+                🚫 Sala já reservada nesse horário — escolha outro horário ou outra sala pra continuar:
                 <ul className="list-disc list-inside mt-0.5">
                   {roomConflicts.map((m) => (
                     <li key={m.id}>{m.title} ({formatTimeRange(m.meetingDate, m.endDate)})</li>
@@ -685,7 +697,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
           />
           <div className="flex justify-end gap-2">
             <button onClick={resetCreateForm} className="text-xs text-gray-500 hover:text-gray-700 font-semibold px-2 py-1 rounded hover:bg-gray-100">Cancelar</button>
-            <button onClick={createMeeting} disabled={isCreating || !newTitle.trim() || !newDate} className="text-xs bg-orange-500 text-white font-bold px-3 py-1.5 rounded-lg hover:brightness-110 disabled:opacity-50">
+            <button onClick={createMeeting} disabled={isCreating || !newTitle.trim() || !newDate || roomConflicts.length > 0} className="text-xs bg-orange-500 text-white font-bold px-3 py-1.5 rounded-lg hover:brightness-110 disabled:opacity-50">
               {isCreating ? '...' : 'Criar'}
             </button>
           </div>
