@@ -11883,6 +11883,17 @@ function OrgChartTab({ users, canManage, onUpdateManager }: any) {
     return map;
   }, [users]);
 
+  // Raízes (topo do organograma) vêm abertas por padrão, mas só como estado
+  // INICIAL — mesmo achado real do Mapa Mental: antes isso era travado via
+  // `depth === 0` direto no isExpanded do renderNode, que ignorava o clique
+  // do usuário pra sempre nas pessoas do topo (a maioria do que se vê na
+  // tela). Semeamos aqui, uma vez por mudança na lista de usuários, e o
+  // isExpanded abaixo passa a respeitar o toggle normalmente.
+  useEffect(() => {
+    const rootIds = (childrenByManager['__root__'] || []).map((u: any) => u.id);
+    setExpandedIds(new Set(rootIds));
+  }, [childrenByManager]);
+
   const toggle = (id: string) => setExpandedIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
 
   const handleChangeManager = async (userId: string, managerId: string) => {
@@ -11903,7 +11914,7 @@ function OrgChartTab({ users, canManage, onUpdateManager }: any) {
   const renderNode = (u: any, depth: number): React.ReactNode => {
     if (depth > 25) return null;
     const children = childrenByManager[u.id] || [];
-    const isExpanded = depth === 0 || expandedIds.has(u.id);
+    const isExpanded = expandedIds.has(u.id);
     return (
       <div key={u.id} className="flex flex-col">
         <div className="flex items-center gap-2 py-1.5" style={{ paddingLeft: depth * 24 }}>
