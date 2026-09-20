@@ -139,11 +139,20 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   // mesmo formato de fetchTaskDependencies (usado no modal de detalhe), só
   // que buscadas em lote pra não fazer um round-trip por tarefa visível.
   const [dependenciesByTask, setDependenciesByTask] = useState<Record<string, TaskDependency[]>>({});
+  // taskIdsKey existe só pra dar ao useEffect abaixo um valor primitivo
+  // estável (independente da ordem) — um array novo do .map() a cada render
+  // de `tasks` dispararia o efeito toda vez, mesmo sem o conjunto de ids
+  // realmente mudar. visibleIdsRef guarda a lista de ids de verdade (sem
+  // sort/join) num ref espelhado a cada render, pra não precisar desfazer o
+  // join(',') com um split(',') dentro do efeito — escopos com milhares de
+  // tarefas geravam uma string de ~200KB só pra recriar o array em seguida.
   const taskIdsKey = useMemo(() => tasks.map(t => t.id).sort().join(','), [tasks]);
+  const visibleIdsRef = useRef<string[]>([]);
+  visibleIdsRef.current = useMemo(() => tasks.map(t => t.id), [tasks]);
   useEffect(() => {
     if (!taskIdsKey) { setDependenciesByTask({}); return; }
     let cancelled = false;
-    const visibleIds = taskIdsKey.split(',');
+    const visibleIds = visibleIdsRef.current;
 
     const reloadDependencies = () => fetchTaskDependenciesForTasks(visibleIds)
       .then(deps => {
