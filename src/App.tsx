@@ -2237,9 +2237,17 @@ export default function App() {
 
       if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
       loadTasksCommittedIdRef.current = requestId;
-      setTasks(prev => firstRows
-        .map(taskRepo.mapRowToTaskShell)
-        .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
+      setTasks(prev => {
+        // Map em vez de prev.find() dentro do .map() — O(n) em vez de O(n×m).
+        // Recarrega a cada evento realtime (qualquer tarefa da empresa, debounce
+        // de 1.2s — ver assinatura 'tasks-realtime' abaixo), então o custo desse
+        // merge se repete com frequência; com listas de milhares de tarefas o
+        // .find() linear virava um travamento perceptível a cada recarga.
+        const prevById = new Map(prev.map(t => [t.id, t]));
+        return firstRows
+          .map(taskRepo.mapRowToTaskShell)
+          .map(task => preserveLoadedTaskDetails(task, prevById.get(task.id)));
+      });
       setIsTasksLoading(false);
 
       if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) {
@@ -2258,9 +2266,12 @@ export default function App() {
         : await taskRepo.fetchRemainingTaskRowsByListIds(listIds);
 
       if (requestId !== loadTasksRequestIdRef.current) return;
-      setTasks(prev => [...firstRows, ...remainingRows]
-        .map(taskRepo.mapRowToTaskShell)
-        .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
+      setTasks(prev => {
+        const prevById = new Map(prev.map(t => [t.id, t]));
+        return [...firstRows, ...remainingRows]
+          .map(taskRepo.mapRowToTaskShell)
+          .map(task => preserveLoadedTaskDetails(task, prevById.get(task.id)));
+      });
       loadTasksRetriedRef.current = false;
       setIsTasksFullyLoaded(true);
     } catch (err) {
@@ -3903,6 +3914,18 @@ export default function App() {
     return result;
   }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig, showClosedInMyTasks]);
 
+  // Merge de myTasks com os detalhes já carregados em `tasks` (comentários,
+  // checklist, anexos — ver preserveLoadedTaskDetails) pra tela de "Minhas
+  // Tarefas". Estava inline no JSX como `tasks.find()` dentro de um `.map()`
+  // sem useMemo: recalculava em TODO re-render do App (ex.: digitar em
+  // qualquer campo de texto na tela, já que App é um componente só) — com
+  // useMemo, só recalcula quando myTasks/tasks realmente mudam. Map em vez de
+  // find() dentro do map: O(n) em vez de O(n×m).
+  const myTasksWithDetails = useMemo(() => {
+    const tasksById = new Map(tasks.map(t => [t.id, t]));
+    return myTasks.map(t => tasksById.get(t.id) || t);
+  }, [myTasks, tasks]);
+
   const fieldValueEntityIdsKey = useMemo(() => {
     const ids = new Set<string>();
     if (activeView === 'List' || activeView === 'Table') {
@@ -4630,7 +4653,7 @@ export default function App() {
                 currentUser={currentUser}
                 users={adminUsers}
                 tasks={(myTasks.length > 0 || isMyTasksLoading)
-                  ? myTasks.map(t => tasks.find(existing => existing.id === t.id) || t)
+                  ? myTasksWithDetails
                   : filteredTasks}
                 isLoading={isMyTasksLoading && myTasks.length === 0}
                 onOpenTask={setSelectedTaskId}
