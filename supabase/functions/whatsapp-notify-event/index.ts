@@ -21,6 +21,14 @@
 // API — ligar o envio de verdade é uma decisão separada, feita só depois
 // de revisar as primeiras entradas (errar o número manda WhatsApp pra
 // pessoa errada).
+//
+// Envio real (2026-09-20): quando WHATSAPP_REAL_SEND=true (secret desta
+// function), além do log de auditoria, chama o gateway de eventos do
+// verticalparts-whatsapp-mcp (POST /events, secrets EVENTS_GATEWAY_URL/
+// EVENTS_GATEWAY_TOKEN) com um template registrado + dados — nunca texto
+// livre. Continua dry-run enquanto o secret não existir/for false; isso
+// não muda nada do comportamento atual até alguém ligar o flag de
+// propósito.
 import { createClient } from 'jsr:@supabase/supabase-js@2';
 
 interface EventPayload {
@@ -41,6 +49,22 @@ interface EventPayload {
 // só que sem telefone resolvido (nunca inventa/adivinha um número).
 const CONTACTS_PROJECT_URL = Deno.env.get('CONTACTS_PROJECT_URL');
 const CONTACTS_SERVICE_ROLE_KEY = Deno.env.get('CONTACTS_SERVICE_ROLE_KEY');
+
+// Gateway de eventos do verticalparts-whatsapp-mcp (POST /events) -- unico
+// caminho autorizado pra este projeto chegar na Evolution API de verdade
+// (ver RAG-004 daquele repo: nenhum sistema novo fala direto com
+// /message/* da Evolution API). EVENTS_GATEWAY_TOKEN e o token proprio do
+// vpclick em config/systems.yaml do gateway -- nunca compartilhado com
+// outro `source`.
+const EVENTS_GATEWAY_URL = Deno.env.get('EVENTS_GATEWAY_URL');
+const EVENTS_GATEWAY_TOKEN = Deno.env.get('EVENTS_GATEWAY_TOKEN');
+
+// Kill switch proprio deste projeto, independente do WHATSAPP_MCP_ALLOW_WRITES
+// do lado do gateway (que tambem se aplica). Ausente/false = continua so
+// dry-run, exatamente o comportamento de hoje -- ligar o envio real e uma
+// decisao separada, feita depois de revisar as primeiras entradas reais
+// (RAG-005 do verticalparts-whatsapp-mcp tem o runbook dessa decisao).
+const REAL_SEND = (Deno.env.get('WHATSAPP_REAL_SEND') ?? '').trim().toLowerCase() === 'true';
 
 // Abaixo deste limiar de similaridade (0 a 1), a diferença entre nomes é
 // grande o bastante pra não confiar — melhor não resolver telefone nenhum
@@ -79,15 +103,57 @@ async function findContactPhone(profileName: string): Promise<{ phone: string | 
   return { phone: best.phone, matchedName: best.nome, similarity: best.score };
 }
 
-// Monta o texto final e grava (dry-run) em notification_dispatch_log — parte
-// comum a todos os tipos de evento, pra não duplicar a checagem de horário
-// comercial/resolução de telefone/idempotência a cada novo tipo adicionado.
-async function logDryRun(
+// Chama o gateway de eventos do verticalparts-whatsapp-mcp. O gateway é
+// quem renderiza o texto final a partir do template registrado — esta
+// function nunca manda texto livre, só nome do template + dados.
+async function sendViaGateway(
+  template: string,
+  phone: string,
+  data: Record<string, unknown>,
+  idempotencyKey: string,
+  eventType: string,
+  recordId: string,
+): Promise<{ sent: boolean; message_id?: string | null; replay?: boolean; error?: string }> {
+  if (!EVENTS_GATEWAY_URL || !EVENTS_GATEWAY_TOKEN) {
+    return { sent: false, error: 'EVENTS_GATEWAY_URL/EVENTS_GATEWAY_TOKEN não configurados nesta Edge Function' };
+  }
+  let resp: Response;
+  try {
+    resp = await fetch(EVENTS_GATEWAY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${EVENTS_GATEWAY_TOKEN}` },
+      body: JSON.stringify({
+        source: 'vpclick',
+        event: eventType,
+        record_id: recordId,
+        recipient: { phone },
+        template,
+        data,
+        idempotency_key: idempotencyKey,
+      }),
+    });
+  } catch (exc) {
+    return { sent: false, error: `falha de rede chamando o gateway: ${exc}` };
+  }
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) return { sent: false, error: `gateway respondeu ${resp.status}: ${JSON.stringify(body)}` };
+  return { sent: true, message_id: body.message_id ?? null, replay: body.replay === true };
+}
+
+// Grava sempre em notification_dispatch_log (dry-run ou não — é o registro
+// de auditoria de quem seria/foi notificado, com qual telefone e mensagem)
+// e, só quando REAL_SEND estiver ligado e o telefone tiver sido resolvido,
+// também chama o gateway de eventos de verdade. Parte comum a todos os
+// tipos de evento, pra não duplicar checagem de horário comercial/telefone/
+// idempotência a cada novo tipo adicionado.
+async function dispatchNotification(
   admin: ReturnType<typeof createClient>,
   payload: EventPayload,
   recipientUserId: string,
   recipientName: string,
   bodyLines: string[],
+  template: string,
+  templateData: Record<string, unknown>,
 ) {
   const withinBusinessHours = (await admin.rpc('is_within_business_hours')).data === true;
   const { phone, matchedName, similarity } = await findContactPhone(recipientName);
@@ -103,7 +169,7 @@ async function logDryRun(
       source_table: payload.source_table,
       source_id: payload.source_id,
       event_type: payload.event_type,
-      dry_run: true,
+      dry_run: !REAL_SEND,
       recipient_user_id: recipientUserId,
       recipient_phone: phone,
       message_preview: messagePreview,
@@ -117,8 +183,15 @@ async function logDryRun(
     return { error: insertErr.message };
   }
 
-  console.log(`[whatsapp-notify-event] dry-run: ${messagePreview}`);
-  return { dry_run: true, logged: inserted };
+  console.log(`[whatsapp-notify-event] ${REAL_SEND ? 'envio real' : 'dry-run'}: ${messagePreview}`);
+
+  if (!REAL_SEND) return { dry_run: true, logged: inserted };
+  if (!phone) return { dry_run: false, sent: false, skipped: 'telefone não resolvido — envio real abortado', logged: inserted };
+  if (!withinBusinessHours) return { dry_run: false, sent: false, skipped: 'fora do horário comercial', logged: inserted };
+
+  const idempotencyKey = `vpclick:${payload.event_type}:${payload.source_id}`;
+  const result = await sendViaGateway(template, phone, templateData, idempotencyKey, payload.event_type, payload.source_id);
+  return { dry_run: false, ...result, logged: inserted };
 }
 
 async function handleWatcherAdded(admin: ReturnType<typeof createClient>, payload: EventPayload) {
@@ -149,7 +222,11 @@ async function handleWatcherAdded(admin: ReturnType<typeof createClient>, payloa
   const bodyLines = [
     `📋 VP Click aqui! Oi ${watcherProfile.name.split(' ')[0]}, você foi adicionado(a) como observador(a) da tarefa "${task.title}"${actorName ? ` (provável responsável pela ação: ${actorName})` : ''}.`,
   ];
-  return logDryRun(admin, payload, watcherProfile.id, watcherProfile.name, bodyLines);
+  return dispatchNotification(admin, payload, watcherProfile.id, watcherProfile.name, bodyLines, 'vpclick_watcher_added', {
+    recipient_first_name: watcherProfile.name.split(' ')[0],
+    title: task.title,
+    actor_name: actorName ?? 'alguém',
+  });
 }
 
 async function handleMention(admin: ReturnType<typeof createClient>, payload: EventPayload) {
@@ -172,7 +249,12 @@ async function handleMention(admin: ReturnType<typeof createClient>, payload: Ev
   const bodyLines = [
     `📋 VP Click aqui! Oi ${recipientProfile.name.split(' ')[0]}, ${actorProfile?.name ?? 'alguém'} ${kind}${notification.title ? ` em "${notification.title}"` : ''}.`,
   ];
-  return logDryRun(admin, payload, recipientProfile.id, recipientProfile.name, bodyLines);
+  return dispatchNotification(admin, payload, recipientProfile.id, recipientProfile.name, bodyLines, 'vpclick_mention', {
+    recipient_first_name: recipientProfile.name.split(' ')[0],
+    actor_name: actorProfile?.name ?? 'alguém',
+    mention_verb: kind,
+    title: notification.title ?? 'uma tarefa',
+  });
 }
 
 async function handleTaskCompleted(admin: ReturnType<typeof createClient>, payload: EventPayload) {
@@ -196,7 +278,12 @@ async function handleTaskCompleted(admin: ReturnType<typeof createClient>, paylo
   const bodyLines = [
     `📋 VP Click aqui! Oi ${recipientProfile.name.split(' ')[0]}, ${actorProfile?.name ?? 'alguém'} ${verb} a tarefa "${task.title}".`,
   ];
-  return logDryRun(admin, payload, recipientProfile.id, recipientProfile.name, bodyLines);
+  return dispatchNotification(admin, payload, recipientProfile.id, recipientProfile.name, bodyLines, 'vpclick_task_completed', {
+    recipient_first_name: recipientProfile.name.split(' ')[0],
+    actor_name: actorProfile?.name ?? 'alguém',
+    verb,
+    title: task.title,
+  });
 }
 
 Deno.serve(async (req: Request) => {
