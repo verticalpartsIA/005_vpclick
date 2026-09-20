@@ -18,6 +18,13 @@ dist-ssr
 *.local
 supabase/.temp/
 
+# Cache incremental do TypeScript e lockfile de um gerenciador de pacotes
+# que o projeto não usa (fonte de verdade é package-lock.json/npm) — nenhum
+# dos dois deveria ter sido versionado.
+*.tsbuildinfo
+*.tsbuildinfo.txt
+bun.lock.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
