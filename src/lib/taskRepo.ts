@@ -1517,8 +1517,11 @@ export interface RecurrenceRuleInput {
 }
 
 // Cria ou substitui a regra de recorrência da tarefa (uma tarefa tem no
-// máximo uma regra — upsert por task_id). Reseta occurrences_created/
-// last_generated_at ao recriar porque muda os parâmetros do zero.
+// máximo uma regra — upsert por task_id). occurrences_created/
+// last_generated_at nunca são tocados aqui de propósito: preservam o
+// progresso da regra através de uma edição. input.nextRunAt já vem correto
+// pra cada caso (recalculado só se o startAt mudou de verdade) — ver
+// buildRecurrenceRuleInput em App.tsx.
 export async function upsertRecurrenceRule(
   input: RecurrenceRuleInput,
   existingRuleId: string | null,
