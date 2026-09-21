@@ -53,10 +53,49 @@ function mapRoomRow(r: any): MeetingRoom {
   return {
     id: r.id,
     name: r.name,
+    icon: r.icon || undefined,
     isActive: r.is_active,
     createdBy: r.created_by || undefined,
     createdAt: r.created_at,
   };
+}
+
+// Emoji pra prefixar o nome da sala em qualquer lugar que mostre texto puro
+// (ex: <option> de <select>, que não aceita elementos filhos).
+function roomLabel(room?: MeetingRoom) {
+  if (!room) return '';
+  return room.icon ? `${room.icon} ${room.name}` : room.name;
+}
+
+const ROOM_ICON_PRESETS = ['🚪', '👔', '💼', '💰', '🤝', '📦', '📐', '🏭', '🛗', '🎛️', '🍽️', '⚙️', '🧑‍💼', '💻', '📞'];
+
+type MeetingStatus = 'scheduled' | 'ongoing' | 'finished';
+
+function getMeetingStatus(meeting: Meeting): MeetingStatus {
+  if (!meeting.endDate) return 'scheduled';
+  const now = Date.now();
+  if (now >= new Date(meeting.endDate).getTime()) return 'finished';
+  if (now >= new Date(meeting.meetingDate).getTime()) return 'ongoing';
+  return 'scheduled';
+}
+
+const MEETING_STATUS_META: Record<MeetingStatus, { label: string; className: string }> = {
+  scheduled: { label: 'Agendada', className: 'bg-blue-50 text-blue-600' },
+  ongoing: { label: 'Em andamento', className: 'bg-green-50 text-green-600' },
+  finished: { label: 'Finalizada', className: 'bg-gray-100 text-gray-500' },
+};
+
+function MeetingStatusBadge({ status }: { status: MeetingStatus }) {
+  const meta = MEETING_STATUS_META[status];
+  return <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 ${meta.className}`}>{meta.label}</span>;
+}
+
+// "Cobrar" o assunto: reunião que já terminou e ninguém colou nota nem
+// gerou resumo — não bloqueia nada (a reunião já aconteceu, não dá pra
+// impedir depois do fato), só chama atenção pra registrar o que foi
+// discutido antes que a memória esfrie.
+function needsSubjectFollowUp(meeting: Meeting) {
+  return getMeetingStatus(meeting) === 'finished' && !meeting.notes.trim() && !(meeting.summary || '').trim();
 }
 
 function formatTimeRange(start: string, end?: string) {
@@ -127,6 +166,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   const [newRoomId, setNewRoomId] = useState<string>('');
   const [isAddingRoom, setIsAddingRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
+  const [newRoomIcon, setNewRoomIcon] = useState(ROOM_ICON_PRESETS[0]);
   const [savingRoom, setSavingRoom] = useState(false);
   const [newParticipantIds, setNewParticipantIds] = useState<string[]>([]);
   const [participantSearch, setParticipantSearch] = useState('');
@@ -139,6 +179,16 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
   const [savingNotes, setSavingNotes] = useState(false);
   const [generatingId, setGeneratingId] = useState<string | null>(null);
   const [creatingTaskFor, setCreatingTaskFor] = useState<string | null>(null);
+
+  // Só pra forçar recálculo de getMeetingStatus() (agendada/em andamento/
+  // finalizada) enquanto a tela fica aberta — sem isso, uma reunião que
+  // começa ou termina com a lista já carregada na tela ficava com o badge
+  // desatualizado até a próxima ação do usuário re-renderizar o componente.
+  const [, forceStatusTick] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => forceStatusTick((t) => t + 1), 60_000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Issue #83 (bug #4 da #81): sem try/catch, um soluço de rede (mesma causa
   // do lock de sessão que trava a fila do Supabase em outras telas) fazia o
@@ -183,7 +233,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     setSavingRoom(true);
     const { data, error } = await supabase
       .from('meeting_rooms')
-      .insert({ name: newRoomName.trim(), created_by: currentUser.id })
+      .insert({ name: newRoomName.trim(), icon: newRoomIcon, created_by: currentUser.id })
       .select()
       .single();
     setSavingRoom(false);
@@ -195,11 +245,14 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     setRooms((prev) => [...prev, room].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR')));
     setNewRoomId(room.id);
     setNewRoomName('');
+    setNewRoomIcon(ROOM_ICON_PRESETS[0]);
     setIsAddingRoom(false);
   };
 
-  // Conflito de sala: só avisa (não bloqueia) — mostra quem mais já reservou
-  // aquela sala num horário que sobrepõe o que está sendo escolhido agora.
+  // Mostra quem mais já reservou aquela sala num horário que sobrepõe o que
+  // está sendo escolhido agora — a trava de verdade contra dupla-reserva é a
+  // constraint de exclusão no banco (meetings_no_room_overlap); isto aqui é
+  // só pra avisar/bloquear o botão "Criar" no client antes de tentar.
   // Consulta o Supabase direto (em vez de filtrar a lista `meetings` já
   // carregada, que só traz as 200 reuniões de meeting_date mais recente/
   // futuro): a partir de um certo volume de reuniões futuras, essa lista
@@ -284,6 +337,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
     setNewRoomId('');
     setIsAddingRoom(false);
     setNewRoomName('');
+    setNewRoomIcon(ROOM_ICON_PRESETS[0]);
     setNewParticipantIds([]);
     setParticipantSearch('');
     setNewNotes('');
@@ -438,6 +492,8 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
   if (selected) {
     const pendingCount = selected.actionItems.filter((i) => !i.completed).length;
+    const selectedRoom = selected.roomId ? rooms.find((r) => r.id === selected.roomId) : undefined;
+    const selectedStatus = getMeetingStatus(selected);
     return (
       <div className="max-w-2xl mx-auto">
         <button onClick={() => setSelectedId(null)} className="text-xs font-semibold text-gray-500 hover:text-gray-700 mb-4 flex items-center gap-1">
@@ -446,7 +502,10 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
 
         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-5 mb-4">
           <div className="flex items-start justify-between gap-2">
-            <h2 className="text-xl font-bold text-gray-800">{selected.title}</h2>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-xl font-bold text-gray-800">{selected.title}</h2>
+              <MeetingStatusBadge status={selectedStatus} />
+            </div>
             {canCancelMeeting(selected) && (
               <button
                 onClick={() => cancelMeeting(selected)}
@@ -460,10 +519,10 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
             {formatMeetingDate(selected.meetingDate)}
             {selected.endDate && ` (${formatTimeRange(selected.meetingDate, selected.endDate)})`}
           </p>
-          {selected.roomId && rooms.find((r) => r.id === selected.roomId) && (
+          {selectedRoom && (
             <p className="text-xs text-gray-500 mt-1 flex items-center gap-1">
-              <svg className="w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a2 2 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
-              {rooms.find((r) => r.id === selected.roomId)!.name}
+              <span className="text-sm">{selectedRoom.icon || '🚪'}</span>
+              {selectedRoom.name}
             </p>
           )}
           {selected.participantIds.length > 0 && (
@@ -473,6 +532,11 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
                 if (!u) return null;
                 return <img key={id} src={avatarThumb(u.avatar)} title={u.name} className="w-6 h-6 rounded-full border-2 border-white" alt="" />;
               })}
+            </div>
+          )}
+          {needsSubjectFollowUp(selected) && (
+            <div className="mt-3 text-[11px] bg-amber-50 border border-amber-200 text-amber-700 rounded-lg p-2">
+              📝 Essa reunião já terminou e ainda não tem assunto registrado — cole as notas abaixo (ou gere o resumo com IA) pra não perder o que foi discutido.
             </div>
           )}
         </div>
@@ -613,7 +677,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
                 >
                   <option value="">Sem sala</option>
                   {rooms.filter((r) => r.isActive).map((r) => (
-                    <option key={r.id} value={r.id}>{r.name}</option>
+                    <option key={r.id} value={r.id}>{roomLabel(r)}</option>
                   ))}
                 </select>
                 <button
@@ -625,26 +689,41 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
                 </button>
               </div>
             ) : (
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  autoFocus
-                  value={newRoomName}
-                  onChange={(e) => setNewRoomName(e.target.value)}
-                  placeholder="Nome da sala (ex: 2º Andar | Diretoria)"
-                  className="flex-1 text-sm p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-300"
-                />
-                <button
-                  type="button"
-                  onClick={createRoom}
-                  disabled={savingRoom || !newRoomName.trim()}
-                  className="text-xs font-bold bg-purple-500 text-white px-3 rounded-lg hover:brightness-110 disabled:opacity-50 shrink-0"
-                >
-                  {savingRoom ? '...' : 'Salvar'}
-                </button>
-                <button type="button" onClick={() => { setIsAddingRoom(false); setNewRoomName(''); }} className="text-xs text-gray-500 hover:text-gray-700 px-2 shrink-0">
-                  Cancelar
-                </button>
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    autoFocus
+                    value={newRoomName}
+                    onChange={(e) => setNewRoomName(e.target.value)}
+                    placeholder="Nome da sala (ex: 2º Andar | Diretoria)"
+                    className="flex-1 text-sm p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-300"
+                  />
+                  <button
+                    type="button"
+                    onClick={createRoom}
+                    disabled={savingRoom || !newRoomName.trim()}
+                    className="text-xs font-bold bg-purple-500 text-white px-3 rounded-lg hover:brightness-110 disabled:opacity-50 shrink-0"
+                  >
+                    {savingRoom ? '...' : 'Salvar'}
+                  </button>
+                  <button type="button" onClick={() => { setIsAddingRoom(false); setNewRoomName(''); setNewRoomIcon(ROOM_ICON_PRESETS[0]); }} className="text-xs text-gray-500 hover:text-gray-700 px-2 shrink-0">
+                    Cancelar
+                  </button>
+                </div>
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-[10px] text-gray-400 font-semibold mr-1">Ícone:</span>
+                  {ROOM_ICON_PRESETS.map((icon) => (
+                    <button
+                      key={icon}
+                      type="button"
+                      onClick={() => setNewRoomIcon(icon)}
+                      className={`w-7 h-7 flex items-center justify-center rounded-lg border text-sm ${newRoomIcon === icon ? 'border-purple-400 bg-purple-50' : 'border-transparent hover:bg-gray-100'}`}
+                    >
+                      {icon}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             {roomConflicts.length > 0 && (
@@ -714,6 +793,7 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
         {!isLoading && visibleMeetings.map((m) => {
           const pending = m.actionItems.filter((i) => !i.completed).length;
           const room = m.roomId ? rooms.find((r) => r.id === m.roomId) : undefined;
+          const status = getMeetingStatus(m);
           return (
             <button
               key={m.id}
@@ -721,10 +801,15 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
               className="w-full text-left px-4 py-3 border-b border-gray-100 last:border-b-0 hover:bg-gray-50 transition-colors"
             >
               <div className="flex items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-gray-800 truncate">{m.title}</p>
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <p className="text-sm font-semibold text-gray-800 truncate">{m.title}</p>
+                  <MeetingStatusBadge status={status} />
+                </div>
                 <span className="text-[11px] text-gray-300 shrink-0">{formatMeetingDate(m.meetingDate)}</span>
               </div>
-              <p className="text-xs text-gray-500 truncate mt-0.5">{m.summary || m.notes || 'Sem notas ainda.'}</p>
+              <p className="text-xs text-gray-500 truncate mt-0.5">
+                {needsSubjectFollowUp(m) ? '📝 Assunto pendente — sem notas registradas.' : (m.summary || m.notes || 'Sem notas ainda.')}
+              </p>
               <div className="flex items-center justify-between mt-1.5">
                 <div className="flex items-center gap-2">
                   <div className="flex items-center -space-x-1.5">
@@ -735,7 +820,9 @@ export function MeetingsView({ currentUser, users, lists, onOpenTask, onCreateTa
                     })}
                   </div>
                   {room && (
-                    <span className="text-[11px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded truncate max-w-[160px]">{room.name}</span>
+                    <span className="text-[11px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded truncate max-w-[160px] flex items-center gap-1">
+                      <span>{room.icon || '🚪'}</span>{room.name}
+                    </span>
                   )}
                 </div>
                 {pending > 0 && (
@@ -879,6 +966,7 @@ function RoomStatusPanel({ rooms, users, onSelectMeeting }: { rooms: MeetingRoom
             >
               <div className="flex items-center gap-1.5">
                 <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} />
+                <span className="text-sm shrink-0">{room.icon || '🚪'}</span>
                 <p className="text-xs font-semibold text-gray-700 truncate flex-1">{room.name}</p>
                 {hasLoaded && upcoming.length > 0 && (
                   <span className="text-[10px] text-gray-400 shrink-0">
