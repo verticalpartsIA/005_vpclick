@@ -11154,6 +11154,27 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
   const [consentChecked, setConsentChecked] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Achado real: "Permitir enviar de novo" (form.allowResubmit) era salvo
+  // no builder mas nunca checado em lugar nenhum — desmarcar a opção não
+  // tinha efeito algum, qualquer um podia responder o mesmo formulário
+  // (e criar tarefas duplicadas) quantas vezes quisesse. fetchFormSubmissions
+  // já vem filtrado pela RLS pra "só minhas respostas" quando quem preenche
+  // não é dono/gestor do form, mas filtra de novo por segurança pro caso de
+  // quem preenche também gerenciar o form (aí vê as respostas de todo
+  // mundo). A trava de verdade (contra corrida/duplo clique) é o trigger no
+  // banco — ver migration 20260921020000_enforce_form_resubmit_policy.sql.
+  const [alreadySubmitted, setAlreadySubmitted] = useState(false);
+  const [checkingResubmit, setCheckingResubmit] = useState(!form.allowResubmit);
+  useEffect(() => {
+    if (form.allowResubmit) { setCheckingResubmit(false); return; }
+    let cancelled = false;
+    taskRepo.fetchFormSubmissions(form.id)
+      .then((rows) => { if (!cancelled) setAlreadySubmitted(rows.some((r) => r.submittedBy === currentUser.id)); })
+      .catch((err) => console.error('FormFillModal: erro ao checar respostas anteriores', err))
+      .finally(() => { if (!cancelled) setCheckingResubmit(false); });
+    return () => { cancelled = true; };
+  }, [form.id, form.allowResubmit, currentUser.id]);
+
   const setAnswer = (qId: string, value: any) => setAnswers((prev) => ({ ...prev, [qId]: value }));
 
   const resolvedStatus = useMemo(() => {
@@ -11164,6 +11185,7 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
   }, [form, lists, statusGroups]);
 
   const handleSubmit = async () => {
+    if (alreadySubmitted) { toast.error('Você já respondeu esse formulário.'); return; }
     for (const q of form.questions as FormQuestion[]) {
       const v = answers[q.id];
       if (q.isRequired && (v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0))) {
@@ -11205,6 +11227,16 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
         </div>
+        {checkingResubmit ? (
+          <div className="p-8 text-center text-sm text-gray-400">Carregando...</div>
+        ) : alreadySubmitted ? (
+          <div className="p-6 flex flex-col items-center text-center gap-2">
+            <p className="text-sm font-semibold text-gray-700">Você já respondeu esse formulário.</p>
+            <p className="text-xs text-gray-500">Este formulário não aceita mais de uma resposta por pessoa.</p>
+            <button onClick={onClose} className="mt-2 px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Fechar</button>
+          </div>
+        ) : (
+        <>
         <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
           {form.questions.map((q: FormQuestion) => (
             <div key={q.id}>
@@ -11265,6 +11297,8 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
             {isSubmitting ? 'Enviando...' : (form.submitLabel || 'Enviar')}
           </button>
         </div>
+        </>
+        )}
       </div>
     </div>
   );
