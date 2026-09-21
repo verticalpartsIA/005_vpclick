@@ -7670,7 +7670,7 @@ const NTH_WEEK_LABELS: Record<number, string> = { 1: '1ª', 2: '2ª', 3: '3ª', 
 // Converte um Date pra valor de <input type="datetime-local"> no fuso local
 // do navegador (não usa toISOString — isso converteria pra UTC e descolaria
 // a hora exibida da hora que o usuário quis dizer).
-function toDatetimeLocalValue(date: Date): string {
+export function toDatetimeLocalValue(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
@@ -7753,6 +7753,7 @@ function ruleToRecurrenceForm(rule: TaskRecurrenceRule): RecurrenceFormState {
 // função pura diretamente, no mesmo estilo Vitest já usado no resto do repo).
 export function buildRecurrenceRuleInput(
   form: RecurrenceFormState,
+  existingRule?: TaskRecurrenceRule | null,
 ): { input: Omit<import('./lib/taskRepo').RecurrenceRuleInput, 'taskId' | 'listId' | 'createdBy'> } | { error: string } {
   const startAtDate = new Date(form.startAt);
   if (Number.isNaN(startAtDate.getTime())) {
@@ -7761,6 +7762,19 @@ export function buildRecurrenceRuleInput(
   if (form.frequencyType === 'weekly' && form.weekdays.length === 0) {
     return { error: 'Selecione ao menos um dia da semana.' };
   }
+
+  // Achado real: editar QUALQUER campo de uma regra já em andamento (ex:
+  // política de conflito, herança de responsáveis) sem mexer na data
+  // rebobinava next_run_at pro start_at original — na próxima execução do
+  // scheduler, a regra aparecia "atrasada" há meses e ele recriava um
+  // backlog inteiro de tarefas retroativas (ou, com misfire "mais recente",
+  // fabricava uma ocorrência com data errada). Só recalcula nextRunAt a
+  // partir do novo startAt quando o usuário de fato mudou a data de início
+  // (o form já vem pré-preenchido com a data original — ruleToRecurrenceForm
+  // — então comparar contra o valor atual do form detecta a mudança); senão
+  // preserva o progresso (next_run_at) que a regra já tinha.
+  const startAtUnchanged = !!existingRule && form.startAt === toDatetimeLocalValue(new Date(existingRule.startAt));
+  const nextRunAt = startAtUnchanged ? (existingRule!.nextRunAt ?? startAtDate.toISOString()) : startAtDate.toISOString();
 
   return {
     input: {
@@ -7771,9 +7785,7 @@ export function buildRecurrenceRuleInput(
       monthWeek: form.frequencyType === 'monthly' && form.monthMode === 'nth' ? form.monthWeek : null,
       monthWeekday: form.frequencyType === 'monthly' && form.monthMode === 'nth' ? form.monthWeekday : null,
       startAt: startAtDate.toISOString(),
-      // A primeira ocorrência gerada é exatamente o start_at — o scheduler
-      // avança a partir daí a cada execução (ver task-recurrence-scheduler).
-      nextRunAt: startAtDate.toISOString(),
+      nextRunAt,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Sao_Paulo',
       skipWeekends: form.skipWeekends,
       skipHolidays: form.skipHolidays,
@@ -7836,7 +7848,7 @@ function RecurrenceConfigModal({
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (isSubmitting) return;
-    const result = buildRecurrenceRuleInput(form);
+    const result = buildRecurrenceRuleInput(form, rule);
     if ('error' in result) {
       toast.error(result.error);
       return;
@@ -11549,8 +11561,9 @@ function WhiteboardFormModal({ whiteboard, users, currentUser, onClose, onSaved 
     try {
       if (whiteboard) {
         const res = await taskRepo.updateWhiteboard(whiteboard.id, { name: name.trim(), description: description.trim() || null, access });
-        if (res.ok) await taskRepo.updateWhiteboardOwners(whiteboard.id, ownerIds);
         if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        const ownersRes = await taskRepo.updateWhiteboardOwners(whiteboard.id, ownerIds);
+        if (!ownersRes.ok) { toast.error('Quadro atualizado, mas houve erro ao salvar os responsáveis: ' + ownersRes.message); return; }
         toast.success('Quadro atualizado.');
       } else {
         const res = await taskRepo.createWhiteboard({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
