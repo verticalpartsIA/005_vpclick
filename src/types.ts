@@ -174,6 +174,7 @@ export interface Meeting {
 export interface MeetingRoom {
   id: string;
   name: string;
+  icon?: string;
   isActive: boolean;
   createdBy?: string;
   createdAt: string;
