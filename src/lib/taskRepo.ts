@@ -559,12 +559,17 @@ export async function upsertUserCapacity(userId: string, weeklyHours: number): P
   return { ok: true };
 }
 
+// RPC (não select direto na tabela) porque `reason` é texto livre e pode
+// conter motivo médico/pessoal — get_visible_time_off() mascara pra null
+// quem não é o próprio dono nem gestor, a RLS de user_time_off só deixa
+// ver a linha inteira nesses dois casos (ver migration
+// 20260921010000_mask_time_off_reason.sql).
 export async function fetchUserTimeOff(userIds?: string[]): Promise<UserTimeOff[]> {
-  let q = supabase.from('user_time_off').select('id, user_id, start_date, end_date, reason').order('start_date', { ascending: false });
-  if (userIds && userIds.length > 0) q = q.in('user_id', userIds);
-  const { data, error } = await q;
+  const { data, error } = await supabase.rpc('get_visible_time_off', { p_user_ids: userIds && userIds.length > 0 ? userIds : null });
   if (error) { console.error('taskRepo.fetchUserTimeOff:', error); throw error; }
-  return (data ?? []).map((r: any) => ({ id: r.id, userId: r.user_id, startDate: r.start_date, endDate: r.end_date, reason: r.reason || undefined }));
+  return (data ?? [])
+    .map((r: any) => ({ id: r.id, userId: r.user_id, startDate: r.start_date, endDate: r.end_date, reason: r.reason || undefined }))
+    .sort((a: UserTimeOff, b: UserTimeOff) => b.startDate.localeCompare(a.startDate));
 }
 
 export async function addUserTimeOff(userId: string, startDate: string, endDate: string, reason: string | null, createdBy: string): Promise<{ ok: true } | { ok: false; message: string }> {

@@ -9255,22 +9255,34 @@ function TaskTimeTracking({ taskId, currentUser, isReadOnly, estimatedHours, use
 
   const handleStart = async () => {
     setIsStarting(true);
-    const res = await taskRepo.startTimer(taskId, currentUser.id, true);
-    setIsStarting(false);
-    if (!res.ok) { toast.error(res.message); return; }
-    setRunningTimer(res.entry);
-    setEntries(prev => [res.entry, ...prev]);
+    try {
+      const res = await taskRepo.startTimer(taskId, currentUser.id, true);
+      if (!res.ok) { toast.error(res.message); return; }
+      setRunningTimer(res.entry);
+      setEntries(prev => [res.entry, ...prev]);
+    } catch (err) {
+      console.error('Erro ao iniciar cronômetro:', err);
+      toast.error('Erro inesperado ao iniciar o cronômetro. Tente novamente.');
+    } finally {
+      setIsStarting(false);
+    }
   };
 
   const handleStop = async () => {
     if (!runningTimer) return;
     setIsStopping(true);
-    const res = await taskRepo.stopTimer(runningTimer.id);
-    setIsStopping(false);
-    if (!res.ok) { toast.error(res.message); return; }
-    setRunningTimer(null);
-    setEntries(prev => prev.map(e => e.id === res.entry.id ? res.entry : e));
-    toast.success('Cronômetro parado.');
+    try {
+      const res = await taskRepo.stopTimer(runningTimer.id);
+      if (!res.ok) { toast.error(res.message); return; }
+      setRunningTimer(null);
+      setEntries(prev => prev.map(e => e.id === res.entry.id ? res.entry : e));
+      toast.success('Cronômetro parado.');
+    } catch (err) {
+      console.error('Erro ao parar cronômetro:', err);
+      toast.error('Erro inesperado ao parar o cronômetro. Tente novamente.');
+    } finally {
+      setIsStopping(false);
+    }
   };
 
   const handleDelete = async (entryId: string) => {
@@ -9631,23 +9643,35 @@ function WorkloadCapacityModal({ users, capacities, timeOffs, currentUser, onClo
     const val = Number(localHours[userId]);
     if (!Number.isFinite(val) || val < 0) { toast.error('Horas semanais inválidas.'); return; }
     setSavingId(userId);
-    const res = await taskRepo.upsertUserCapacity(userId, val);
-    setSavingId(null);
-    if (!res.ok) { toast.error('Erro ao salvar capacidade: ' + res.message); return; }
-    toast.success('Capacidade salva.');
-    onSaved();
+    try {
+      const res = await taskRepo.upsertUserCapacity(userId, val);
+      if (!res.ok) { toast.error('Erro ao salvar capacidade: ' + res.message); return; }
+      toast.success('Capacidade salva.');
+      onSaved();
+    } catch (err) {
+      console.error('Erro ao salvar capacidade:', err);
+      toast.error('Erro inesperado ao salvar a capacidade. Tente novamente.');
+    } finally {
+      setSavingId(null);
+    }
   };
 
   const addTimeOff = async () => {
     if (!newTimeOff.userId || !newTimeOff.start || !newTimeOff.end) { toast.error('Preencha pessoa, início e fim.'); return; }
     if (newTimeOff.end < newTimeOff.start) { toast.error('Data final não pode ser antes da inicial.'); return; }
     setIsAddingTimeOff(true);
-    const res = await taskRepo.addUserTimeOff(newTimeOff.userId, newTimeOff.start, newTimeOff.end, newTimeOff.reason || null, currentUser.id);
-    setIsAddingTimeOff(false);
-    if (!res.ok) { toast.error('Erro ao registrar ausência: ' + res.message); return; }
-    setNewTimeOff({ userId: users[0]?.id || '', start: '', end: '', reason: '' });
-    toast.success('Ausência registrada.');
-    onSaved();
+    try {
+      const res = await taskRepo.addUserTimeOff(newTimeOff.userId, newTimeOff.start, newTimeOff.end, newTimeOff.reason || null, currentUser.id);
+      if (!res.ok) { toast.error('Erro ao registrar ausência: ' + res.message); return; }
+      setNewTimeOff({ userId: users[0]?.id || '', start: '', end: '', reason: '' });
+      toast.success('Ausência registrada.');
+      onSaved();
+    } catch (err) {
+      console.error('Erro ao registrar ausência:', err);
+      toast.error('Erro inesperado ao registrar a ausência. Tente novamente.');
+    } finally {
+      setIsAddingTimeOff(false);
+    }
   };
 
   const removeTimeOff = async (id: string) => {
