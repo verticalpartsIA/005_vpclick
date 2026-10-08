@@ -14,6 +14,34 @@
 import { supabase } from './supabase';
 import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, MindMapAccess, MindMapDef, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WhiteboardAccess, WhiteboardDef, WorkloadBucket } from '../types';
 
+// Escritas em `tasks` NÃO podem ser "mudas": quando a RLS nega o UPDATE (ou a
+// request sai sem sessão de usuário, caindo no role anon), o PostgREST responde
+// 2xx com 0 linhas afetadas e NENHUM erro. O app tratava isso como sucesso,
+// mostrava a mudança na tela e, ao sair/F5, o valor antigo voltava ("preenchi e
+// sumiu", "não consigo mudar o status" — relato Beatriz/Bianca, 2026-10-08).
+// `.select('id')` devolve as linhas realmente alteradas; confirmamos aqui.
+const WRITE_NOT_APPLIED_MESSAGE =
+  'A alteração não foi gravada (sem permissão ou sessão expirada). Atualize a página e entre de novo se persistir.';
+
+function checkWriteApplied(
+  res: { data: { id: string }[] | null; error: { message: string } | null },
+  expected: number,
+): string | null {
+  if (res.error) return res.error.message;
+  if ((res.data?.length ?? 0) < expected) return WRITE_NOT_APPLIED_MESSAGE;
+  return null;
+}
+
+// Resposta vazia pode ser "de verdade" ou o role anon (sessão perdida/lock
+// travado) — o PostgREST devolve 200 + [] nos dois casos. Antes de aceitar uma
+// lista vazia como verdade, confirma no servidor que a sessão ainda vale.
+export async function assertSessionStillValid(): Promise<void> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data?.user) {
+    throw new Error('Sessão inválida ou expirada ao carregar dados.');
+  }
+}
+
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
 // Um único .in('task_id', [milhares de UUIDs]) gera uma URL de dezenas de
@@ -577,8 +605,9 @@ export async function deleteUserTimeOff(id: string): Promise<{ ok: true } | { ok
 }
 
 export async function updateTaskEstimatedHours(taskId: string, hours: number | null): Promise<{ ok: true } | { ok: false; message: string }> {
-  const { error } = await supabase.from('tasks').update({ estimated_hours: hours }).eq('id', taskId);
-  if (error) return { ok: false, message: error.message };
+  const res = await supabase.from('tasks').update({ estimated_hours: hours }).eq('id', taskId).select('id');
+  const failure = checkWriteApplied(res, 1);
+  if (failure) return { ok: false, message: failure };
   return { ok: true };
 }
 
@@ -888,16 +917,25 @@ export async function fetchTaskDetails(taskId: string): Promise<TaskDetailsResul
     fetchTaskSubEntity<ActivityRow>(() => supabase.from('task_activities').select('*').eq('task_id', taskId), 'atividade'),
     fetchTaskSubEntity<WatcherRow>(() => supabase.from('task_watchers').select('task_id, user_id').eq('task_id', taskId), 'observadores'),
   ]);
+  // Resposta 100% vazia de uma tarefa que o usuário acabou de abrir é suspeita
+  // (role anon devolve 200 + [] sem erro) — confirma a sessão antes de aceitar.
+  const allEmpty = [att, comm, log, check, act, watch].every((r) => !r.failed && r.data.length === 0);
+  let sessionLost = false;
+  if (allEmpty) {
+    try { await assertSessionStillValid(); } catch { sessionLost = true; }
+  }
+  // Só devolve as partes que carregaram de verdade: uma sub-busca que falhou NÃO
+  // pode sobrescrever (com []) o que já estava carregado na tela.
+  const data: Partial<Task> = {};
+  if (!att.failed && !sessionLost) data.attachments = att.data.map(mapAttachment);
+  if (!comm.failed && !sessionLost) data.comments = comm.data.map(mapComment);
+  if (!log.failed && !sessionLost) data.extensionHistory = log.data.map(mapLog);
+  if (!check.failed && !sessionLost) data.checklists = check.data.map(mapChecklist);
+  if (!act.failed && !sessionLost) data.activities = act.data.map(mapActivity);
+  if (!watch.failed && !sessionLost) data.watcherIds = watch.data.map((w) => w.user_id);
   return {
-    data: {
-      attachments: att.data.map(mapAttachment),
-      comments: comm.data.map(mapComment),
-      extensionHistory: log.data.map(mapLog),
-      checklists: check.data.map(mapChecklist),
-      activities: act.data.map(mapActivity),
-      watcherIds: watch.data.map((w) => w.user_id),
-    } as Partial<Task>,
-    hasError: att.failed || comm.failed || log.failed || check.failed || act.failed || watch.failed,
+    data,
+    hasError: sessionLost || att.failed || comm.failed || log.failed || check.failed || act.failed || watch.failed,
   };
 }
 
@@ -995,7 +1033,7 @@ export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | 
 // desses campos mandaria `''` pro Postgres, que rejeita `''` como uuid/date
 // (erro silencioso do lado do cliente, valor antigo nunca muda no banco).
 export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok: false; message: string }> {
-  const { error } = await supabase
+  const res = await supabase
     .from('tasks')
     .update({
       title: task.title,
@@ -1014,8 +1052,10 @@ export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok:
       estimated_hours: task.estimatedHours ?? null,
       actual_delivery_date: task.actualDeliveryDate || null,
     })
-    .eq('id', task.id);
-  if (error) return { ok: false, message: error.message };
+    .eq('id', task.id)
+    .select('id');
+  const failure = checkWriteApplied(res, 1);
+  if (failure) return { ok: false, message: failure };
   return { ok: true };
 }
 
@@ -1644,18 +1684,18 @@ export async function fetchDashboardData(listIds: string[] | null): Promise<{ ta
 
 // ── Ações em massa ──────────────────────────────────────────────────────────
 export async function bulkUpdateStatus(ids: string[], status: string): Promise<{ error: string | null }> {
-  const { error } = await supabase.from('tasks').update({ status }).in('id', ids);
-  return { error: error ? error.message : null };
+  const res = await supabase.from('tasks').update({ status }).in('id', ids).select('id');
+  return { error: checkWriteApplied(res, ids.length) };
 }
 
 export async function bulkUpdatePriority(ids: string[], priority: TaskPriority): Promise<{ error: string | null }> {
-  const { error } = await supabase.from('tasks').update({ priority }).in('id', ids);
-  return { error: error ? error.message : null };
+  const res = await supabase.from('tasks').update({ priority }).in('id', ids).select('id');
+  return { error: checkWriteApplied(res, ids.length) };
 }
 
 export async function bulkMove(ids: string[], listId: string): Promise<{ error: string | null }> {
-  const { error } = await supabase.from('tasks').update({ list_id: listId }).in('id', ids);
-  return { error: error ? error.message : null };
+  const res = await supabase.from('tasks').update({ list_id: listId }).in('id', ids).select('id');
+  return { error: checkWriteApplied(res, ids.length) };
 }
 
 export async function bulkDelete(ids: string[]): Promise<{ error: string | null }> {

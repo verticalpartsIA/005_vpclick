@@ -2225,6 +2225,11 @@ export default function App() {
         ? await taskRepo.fetchInitialTaskRowsByListId(activeListId)
         : await taskRepo.fetchInitialTaskRowsByListIds(listIds);
 
+      // 200 + [] também é o que o role anon recebe quando a sessão se perde
+      // (lock travado, token vencido): sem esta checagem a pasta "esvaziava" sem
+      // erro nenhum. Lista vazia só é aceita com sessão confirmada no servidor.
+      if (firstRows.length === 0) await taskRepo.assertSessionStillValid();
+
       if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
       loadTasksCommittedIdRef.current = requestId;
       setTasks(prev => firstRows
@@ -13940,14 +13945,15 @@ function TaskDetailModal(props: any) {
     const autoDeliveryDate = (!isDoneLikeStatus(task.status) && isDoneLikeStatus(status) && !task.actualDeliveryDate)
       ? new Date().toISOString().slice(0, 10)
       : task.actualDeliveryDate;
-    onUpdate({ ...task, status, actualDeliveryDate: autoDeliveryDate });
-    logActivitySafe(task.id, 'STATUS_CHANGE', task.status, status);
+    // Só registra no histórico se a mudança foi realmente gravada.
+    const ok = await onUpdate({ ...task, status, actualDeliveryDate: autoDeliveryDate });
+    if (ok !== false) logActivitySafe(task.id, 'STATUS_CHANGE', task.status, status);
   };
 
   const handleUpdatePriority = async (priority: TaskPriority) => {
     if (priority === task.priority) return;
-    onUpdate({ ...task, priority });
-    logActivitySafe(task.id, 'PRIORITY_CHANGE', task.priority, priority);
+    const ok = await onUpdate({ ...task, priority });
+    if (ok !== false) logActivitySafe(task.id, 'PRIORITY_CHANGE', task.priority, priority);
   };
 
   // Issue #187 (Workload/Capacidade) — alimenta get_workload_summary.
