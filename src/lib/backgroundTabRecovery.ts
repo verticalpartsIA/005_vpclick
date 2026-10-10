@@ -12,8 +12,21 @@
 // aviso visível nesse meio tempo. Um clique que não faz nada por 20s parece
 // "o site não responde", não "espera, está corrigindo sozinho".
 //
-// Esta função detecta quando a aba volta a ficar visível depois de tempo
-// suficiente em segundo plano pra esse problema ser plausível, e tenta se
+// Primeira versão escutava só `visibilitychange` (document.hidden/visible) —
+// mas isso só dispara quando a ABA é trocada ou minimizada. O relato real que
+// expôs essa lacuna: usuário alternando entre o navegador (com o VP Click na
+// aba ativa, janela aberta, nada cobrindo) e outra janela/app (ex.: este
+// próprio chat) — a janela do navegador PERDE O FOCO do sistema operacional,
+// mas a aba continua "visível" pela Page Visibility API (não foi trocada nem
+// minimizada), então `visibilitychange` nunca disparava e a recuperação nunca
+// rodava, mesmo com o mesmo travamento acontecendo. `blur`/`focus` (foco da
+// JANELA, não da aba) cobre exatamente esse caso. Trata os dois sinais juntos
+// — "sumiu" é visibilitychange=hidden OU blur da janela; "voltou" é
+// visibilitychange=visible OU focus da janela — porque não dá pra saber de
+// antemão qual delas o navegador do usuário vai realmente disparar.
+//
+// Esta função detecta a volta (por qualquer um dos dois sinais) depois de
+// tempo suficiente ausente pra esse problema ser plausível, e tenta se
 // recuperar ANTES que o usuário interaja com qualquer coisa:
 //   1. Pede uma sessão fresca ao Supabase. Se a sessão/trava estiver
 //      saudável, isso só confirma e não causa nada visível pro usuário.
@@ -23,30 +36,32 @@
 //      ANTES que o usuário perceba o problema.
 import { supabase } from './supabase';
 
-const HIDDEN_THRESHOLD_MS = 60_000; // tempo mínimo escondida pra valer a pena checar — evita disparar à toa quando o usuário só troca de aba rapidamente
+const AWAY_THRESHOLD_MS = 60_000; // tempo mínimo ausente pra valer a pena checar — evita disparar à toa numa troca rápida de aba/janela
 const RECOVERY_CHECK_TIMEOUT_MS = 8_000; // bem menor que os 20-25s das travas internas — não faz sentido esperar o teto inteiro só pra decidir se recarrega
 
 export function startBackgroundTabRecovery(): () => void {
-  let hiddenAt: number | null = null;
+  let awaySince: number | null = null;
+  let recovering = false; // evita checar 2x se visibilitychange e focus dispararem quase juntos pro mesmo retorno
 
-  const onVisibilityChange = () => {
-    if (document.visibilityState === 'hidden') {
-      hiddenAt = Date.now();
-      return;
-    }
-    if (document.visibilityState !== 'visible' || hiddenAt === null) return;
+  const markAway = () => {
+    if (awaySince === null) awaySince = Date.now();
+  };
 
-    const hiddenDurationMs = Date.now() - hiddenAt;
-    hiddenAt = null;
-    if (hiddenDurationMs < HIDDEN_THRESHOLD_MS) return;
+  const checkRecovery = () => {
+    if (awaySince === null || recovering) return;
+    const awayDurationMs = Date.now() - awaySince;
+    awaySince = null;
+    if (awayDurationMs < AWAY_THRESHOLD_MS) return;
 
+    recovering = true;
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      recovering = false;
       console.warn(
         `backgroundTabRecovery: sessão não respondeu em ${RECOVERY_CHECK_TIMEOUT_MS}ms após ` +
-        `${Math.round(hiddenDurationMs / 1000)}s em segundo plano — recarregando a página.`
+        `${Math.round(awayDurationMs / 1000)}s ausente — recarregando a página.`
       );
       window.location.reload();
     }, RECOVERY_CHECK_TIMEOUT_MS);
@@ -55,18 +70,34 @@ export function startBackgroundTabRecovery(): () => void {
       () => {
         if (settled) return;
         settled = true;
+        recovering = false;
         clearTimeout(timer);
       },
       () => {
         if (settled) return;
         settled = true;
+        recovering = false;
         clearTimeout(timer);
-        console.warn('backgroundTabRecovery: getSession() falhou ao retomar a aba — recarregando a página.');
+        console.warn('backgroundTabRecovery: getSession() falhou ao retomar — recarregando a página.');
         window.location.reload();
       }
     );
   };
 
+  const onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') markAway();
+    else if (document.visibilityState === 'visible') checkRecovery();
+  };
+  const onBlur = () => markAway();
+  const onFocus = () => checkRecovery();
+
   document.addEventListener('visibilitychange', onVisibilityChange);
-  return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  window.addEventListener('blur', onBlur);
+  window.addEventListener('focus', onFocus);
+
+  return () => {
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('blur', onBlur);
+    window.removeEventListener('focus', onFocus);
+  };
 }

@@ -7,10 +7,24 @@ import { supabase } from '../lib/supabase';
 // lockTimeout.ts) fica presa depois de a aba passar tempo em segundo plano, e
 // só um F5 manual resolvia. startBackgroundTabRecovery detecta a volta da
 // aba e se recupera sozinha, sem esperar o usuário tentar usar a tela.
+//
+// Segunda rodada do mesmo relato: o usuário continuou vendo o travamento
+// mesmo com o fix de visibilitychange já no ar — porque ele alternava com
+// OUTRA JANELA (não trocava de aba), e o Chrome não necessariamente marca a
+// aba como "hidden" só por perder o foco da janela. Os testes de
+// blur/focus abaixo cobrem exatamente esse caso.
 
 function setVisibility(state: DocumentVisibilityState) {
   Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
   document.dispatchEvent(new Event('visibilitychange'));
+}
+
+function blurWindow() {
+  window.dispatchEvent(new Event('blur'));
+}
+
+function focusWindow() {
+  window.dispatchEvent(new Event('focus'));
 }
 
 describe('startBackgroundTabRecovery', () => {
@@ -81,6 +95,46 @@ describe('startBackgroundTabRecovery', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers on window blur/focus alone, without any visibilitychange event (the window-not-tab case)', async () => {
+    getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({} as any);
+    stop = startBackgroundTabRecovery();
+
+    blurWindow();
+    await vi.advanceTimersByTimeAsync(70_000);
+    focusWindow();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getSessionSpy).toHaveBeenCalledTimes(1);
+    expect(reloadSpy).not.toHaveBeenCalled();
+  });
+
+  it('reloads on window focus alone if the session check hangs', async () => {
+    getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockReturnValue(new Promise(() => {}));
+    stop = startBackgroundTabRecovery();
+
+    blurWindow();
+    await vi.advanceTimersByTimeAsync(70_000);
+    focusWindow();
+
+    expect(reloadSpy).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not double-check when both visibilitychange and focus fire for the same return', async () => {
+    getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({} as any);
+    stop = startBackgroundTabRecovery();
+
+    setVisibility('hidden');
+    blurWindow();
+    await vi.advanceTimersByTimeAsync(70_000);
+    setVisibility('visible');
+    focusWindow(); // dispara logo em seguida, como o navegador normalmente faz
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getSessionSpy).toHaveBeenCalledTimes(1);
   });
 
   it('stops listening after the returned cleanup function runs', async () => {
