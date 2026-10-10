@@ -179,13 +179,14 @@ interface NavigationScope {
 type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams' | 'MindMaps' | 'Map';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
-// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
+// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard etc.) vira um
 // path próprio (`/gantt`, `/kanban`...); a lista/pasta/espaço ativo e o filtro
 // "Minhas Tarefas" (Atribuídas a mim) viajam como query params por cima desse
 // path — mesmo mecanismo que o `?taskId=` já usava, só que agora cobrindo view
 // e escopo também. Views "standalone" (Inbox, Reuniões etc.) e Doc não têm
 // conceito de escopo, então viram só um path fixo (Doc leva o id da página).
-const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard'];
+const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard', 'Map', 'Workload'];
+const LIST_REQUIRED_VIEWS: ActiveView[] = ['Kanban', 'Gantt'];
 
 const VIEW_TO_SLUG: Record<ActiveView, string> = {
   Dashboard: '', // path canônico é a raiz ("/")
@@ -2256,6 +2257,16 @@ export default function App() {
     }
     return null;
   }, [activeListId, activeScope, lists, folders]);
+
+  // Kanban e Gantt são views por lista. Se a URL cair num espaço/pasta
+  // agregador (ex.: /suporte-t-i/ativos-eletronicos/kanban), escolha a
+  // primeira lista acessível daquele escopo em vez de deixar a tela "reiniciar"
+  // para o aviso "Selecione uma lista".
+  useEffect(() => {
+    if (activeListId || !LIST_REQUIRED_VIEWS.includes(activeView)) return;
+    const firstListId = scopedListIds?.[0];
+    if (firstListId) setActiveListId(firstListId);
+  }, [activeView, activeListId, scopedListIds]);
 
   const loadTasks = useCallback(async () => {
     if (!sessionUserId) return;
