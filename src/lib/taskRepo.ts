@@ -884,6 +884,16 @@ export interface TaskDetailsResult {
   // de novo. `data` já vem com as partes que deram certo preenchidas (falha
   // parcial não zera o que funcionou).
   hasError: boolean;
+  // Quais campos de `data`, especificamente, vieram de uma sub-busca que
+  // falhou (ficaram como `[]`, não porque a tarefa realmente não tem nada).
+  // Achado real (2026-10): o chamador fazia `{...task, ...result.data}` sem
+  // olhar pra isso — uma falha passageira só nos comentários (a causa mais
+  // comum: renovação de token travando a fila do Supabase, ver
+  // connectionStatus.ts) sobrescrevia os comentários JÁ CARREGADOS (inclusive
+  // um que o usuário tinha acabado de postar, já salvo no banco) com `[]`.
+  // Agora o chamador usa isso pra manter o valor anterior nos campos que
+  // falharam, em vez de confiar que `[]` significa "está vazio mesmo".
+  failedFields: Array<keyof Pick<Task, 'attachments' | 'comments' | 'extensionHistory' | 'checklists' | 'activities' | 'watcherIds'>>;
 }
 
 // Sub-entidades de UMA tarefa (lazy-load ao abrir o detalhe).
@@ -896,6 +906,13 @@ export async function fetchTaskDetails(taskId: string): Promise<TaskDetailsResul
     fetchTaskSubEntity<ActivityRow>(() => supabase.from('task_activities').select('*').eq('task_id', taskId), 'atividade'),
     fetchTaskSubEntity<WatcherRow>(() => supabase.from('task_watchers').select('task_id, user_id').eq('task_id', taskId), 'observadores'),
   ]);
+  const failedFields: TaskDetailsResult['failedFields'] = [];
+  if (att.failed) failedFields.push('attachments');
+  if (comm.failed) failedFields.push('comments');
+  if (log.failed) failedFields.push('extensionHistory');
+  if (check.failed) failedFields.push('checklists');
+  if (act.failed) failedFields.push('activities');
+  if (watch.failed) failedFields.push('watcherIds');
   return {
     data: {
       attachments: att.data.map(mapAttachment),
@@ -905,7 +922,8 @@ export async function fetchTaskDetails(taskId: string): Promise<TaskDetailsResul
       activities: act.data.map(mapActivity),
       watcherIds: watch.data.map((w) => w.user_id),
     } as Partial<Task>,
-    hasError: att.failed || comm.failed || log.failed || check.failed || act.failed || watch.failed,
+    hasError: failedFields.length > 0,
+    failedFields,
   };
 }
 
@@ -1002,8 +1020,17 @@ export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | 
 // TableView/KanbanView) — sem o `|| null` aqui, uma tentativa de limpar um
 // desses campos mandaria `''` pro Postgres, que rejeita `''` como uuid/date
 // (erro silencioso do lado do cliente, valor antigo nunca muda no banco).
+// Achado real (2026-10): sem `.select()`, um UPDATE bloqueado pelo `with
+// check` da policy `tasks_upd` (ver migration 30 — exige acesso à lista
+// destino, ou ser responsável/criador) retorna sucesso (`error: null`) com
+// ZERO linhas afetadas — Postgres/PostgREST não avisam. O chamador aplicava
+// a edição otimisticamente mesmo assim, então a tela mostrava "salvo" até o
+// próximo refetch (realtime ou reabrir a tarefa) trazer de volta o valor
+// antigo do banco — reportado como "status não muda"/"campo não salva".
+// Pedir a linha de volta e tratar array vazio como falha (RLS ou id
+// inexistente) fecha esse buraco.
 export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok: false; message: string }> {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('tasks')
     .update({
       title: task.title,
@@ -1022,8 +1049,12 @@ export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok:
       estimated_hours: task.estimatedHours ?? null,
       actual_delivery_date: task.actualDeliveryDate || null,
     })
-    .eq('id', task.id);
+    .eq('id', task.id)
+    .select('id');
   if (error) return { ok: false, message: error.message };
+  if (!data || data.length === 0) {
+    return { ok: false, message: 'Alteração não aplicada: você não tem permissão para editar esta tarefa (ou ela foi movida/excluída).' };
+  }
   return { ok: true };
 }
 

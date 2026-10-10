@@ -983,6 +983,40 @@ const FALLBACK_USER: User = {
 // continua visível/gerenciável no Painel Admin.
 const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
 
+// Colunas que a RPC `search_tasks` (bug #9 do #81) de fato devolve — bem menos
+// que TASK_ROW_SELECT em taskRepo.ts (faltam is_milestone, recurrence_*,
+// archived_*, deleted_*, purge_after, deletion_reason_*, estimated_hours,
+// actual_delivery_date, sort_index). Achado real (2026-10): `hydrateTaskRows`
+// usa o mesmo `mapTaskCore` de qualquer outra listagem, então essas colunas
+// ausentes viravam `false`/`undefined` no objeto hidratado — e o merge da
+// busca (`merged.set(t.id, t)`) SUBSTITUÍA o objeto inteiro já carregado,
+// "desarquivando" uma tarefa arquivada, tirando a marca de marco, zerando
+// horas estimadas etc. na tela, só porque ela deu match na busca. Agora o
+// merge só aceita os campos que a RPC realmente preenche; o resto vem do
+// que já estava carregado (quando existir).
+const SEARCH_RPC_TASK_FIELDS = [
+  'id', 'title', 'description', 'status', 'priority', 'mainAssigneeId',
+  'secondaryAssigneeIds', 'startDate', 'dueDate', 'extensionCount',
+  'listId', 'projectId', 'parentId', 'createdAt', 'createdBy', 'tags',
+] as const satisfies readonly (keyof Task)[];
+
+function mergeSearchHydratedTask(hydrated: Task, previousTask?: Task): Task {
+  if (!previousTask) return hydrated;
+  const merged: Task = { ...previousTask };
+  for (const field of SEARCH_RPC_TASK_FIELDS) {
+    (merged as any)[field] = hydrated[field];
+  }
+  // Sub-entidades vêm de fetchSubEntityInChunks (tabelas de verdade, não da
+  // RPC) — essas sim são confiáveis e devem substituir o que já havia.
+  merged.extensionHistory = hydrated.extensionHistory;
+  merged.checklists = hydrated.checklists;
+  merged.comments = hydrated.comments;
+  merged.attachments = hydrated.attachments;
+  merged.activities = hydrated.activities;
+  merged.watcherIds = hydrated.watcherIds;
+  return merged;
+}
+
 function preserveLoadedTaskDetails(nextTask: Task, previousTask?: Task): Task {
   if (!previousTask) return nextTask;
   return {
@@ -1723,27 +1757,24 @@ export default function App() {
   // filtro para ADMIN — ver dashboardListIds acima).
   const { dashboardTasks, dashboardLists, isDashboardLoading, loadDashboardTasks } = useDashboard(session, activeView, dashboardListIds);
 
+  // Achado real (2026-10): as 13 leituras abaixo iam num `Promise.all` nu —
+  // UMA falha passageira (a mesma causa recorrente de renovação de token que
+  // trava a fila do Supabase nesta base, ver connectionStatus.ts) rejeitava
+  // o lote INTEIRO, e nada era setado: `userAccess` ficava `{}`. Pra
+  // COLABORADOR/GESTOR, `allowedFolderIdSet` trata `userAccess[uid]`
+  // ausente como "zero pastas permitidas" (ver allowedFolderIdSet/scopeTasks
+  // abaixo) — o usuário via TODAS as tarefas da pasta sumirem, ou só as que
+  // ele é assignee direto, dependendo de quais outras dessas 13 queries
+  // também tinham falhado na mesma leva. Um F5 "às vezes" recarregava tudo
+  // (lote teve sorte), "às vezes" só parte — exatamente o relato de
+  // instabilidade. `Promise.allSettled` isola cada falha (as outras 12
+  // continuam valendo) + 1 retry automático do lote inteiro se alguma das
+  // queries que definem ACESSO (spaces/folders/lists/user_access) falhou,
+  // mesmo padrão de resiliência já usado em loadTasks/fetchTaskDetails.
+  const loadInitialDataRetriedRef = useRef(false);
   const loadInitialData = useCallback(async () => {
     try {
-      // As 13 leituras abaixo são independentes entre si (nenhuma usa o
-      // resultado de outra) — disparar todas em paralelo em vez de uma atrás
-      // da outra evita somar 13 round-trips de rede em sequência ao boot do
-      // app (facilmente vários segundos a mais em conexão ruim).
-      const [
-        { data: spacesData },
-        { data: foldersData },
-        { data: listsData },
-        { data: fieldsData },
-        { data: docsData },
-        { data: attachmentsData },
-        { data: projectsData },
-        { data: tagsData },
-        { data: accessData },
-        { data: teamsData },
-        { data: teamMembersData },
-        { data: groupsData },
-        { data: optionsData },
-      ] = await Promise.all([
+      const results = await Promise.allSettled([
         supabase.from('spaces').select('*'),
         supabase.from('folders').select('*'),
         supabase.from('lists').select('*'),
@@ -1758,6 +1789,41 @@ export default function App() {
         supabase.from('task_status_groups').select('*'),
         supabase.from('task_status_options').select('*').order('order_index'),
       ]);
+
+      const labels = [
+        'spaces', 'folders', 'lists', 'custom_fields', 'docs', 'doc_attachments',
+        'projects', 'workspace_tags', 'user_access', 'teams', 'team_members',
+        'task_status_groups', 'task_status_options',
+      ];
+      const dataOf = (r: PromiseSettledResult<{ data: any }>, label: string): any => {
+        if (r.status === 'fulfilled') return r.value.data;
+        console.error(`Erro ao carregar dados iniciais (${label}):`, r.reason);
+        return null;
+      };
+      const [
+        spacesData, foldersData, listsData, fieldsData, docsData,
+        attachmentsData, projectsData, tagsData, accessData, teamsData,
+        teamMembersData, groupsData, optionsData,
+      ] = results.map((r, i) => dataOf(r, labels[i]));
+
+      // Essas 4 definem o que o usuário PODE ver (ver allowedFolderIdSet) —
+      // uma falha nelas não pode passar batido como "0 pastas permitidas".
+      const criticalFailed = [results[0], results[1], results[2], results[8]].some(r => r.status === 'rejected');
+      if (criticalFailed && !loadInitialDataRetriedRef.current) {
+        loadInitialDataRetriedRef.current = true;
+        setTimeout(() => { loadInitialData(); }, 1500);
+        return;
+      }
+      if (criticalFailed) {
+        toast.error('Não foi possível carregar espaços/pastas/permissões. Tarefas podem aparecer faltando.', {
+          action: {
+            label: 'Tentar novamente',
+            onClick: () => { loadInitialDataRetriedRef.current = false; loadInitialData(); },
+          },
+        });
+      } else {
+        loadInitialDataRetriedRef.current = false;
+      }
 
       if (spacesData) {
         setSpaces(spacesData.map((s: any) => ({
@@ -2131,7 +2197,18 @@ export default function App() {
         result = await taskRepo.fetchTaskDetails(id);
         if (cancelled) return;
       }
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, ...result.data } : t));
+      setTasks(prev => prev.map(t => {
+        if (t.id !== id) return t;
+        // Não sobrescreve com `[]` os campos cuja sub-busca falhou (ver
+        // failedFields em taskRepo.fetchTaskDetails) — senão um comentário
+        // que o usuário acabou de postar (já salvo no banco) sumia da tela
+        // se o refetch ao reabrir a tarefa desse um soluço de rede.
+        const safeData = { ...result.data };
+        for (const field of result.failedFields) {
+          delete safeData[field];
+        }
+        return { ...t, ...safeData };
+      }));
       if (result.hasError) {
         toast.error('Não foi possível carregar todos os detalhes da tarefa (comentários, checklist ou anexos).', {
           action: {
@@ -2342,18 +2419,30 @@ export default function App() {
     let cancelled = false;
     setIsSearching(true);
     const handle = setTimeout(async () => {
-      const rows = await taskRepo.searchTaskRowsByTitle(q, 200);
-      if (cancelled) return;
-      if (rows.length > 0) {
-        const hydrated = await taskRepo.hydrateTaskRows(rows);
+      // Achado real: sem try/catch aqui, qualquer rejeição inesperada (ex.:
+      // o timeout de 20s do fetch global, ver fetchWithTimeout em
+      // src/lib/supabase.ts) subia sem handler nenhum e pulava direto o
+      // `setIsSearching(false)` no fim — o spinner da busca ficava girando
+      // pra sempre, mesmo a requisição já tendo "terminado" (com erro).
+      try {
+        const rows = await taskRepo.searchTaskRowsByTitle(q, 200);
         if (cancelled) return;
-        setTasks(prev => {
-          const merged = new Map(prev.map(t => [t.id, t]));
-          for (const t of hydrated) merged.set(t.id, t);
-          return Array.from(merged.values());
-        });
+        if (rows.length > 0) {
+          const hydrated = await taskRepo.hydrateTaskRows(rows);
+          if (cancelled) return;
+          setTasks(prev => {
+            const prevById = new Map(prev.map(t => [t.id, t]));
+            const merged = new Map(prevById);
+            for (const t of hydrated) merged.set(t.id, mergeSearchHydratedTask(t, prevById.get(t.id)));
+            return Array.from(merged.values());
+          });
+        }
+      } catch (err) {
+        console.error('Erro ao buscar tarefas:', err);
+        if (!cancelled) toast.error('Erro ao buscar tarefas. Tente novamente.');
+      } finally {
+        if (!cancelled) setIsSearching(false);
       }
-      if (!cancelled) setIsSearching(false);
     }, 400);
     return () => { cancelled = true; clearTimeout(handle); };
   }, [searchQuery]);
@@ -3024,12 +3113,18 @@ export default function App() {
       }
     }
 
-    const { error } = await supabase
+    const { data: updatedRows, error } = await supabase
       .from('tasks')
       .update({ status: newStatus })
-      .eq('id', taskId);
+      .eq('id', taskId)
+      .select('id');
 
-    if (!error) {
+    // Sem `.select()`, um UPDATE barrado pelo `with check` da policy
+    // `tasks_upd` (precisa acessar a lista, ou ser responsável/criador —
+    // ver migration 30) volta `error: null` com ZERO linhas afetadas: a UI
+    // aplicava o novo status mesmo assim, e ele "voltava sozinho" no próximo
+    // refetch. Tratar array vazio como falha fecha esse buraco.
+    if (!error && updatedRows && updatedRows.length > 0) {
       setTasks(prev => prev.map(t => {
         if (t.id === taskId) {
           const updatedTask = { ...t, status: newStatus };
@@ -3115,9 +3210,13 @@ export default function App() {
         return t;
       }));
       return true;
-    } else {
+    } else if (error) {
       console.error('Erro ao atualizar status:', error);
       toast.error('Erro ao atualizar status. A tarefa voltou ao estado anterior.');
+      return false;
+    } else {
+      console.error('Atualização de status não aplicou nenhuma linha (RLS/permissão) para a tarefa', taskId);
+      toast.error('Você não tem permissão para alterar o status desta tarefa.');
       return false;
     }
   }, [currentUser, tasks, workspace.id]);
@@ -3145,12 +3244,19 @@ export default function App() {
     if (Object.keys(payload).length === 0) return true;
 
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...updates } : t));
-    const { error } = await supabase.from('tasks').update(payload).eq('id', taskId);
+    const { data: updatedRows, error } = await supabase.from('tasks').update(payload).eq('id', taskId).select('id');
 
-    if (error) {
+    // `error: null` + 0 linhas = UPDATE barrado pelo `with check` de `tasks_upd`
+    // (sem permissão na lista/tarefa) — mesmo caso de handleStatusChange acima.
+    if (error || !updatedRows || updatedRows.length === 0) {
       setTasks(prev => prev.map(t => t.id === taskId ? previous : t));
-      console.error('Erro ao atualizar tarefa pelo Kanban:', error);
-      toast.error('Erro ao salvar alteração. A tarefa voltou ao estado anterior.');
+      if (error) {
+        console.error('Erro ao atualizar tarefa pelo Kanban:', error);
+        toast.error('Erro ao salvar alteração. A tarefa voltou ao estado anterior.');
+      } else {
+        console.error('Atualização pelo Kanban não aplicou nenhuma linha (RLS/permissão) para a tarefa', taskId);
+        toast.error('Você não tem permissão para editar esta tarefa.');
+      }
       return false;
     }
 
@@ -3166,15 +3272,21 @@ export default function App() {
   }, [tasks, currentUser]);
 
   const handleUpdateFieldValue = useCallback(async (fieldId: string, entityId: string, value: any) => {
-    const { error } = await supabase
+    const { data: upserted, error } = await supabase
       .from('custom_field_values')
       .upsert({
         field_id: fieldId,
         entity_id: entityId,
         value
-      }, { onConflict: 'field_id,entity_id' });
+      }, { onConflict: 'field_id,entity_id' })
+      .select('entity_id');
 
-    if (!error) {
+    // Mesmo caso de handleStatusChange/handleQuickUpdateTask: a policy de
+    // UPDATE/INSERT de custom_field_values exige can_access_task(entity_id)
+    // (migration 30) — sem `.select()` um upsert barrado por ela volta
+    // sucesso com zero linhas, e o valor do campo "sumia" ao reabrir a tarefa
+    // porque nunca tinha sido salvo de verdade.
+    if (!error && upserted && upserted.length > 0) {
       setFieldValues(prev => {
         const existingIndex = prev.findIndex(v => v.fieldId === fieldId && v.entityId === entityId);
         if (existingIndex > -1) {
@@ -3184,8 +3296,12 @@ export default function App() {
         }
         return [...prev, { fieldId, entityId, value }];
       });
-    } else {
+    } else if (error) {
       console.error('Erro ao salvar valor do campo:', error);
+      toast.error('Erro ao salvar valor do campo.');
+    } else {
+      console.error('Upsert de valor de campo não aplicou nenhuma linha (RLS/permissão) para a tarefa', entityId);
+      toast.error('Você não tem permissão para editar este campo.');
     }
   }, []);
 
