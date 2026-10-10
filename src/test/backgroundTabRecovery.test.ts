@@ -60,7 +60,7 @@ describe('startBackgroundTabRecovery', () => {
   });
 
   it('checks the session (without reloading) when hidden long enough and the session responds fine', async () => {
-    getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({} as any);
+    getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({ data: { session: null }, error: null } as any);
     stop = startBackgroundTabRecovery();
 
     setVisibility('hidden');
@@ -70,6 +70,27 @@ describe('startBackgroundTabRecovery', () => {
 
     expect(getSessionSpy).toHaveBeenCalledTimes(1);
     expect(reloadSpy).not.toHaveBeenCalled();
+  });
+
+  // Achado de review (Codex, PR #260): getSession() não REJEITA quando a
+  // sessão está quebrada (ex.: refresh token inválido depois de muito tempo
+  // ausente) — ela RESOLVE normalmente com `error` preenchido dentro da
+  // resposta (mesmo formato que App.tsx.checkSession já trata). Tratar
+  // qualquer resolução como "saudável" sem olhar esse campo deixava esse
+  // caso passar batido: a trava nem travou, mas a sessão em si está morta.
+  it('reloads the page when getSession() RESOLVES with an error field (broken session, not a rejection)', async () => {
+    getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({
+      data: { session: null },
+      error: { message: 'Invalid Refresh Token' },
+    } as any);
+    stop = startBackgroundTabRecovery();
+
+    setVisibility('hidden');
+    await vi.advanceTimersByTimeAsync(70_000);
+    setVisibility('visible');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
   });
 
   it('reloads the page if the session check hangs (the stuck-lock case)', async () => {

@@ -67,11 +67,22 @@ export function startBackgroundTabRecovery(): () => void {
     }, RECOVERY_CHECK_TIMEOUT_MS);
 
     supabase.auth.getSession().then(
-      () => {
+      ({ error }) => {
         if (settled) return;
         settled = true;
         recovering = false;
         clearTimeout(timer);
+        // getSession() não rejeita por sessão quebrada (ex.: refresh token
+        // inválido depois de muito tempo ausente) — ela RESOLVE normalmente
+        // com `error` preenchido dentro da resposta (mesmo formato que
+        // checkSession em App.tsx já trata). Tratar qualquer resolução como
+        // "saudável" sem olhar pra esse campo deixava passar esse caso: a
+        // trava nem chegou a travar, mas a sessão em si está morta, e o
+        // usuário continuaria preso sem recuperação nenhuma.
+        if (error) {
+          console.warn('backgroundTabRecovery: getSession() voltou com erro ao retomar — recarregando a página.', error);
+          window.location.reload();
+        }
       },
       () => {
         if (settled) return;
