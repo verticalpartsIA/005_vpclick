@@ -1,5 +1,5 @@
 import { createClient, processLock } from '@supabase/supabase-js';
-import { withLockTimeout } from './lockTimeout';
+import { withLockTimeout, LockOperationTimeoutError } from './lockTimeout';
 import { trackRequestForSlowness } from './connectionStatus';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
@@ -78,6 +78,31 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 });
 
 export default supabase;
+
+// Achado real (2026-10, confirmado ao vivo no console do usuário): quando
+// withLockTimeout força a liberação da trava (ver LOCK_FN_TIMEOUT_MS acima),
+// a Promise que ele rejeita com LockOperationTimeoutError é interna ao
+// supabase-js — nasce dentro do `lock` passado pro client, bem abaixo de
+// qualquer `try/catch` que o App tenha. Ninguém no código espera por ela
+// diretamente, então a rejeição sobe como "Uncaught (in promise)" e se perde
+// — exatamente o sintoma relatado: usuário clica numa tarefa, a trava já
+// está travada, estoura em 25s, o erro aparece só no console e a tela nunca
+// recebe aviso nenhum nem tenta de novo. O teto de 25s em si funciona (evita
+// travar pra sempre) — faltava alguém pegar esse erro específico e agir.
+// Como ele só acontece quando a trava de autenticação da aba já está
+// confirmada quebrada, a única recuperação confiável é recarregar a página
+// (mesma lógica de backgroundTabRecovery.ts, só que acionada pelo sintoma
+// direto em vez de por tempo em segundo plano — cobre o caso de a trava
+// travar por um motivo diferente de "aba ausente", ex.: o próprio timer de
+// renovação automática de token disparando num mau momento).
+export function handleUnhandledLockTimeout(event: { reason: unknown; preventDefault: () => void }): void {
+    if (!(event.reason instanceof LockOperationTimeoutError)) return;
+    console.warn('supabase.ts: LockOperationTimeoutError não tratada — recarregando a página.', event.reason);
+    event.preventDefault();
+    window.location.reload();
+}
+
+window.addEventListener('unhandledrejection', handleUnhandledLockTimeout);
 
 // ── Task Dependencies ─────────────────────────────────────
 import type { TaskDependency, DependencyType, WorkspaceTag } from '../types';
