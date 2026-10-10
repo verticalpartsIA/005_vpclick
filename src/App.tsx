@@ -1713,27 +1713,18 @@ export default function App() {
   // filtro para ADMIN — ver dashboardListIds acima).
   const { dashboardTasks, dashboardLists, isDashboardLoading, loadDashboardTasks } = useDashboard(session, activeView, dashboardListIds);
 
+  // Só o id do usuário entra nas dependências de carga: o objeto `session`
+  // troca a cada renovação de token (TOKEN_REFRESHED), e reexecutar a carga
+  // inteira a cada renovação era um dos gatilhos de recarga ao voltar para a aba.
+  const sessionUserId = session?.user?.id;
+
   const loadInitialData = useCallback(async () => {
     try {
       // As 13 leituras abaixo são independentes entre si (nenhuma usa o
       // resultado de outra) — disparar todas em paralelo em vez de uma atrás
       // da outra evita somar 13 round-trips de rede em sequência ao boot do
       // app (facilmente vários segundos a mais em conexão ruim).
-      const [
-        { data: spacesData },
-        { data: foldersData },
-        { data: listsData },
-        { data: fieldsData },
-        { data: docsData },
-        { data: attachmentsData },
-        { data: projectsData },
-        { data: tagsData },
-        { data: accessData },
-        { data: teamsData },
-        { data: teamMembersData },
-        { data: groupsData },
-        { data: optionsData },
-      ] = await Promise.all([
+      const results = await Promise.all([
         supabase.from('spaces').select('*'),
         supabase.from('folders').select('*'),
         supabase.from('lists').select('*'),
@@ -1748,6 +1739,29 @@ export default function App() {
         supabase.from('task_status_groups').select('*'),
         supabase.from('task_status_options').select('*').order('order_index'),
       ]);
+
+      // Antes, cada leitura era desestruturada só em `{ data }`: uma falha virava
+      // "sem dados" silencioso (listas e pastas vazias) e o workspace ainda era
+      // marcado como carregado. Agora qualquer erro aborta a carga inteira e cai
+      // no catch, que avisa o usuário e oferece nova tentativa.
+      const failed = results.find(r => r.error);
+      if (failed?.error) throw failed.error;
+
+      const [
+        { data: spacesData },
+        { data: foldersData },
+        { data: listsData },
+        { data: fieldsData },
+        { data: docsData },
+        { data: attachmentsData },
+        { data: projectsData },
+        { data: tagsData },
+        { data: accessData },
+        { data: teamsData },
+        { data: teamMembersData },
+        { data: groupsData },
+        { data: optionsData },
+      ] = results;
 
       if (spacesData) {
         setSpaces(spacesData.map((s: any) => ({
@@ -1774,7 +1788,7 @@ export default function App() {
         // é permissiva, então o próprio carregamento do estado local precisa
         // excluir listas pessoais de outros usuários, senão qualquer lugar
         // que itere `lists` (paleta de comando, etc.) vaza pra qualquer um.
-        const myId = session?.user?.id;
+        const myId = sessionUserId;
         setLists(listsData
           .filter((l: any) => !l.owner_id || l.owner_id === myId)
           .map((l: any) => ({
@@ -1880,14 +1894,22 @@ export default function App() {
       setWorkspaceMetaLoaded(true);
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
+      // Sem `setWorkspaceMetaLoaded(true)` aqui: o app segue esperando os dados
+      // (e não mostra pastas vazias como se fossem reais) até a nova tentativa.
+      toast.error('Não foi possível carregar os dados do workspace.', {
+        action: {
+          label: 'Tentar novamente',
+          onClick: () => { loadInitialData(); },
+        },
+      });
     }
-  }, [session]);
+  }, [sessionUserId, workspace.id]);
 
   useEffect(() => {
-    if (session) {
+    if (sessionUserId) {
       loadInitialData();
     }
-  }, [session, loadInitialData]);
+  }, [sessionUserId, loadInitialData]);
 
   // Realtime: atualiza userAccess + recarrega spaces/folders quando admin alterar permissões
   useEffect(() => {
@@ -2144,7 +2166,7 @@ export default function App() {
   }, [activeListId, activeScope, lists, folders]);
 
   const loadTasks = useCallback(async () => {
-    if (!session) return;
+    if (!sessionUserId) return;
     // `currentUser` ainda é o placeholder FALLBACK_USER (id 'loading') logo
     // após o login, antes do perfil real chegar — chamar fetchMyTaskRows com
     // esse id gera 400 (uuid inválido) toda vez que "Minhas Tarefas" carrega
@@ -2217,6 +2239,12 @@ export default function App() {
     // custo das leituras amplas quando o usuário só quer aquele quadro.
     const listIds = scopedListIds;
 
+    // Escopo de pasta/espaço com `lists` ainda não carregadas dá `listIds = []`,
+    // que é indistinguível de "pasta realmente vazia" para o PostgREST (200 + []).
+    // Antes do workspace estar carregado, não gravamos nada: a pasta fica em
+    // carregamento, e a chegada de `lists` (que muda `scopedListIds`) refaz a carga.
+    if (!activeListId && listIds && listIds.length === 0 && !workspaceMetaLoaded) return;
+
     // Sub-entidades NÃO são hidratadas aqui (carregadas sob demanda ao abrir a
     // tarefa) — mantém o load barato mesmo com dezenas de milhares de tarefas.
     setIsTasksLoading(true);
@@ -2232,9 +2260,12 @@ export default function App() {
 
       if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
       loadTasksCommittedIdRef.current = requestId;
-      setTasks(prev => firstRows
-        .map(taskRepo.mapRowToTaskShell)
-        .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
+      setTasks(prev => {
+        const prevById = new Map(prev.map(t => [t.id, t]));
+        return firstRows
+          .map(taskRepo.mapRowToTaskShell)
+          .map(task => preserveLoadedTaskDetails(task, prevById.get(task.id)));
+      });
       setIsTasksLoading(false);
 
       if (firstRows.length < taskRepo.INITIAL_TASK_PAGE_SIZE) {
@@ -2253,9 +2284,12 @@ export default function App() {
         : await taskRepo.fetchRemainingTaskRowsByListIds(listIds);
 
       if (requestId !== loadTasksRequestIdRef.current) return;
-      setTasks(prev => [...firstRows, ...remainingRows]
-        .map(taskRepo.mapRowToTaskShell)
-        .map(task => preserveLoadedTaskDetails(task, prev.find(existing => existing.id === task.id))));
+      setTasks(prev => {
+        const prevById = new Map(prev.map(t => [t.id, t]));
+        return [...firstRows, ...remainingRows]
+          .map(taskRepo.mapRowToTaskShell)
+          .map(task => preserveLoadedTaskDetails(task, prevById.get(task.id)));
+      });
       loadTasksRetriedRef.current = false;
       setIsTasksFullyLoaded(true);
     } catch (err) {
@@ -2277,7 +2311,7 @@ export default function App() {
         setIsTasksLoading(false);
       }
     }
-  }, [session, activeListId, activeScope, activeView, currentUser.id, scopedListIds]);
+  }, [sessionUserId, activeListId, activeScope, activeView, currentUser.id, scopedListIds, workspaceMetaLoaded]);
 
   useEffect(() => {
     loadTasks();
