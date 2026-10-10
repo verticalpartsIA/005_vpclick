@@ -40,6 +40,7 @@ import { useTaskCountIndex } from './hooks/useTaskCountIndex';
 import { useUsers } from './hooks/useUsers';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort, type UpdateNotice } from './lib/versionCheck';
+import { startBackgroundTabRecovery } from './lib/backgroundTabRecovery';
 import { NotificationBanner } from './components/ui/notification-banner';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
@@ -1057,6 +1058,14 @@ export default function App() {
   // src/lib/versionCheck.ts sobre o bug que isso corrigiu.
   const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null);
   useEffect(() => startVersionCheck(setUpdateNotice), []);
+
+  // Achado real (2026-10): usuário se afasta da aba, volta, clica numa tarefa
+  // e nada acontece (sem erro, sem aviso) — a trava interna do supabase-js
+  // (ver lockTimeout.ts) fica presa depois de tempo em segundo plano, e só um
+  // F5 manual resolvia. Em vez de esperar o usuário descobrir isso tentando
+  // usar a tela, recupera sozinho assim que a aba volta a ficar visível (ver
+  // src/lib/backgroundTabRecovery.ts).
+  useEffect(() => startBackgroundTabRecovery(), []);
 
   // App montou com sucesso: libera um novo reload automático caso um chunk de
   // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
