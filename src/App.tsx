@@ -26,6 +26,7 @@ import { buildSlugIndex, slugify, type SlugIndex } from './lib/slug';
 import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
 import { subscribeSlowConnection } from './lib/connectionStatus';
 import { supabase } from './lib/supabase';
+import { writeRows } from './lib/dbWrite';
 import * as taskRepo from './lib/taskRepo';
 import {
   parseLocalDate, formatLocalDate, isoToBr,
@@ -39,6 +40,7 @@ import { useTaskCountIndex } from './hooks/useTaskCountIndex';
 import { useUsers } from './hooks/useUsers';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort, type UpdateNotice } from './lib/versionCheck';
+import { startBackgroundTabRecovery } from './lib/backgroundTabRecovery';
 import { NotificationBanner } from './components/ui/notification-banner';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
@@ -1056,6 +1058,14 @@ export default function App() {
   // src/lib/versionCheck.ts sobre o bug que isso corrigiu.
   const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null);
   useEffect(() => startVersionCheck(setUpdateNotice), []);
+
+  // Achado real (2026-10): usuário se afasta da aba, volta, clica numa tarefa
+  // e nada acontece (sem erro, sem aviso) — a trava interna do supabase-js
+  // (ver lockTimeout.ts) fica presa depois de tempo em segundo plano, e só um
+  // F5 manual resolvia. Em vez de esperar o usuário descobrir isso tentando
+  // usar a tela, recupera sozinho assim que a aba volta a ficar visível (ver
+  // src/lib/backgroundTabRecovery.ts).
+  useEffect(() => startBackgroundTabRecovery(), []);
 
   // App montou com sucesso: libera um novo reload automático caso um chunk de
   // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
@@ -3113,18 +3123,17 @@ export default function App() {
       }
     }
 
-    const { data: updatedRows, error } = await supabase
-      .from('tasks')
-      .update({ status: newStatus })
-      .eq('id', taskId)
-      .select('id');
+    // writeRows (src/lib/dbWrite.ts): sem `.select()`, um UPDATE barrado pelo
+    // `with check` da policy `tasks_upd` (precisa acessar a lista, ou ser
+    // responsável/criador — ver migration 30) volta `error: null` com ZERO
+    // linhas afetadas: a UI aplicava o novo status mesmo assim, e ele
+    // "voltava sozinho" no próximo refetch. Tratar array vazio como falha
+    // fecha esse buraco.
+    const statusWrite = await writeRows(
+      supabase.from('tasks').update({ status: newStatus }).eq('id', taskId),
+    );
 
-    // Sem `.select()`, um UPDATE barrado pelo `with check` da policy
-    // `tasks_upd` (precisa acessar a lista, ou ser responsável/criador —
-    // ver migration 30) volta `error: null` com ZERO linhas afetadas: a UI
-    // aplicava o novo status mesmo assim, e ele "voltava sozinho" no próximo
-    // refetch. Tratar array vazio como falha fecha esse buraco.
-    if (!error && updatedRows && updatedRows.length > 0) {
+    if (statusWrite.ok === true) {
       setTasks(prev => prev.map(t => {
         if (t.id === taskId) {
           const updatedTask = { ...t, status: newStatus };
@@ -3210,8 +3219,8 @@ export default function App() {
         return t;
       }));
       return true;
-    } else if (error) {
-      console.error('Erro ao atualizar status:', error);
+    } else if (statusWrite.reason === 'error') {
+      console.error('Erro ao atualizar status:', statusWrite.message);
       toast.error('Erro ao atualizar status. A tarefa voltou ao estado anterior.');
       return false;
     } else {
@@ -3244,14 +3253,15 @@ export default function App() {
     if (Object.keys(payload).length === 0) return true;
 
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...updates } : t));
-    const { data: updatedRows, error } = await supabase.from('tasks').update(payload).eq('id', taskId).select('id');
+    // writeRows: `error: null` + 0 linhas = UPDATE barrado pelo `with check`
+    // de `tasks_upd` (sem permissão na lista/tarefa) — mesmo caso de
+    // handleStatusChange acima.
+    const quickWrite = await writeRows(supabase.from('tasks').update(payload).eq('id', taskId));
 
-    // `error: null` + 0 linhas = UPDATE barrado pelo `with check` de `tasks_upd`
-    // (sem permissão na lista/tarefa) — mesmo caso de handleStatusChange acima.
-    if (error || !updatedRows || updatedRows.length === 0) {
+    if (quickWrite.ok === false) {
       setTasks(prev => prev.map(t => t.id === taskId ? previous : t));
-      if (error) {
-        console.error('Erro ao atualizar tarefa pelo Kanban:', error);
+      if (quickWrite.reason === 'error') {
+        console.error('Erro ao atualizar tarefa pelo Kanban:', quickWrite.message);
         toast.error('Erro ao salvar alteração. A tarefa voltou ao estado anterior.');
       } else {
         console.error('Atualização pelo Kanban não aplicou nenhuma linha (RLS/permissão) para a tarefa', taskId);
@@ -3272,21 +3282,19 @@ export default function App() {
   }, [tasks, currentUser]);
 
   const handleUpdateFieldValue = useCallback(async (fieldId: string, entityId: string, value: any) => {
-    const { data: upserted, error } = await supabase
-      .from('custom_field_values')
-      .upsert({
-        field_id: fieldId,
-        entity_id: entityId,
-        value
-      }, { onConflict: 'field_id,entity_id' })
-      .select('entity_id');
+    // writeRows: mesmo caso de handleStatusChange/handleQuickUpdateTask — a
+    // policy de UPDATE/INSERT de custom_field_values exige
+    // can_access_task(entity_id) (migration 30); sem `.select()` um upsert
+    // barrado por ela volta sucesso com zero linhas, e o valor do campo
+    // "sumia" ao reabrir a tarefa porque nunca tinha sido salvo de verdade.
+    const fieldWrite = await writeRows(
+      supabase
+        .from('custom_field_values')
+        .upsert({ field_id: fieldId, entity_id: entityId, value }, { onConflict: 'field_id,entity_id' }),
+      { selectColumns: 'entity_id' },
+    );
 
-    // Mesmo caso de handleStatusChange/handleQuickUpdateTask: a policy de
-    // UPDATE/INSERT de custom_field_values exige can_access_task(entity_id)
-    // (migration 30) — sem `.select()` um upsert barrado por ela volta
-    // sucesso com zero linhas, e o valor do campo "sumia" ao reabrir a tarefa
-    // porque nunca tinha sido salvo de verdade.
-    if (!error && upserted && upserted.length > 0) {
+    if (fieldWrite.ok === true) {
       setFieldValues(prev => {
         const existingIndex = prev.findIndex(v => v.fieldId === fieldId && v.entityId === entityId);
         if (existingIndex > -1) {
@@ -3296,8 +3304,8 @@ export default function App() {
         }
         return [...prev, { fieldId, entityId, value }];
       });
-    } else if (error) {
-      console.error('Erro ao salvar valor do campo:', error);
+    } else if (fieldWrite.reason === 'error') {
+      console.error('Erro ao salvar valor do campo:', fieldWrite.message);
       toast.error('Erro ao salvar valor do campo.');
     } else {
       console.error('Upsert de valor de campo não aplicou nenhuma linha (RLS/permissão) para a tarefa', entityId);

@@ -12,6 +12,7 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
+import { writeOk } from './dbWrite';
 import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, MindMapAccess, MindMapDef, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WhiteboardAccess, WhiteboardDef, WorkloadBucket } from '../types';
 
 const PAGE_SIZE = 1000;
@@ -1027,35 +1028,34 @@ export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | 
 // a edição otimisticamente mesmo assim, então a tela mostrava "salvo" até o
 // próximo refetch (realtime ou reabrir a tarefa) trazer de volta o valor
 // antigo do banco — reportado como "status não muda"/"campo não salva".
-// Pedir a linha de volta e tratar array vazio como falha (RLS ou id
-// inexistente) fecha esse buraco.
+// writeOk (src/lib/dbWrite.ts) fecha esse buraco pra todo write do app:
+// pede a linha de volta e trata array vazio como falha (RLS ou id
+// inexistente) em vez de sucesso silencioso.
 export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok: false; message: string }> {
-  const { data, error } = await supabase
-    .from('tasks')
-    .update({
-      title: task.title,
-      description: task.description,
-      status: task.status,
-      priority: task.priority,
-      main_assignee_id: task.mainAssigneeId || null,
-      secondary_assignee_ids: task.secondaryAssigneeIds,
-      start_date: task.startDate || null,
-      due_date: task.dueDate || null,
-      list_id: task.listId,
-      project_id: task.projectId,
-      parent_id: task.parentId ?? null,
-      extension_count: task.extensionCount,
-      is_milestone: task.isMilestone ?? false,
-      estimated_hours: task.estimatedHours ?? null,
-      actual_delivery_date: task.actualDeliveryDate || null,
-    })
-    .eq('id', task.id)
-    .select('id');
-  if (error) return { ok: false, message: error.message };
-  if (!data || data.length === 0) {
-    return { ok: false, message: 'Alteração não aplicada: você não tem permissão para editar esta tarefa (ou ela foi movida/excluída).' };
-  }
-  return { ok: true };
+  const res = await writeOk(
+    supabase
+      .from('tasks')
+      .update({
+        title: task.title,
+        description: task.description,
+        status: task.status,
+        priority: task.priority,
+        main_assignee_id: task.mainAssigneeId || null,
+        secondary_assignee_ids: task.secondaryAssigneeIds,
+        start_date: task.startDate || null,
+        due_date: task.dueDate || null,
+        list_id: task.listId,
+        project_id: task.projectId,
+        parent_id: task.parentId ?? null,
+        extension_count: task.extensionCount,
+        is_milestone: task.isMilestone ?? false,
+        estimated_hours: task.estimatedHours ?? null,
+        actual_delivery_date: task.actualDeliveryDate || null,
+      })
+      .eq('id', task.id),
+    { deniedMessage: 'Alteração não aplicada: você não tem permissão para editar esta tarefa (ou ela foi movida/excluída).' },
+  );
+  return res.ok === true ? { ok: true } : { ok: false, message: res.message };
 }
 
 // Issue #185, gota 2 — arquivar/desarquivar. Dimensão independente do
