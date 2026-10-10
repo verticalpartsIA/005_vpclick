@@ -288,12 +288,15 @@ export async function deleteWorkspaceTag(tagId: string): Promise<void> {
 }
 
 export async function updateTaskTags(taskId: string, tagNames: string[]): Promise<void> {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('tasks')
     .update({ tags: tagNames })
-    .eq('id', taskId);
+    .eq('id', taskId)
+    .select('id');
 
   if (error) throw error;
+  // 0 linhas = RLS negou / sessão perdida (PostgREST não dá erro nesse caso).
+  if (!data || data.length === 0) throw new Error('A alteração não foi gravada (sem permissão ou sessão expirada).');
 }
 
 // ── Automations ────────────────────────────────────────────

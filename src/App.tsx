@@ -179,13 +179,14 @@ interface NavigationScope {
 type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams' | 'MindMaps' | 'Map';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
-// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
+// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard etc.) vira um
 // path próprio (`/gantt`, `/kanban`...); a lista/pasta/espaço ativo e o filtro
 // "Minhas Tarefas" (Atribuídas a mim) viajam como query params por cima desse
 // path — mesmo mecanismo que o `?taskId=` já usava, só que agora cobrindo view
 // e escopo também. Views "standalone" (Inbox, Reuniões etc.) e Doc não têm
 // conceito de escopo, então viram só um path fixo (Doc leva o id da página).
-const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard'];
+const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard', 'Map', 'Workload'];
+const LIST_REQUIRED_VIEWS: ActiveView[] = ['Kanban', 'Gantt'];
 
 const VIEW_TO_SLUG: Record<ActiveView, string> = {
   Dashboard: '', // path canônico é a raiz ("/")
@@ -1782,6 +1783,10 @@ export default function App() {
   // queries que definem ACESSO (spaces/folders/lists/user_access) falhou,
   // mesmo padrão de resiliência já usado em loadTasks/fetchTaskDetails.
   const loadInitialDataRetriedRef = useRef(false);
+  // Só o id do usuário entra nas dependências de carga: o objeto `session`
+  // troca a cada renovação de token (TOKEN_REFRESHED), e reexecutar a carga
+  // inteira a cada renovação era um dos gatilhos de recarga ao voltar para a aba.
+  const sessionUserId = session?.user?.id;
   const loadInitialData = useCallback(async () => {
     try {
       const results = await Promise.allSettled([
@@ -1860,7 +1865,7 @@ export default function App() {
         // é permissiva, então o próprio carregamento do estado local precisa
         // excluir listas pessoais de outros usuários, senão qualquer lugar
         // que itere `lists` (paleta de comando, etc.) vaza pra qualquer um.
-        const myId = session?.user?.id;
+        const myId = sessionUserId;
         setLists(listsData
           .filter((l: any) => !l.owner_id || l.owner_id === myId)
           .map((l: any) => ({
@@ -1967,13 +1972,13 @@ export default function App() {
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
     }
-  }, [session]);
+  }, [sessionUserId]);
 
   useEffect(() => {
-    if (session) {
+    if (sessionUserId) {
       loadInitialData();
     }
-  }, [session, loadInitialData]);
+  }, [sessionUserId, loadInitialData]);
 
   // Realtime: atualiza userAccess + recarrega spaces/folders quando admin alterar permissões
   useEffect(() => {
@@ -2253,8 +2258,18 @@ export default function App() {
     return null;
   }, [activeListId, activeScope, lists, folders]);
 
+  // Kanban e Gantt são views por lista. Se a URL cair num espaço/pasta
+  // agregador (ex.: /suporte-t-i/ativos-eletronicos/kanban), escolha a
+  // primeira lista acessível daquele escopo em vez de deixar a tela "reiniciar"
+  // para o aviso "Selecione uma lista".
+  useEffect(() => {
+    if (activeListId || !LIST_REQUIRED_VIEWS.includes(activeView)) return;
+    const firstListId = scopedListIds?.[0];
+    if (firstListId) setActiveListId(firstListId);
+  }, [activeView, activeListId, scopedListIds]);
+
   const loadTasks = useCallback(async () => {
-    if (!session) return;
+    if (!sessionUserId) return;
     // `currentUser` ainda é o placeholder FALLBACK_USER (id 'loading') logo
     // após o login, antes do perfil real chegar — chamar fetchMyTaskRows com
     // esse id gera 400 (uuid inválido) toda vez que "Minhas Tarefas" carrega
@@ -2331,6 +2346,12 @@ export default function App() {
     // custo das leituras amplas quando o usuário só quer aquele quadro.
     const listIds = scopedListIds;
 
+    // Escopo de pasta/espaço com `lists` ainda não carregadas dá `listIds = []`,
+    // que é indistinguível de "pasta realmente vazia" para o PostgREST (200 + []).
+    // Antes do workspace estar carregado, não gravamos nada: a pasta fica em
+    // carregamento, e a chegada de `lists` (que muda `scopedListIds`) refaz a carga.
+    if (!activeListId && listIds && listIds.length === 0 && !workspaceMetaLoaded) return;
+
     // Sub-entidades NÃO são hidratadas aqui (carregadas sob demanda ao abrir a
     // tarefa) — mantém o load barato mesmo com dezenas de milhares de tarefas.
     setIsTasksLoading(true);
@@ -2396,7 +2417,7 @@ export default function App() {
         setIsTasksLoading(false);
       }
     }
-  }, [session, activeListId, activeScope, activeView, currentUser.id, scopedListIds]);
+  }, [sessionUserId, activeListId, activeScope, activeView, currentUser.id, scopedListIds, workspaceMetaLoaded]);
 
   useEffect(() => {
     loadTasks();
