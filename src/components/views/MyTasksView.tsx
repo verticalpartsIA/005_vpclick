@@ -1,8 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { toast } from 'sonner';
 import { PRIORITY_COLORS } from '../../constants';
 import { avatarThumb } from '../../lib/avatarUrl';
 import { readRecentTaskIds } from '../../lib/recentTasks';
+import { formatShortDateBR } from '../../lib/dates';
 import { Task, User } from '../../types';
 
 interface MyTasksViewProps {
@@ -114,13 +116,25 @@ export function MyTasksView({ currentUser, users, tasks, isLoading = false, onOp
     [pendingMine]
   );
 
+  // Virtualizado (mesmo padrão de TableView.tsx): quem tem muitas tarefas
+  // pendentes não deveria pagar o custo de renderizar centenas de <tr> no DOM
+  // de uma vez só, sendo que só ~8 cabem na área visível (max-h-96). Nenhuma
+  // mudança de comportamento — mesma lista, mesma ordem, mesmo scroll.
+  const assignedToMeScrollRef = useRef<HTMLDivElement>(null);
+  const assignedToMeRowVirtualizer = useVirtualizer({
+    count: assignedToMeTable.length,
+    getScrollElement: () => assignedToMeScrollRef.current,
+    estimateSize: () => 37,
+    overscan: 8,
+  });
+
   const recentTasks = recentIds.map((id) => tasks.find((t) => t.id === id)).filter((t): t is Task => !!t);
 
   const tabItems = tab === 'todo' ? null : tab === 'done' ? doneMine : delegated;
 
   return (
     <div className="max-w-5xl mx-auto">
-      <h1 className="text-2xl font-bold text-gray-800 mb-4">{greeting()}, {currentUser.name.split(' ')[0]}</h1>
+      <h2 className="text-2xl font-bold text-gray-800 mb-4">{greeting()}, {currentUser.name.split(' ')[0]}</h2>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="space-y-4">
@@ -172,7 +186,7 @@ export function MyTasksView({ currentUser, users, tasks, isLoading = false, onOp
                         task={t}
                         users={users}
                         onOpenTask={onOpenTask}
-                        rightSlot={t.dueDate ? <span className="text-[10px] text-gray-400 shrink-0">{new Date(t.dueDate + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}</span> : undefined}
+                        rightSlot={t.dueDate ? <span className="text-[10px] text-gray-400 shrink-0">{formatShortDateBR(t.dueDate)}</span> : undefined}
                       />
                     ))}
                   </div>
@@ -227,7 +241,7 @@ export function MyTasksView({ currentUser, users, tasks, isLoading = false, onOp
             ) : assignedToMeTable.length === 0 ? (
               <p className="text-xs text-gray-400 py-2">Nenhuma tarefa pendente atribuída a você. 🎉</p>
             ) : (
-              <div className="max-h-96 overflow-y-auto custom-scrollbar">
+              <div ref={assignedToMeScrollRef} className="max-h-96 overflow-y-auto custom-scrollbar">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-left text-[10px] text-gray-400 uppercase tracking-wide">
@@ -236,16 +250,25 @@ export function MyTasksView({ currentUser, users, tasks, isLoading = false, onOp
                       <th className="pb-2 font-semibold w-24 text-right">Prazo</th>
                     </tr>
                   </thead>
-                  <tbody>
-                    {assignedToMeTable.map((t) => (
-                      <tr key={t.id} onClick={() => onOpenTask(t.id)} className="cursor-pointer hover:bg-gray-50 border-t border-gray-50">
-                        <td className="py-2 truncate max-w-[200px]">{t.title}</td>
-                        <td className="py-2"><PriorityBadge priority={t.priority} /></td>
-                        <td className="py-2 text-right text-xs text-gray-400">
-                          {t.dueDate ? new Date(t.dueDate + 'T00:00:00').toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }) : '—'}
-                        </td>
-                      </tr>
-                    ))}
+                  <tbody style={{ position: 'relative', height: `${assignedToMeRowVirtualizer.getTotalSize()}px` }}>
+                    {assignedToMeRowVirtualizer.getVirtualItems().map((virtualRow) => {
+                      const t = assignedToMeTable[virtualRow.index];
+                      if (!t) return null;
+                      return (
+                        <tr
+                          key={t.id}
+                          onClick={() => onOpenTask(t.id)}
+                          className="cursor-pointer hover:bg-gray-50 border-t border-gray-50"
+                          style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }}
+                        >
+                          <td className="py-2 truncate max-w-[200px]">{t.title}</td>
+                          <td className="py-2"><PriorityBadge priority={t.priority} /></td>
+                          <td className="py-2 text-right text-xs text-gray-400">
+                            {t.dueDate ? formatShortDateBR(t.dueDate) : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

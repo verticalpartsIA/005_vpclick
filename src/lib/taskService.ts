@@ -7,6 +7,7 @@
 import { List, StatusGroup, Task, DuplicateTaskOptions, CustomFieldValue, TaskPriority } from '../types';
 import { supabase, isTaskBlocked, hasUnresolvedAssignedComments } from './supabase';
 import * as taskRepo from './taskRepo';
+import { parseLocalDate } from './dates';
 
 // Palavras que fazem um status "contar como concluído" (fechamento, aprovação,
 // finalização, cancelamento implícito etc.).
@@ -15,6 +16,32 @@ const DONE_KEYWORDS = ['conclu', 'done', 'closed', 'complete', 'finaliz', 'pront
 export function isDoneLikeStatus(status: string): boolean {
   const s = status.toLowerCase();
   return DONE_KEYWORDS.some((kw) => s.includes(kw));
+}
+
+// Mesma classificação de "atrasada" usada no card do Dashboard (SQL
+// get_dashboard_summary, bucket 'late') e em getTaskHealth (App.tsx) — nunca
+// mudar aqui sem espelhar nos outros dois lugares. Achado real (2026-09): o
+// filtro/badge "Atrasadas" da Tabela e do Kanban usavam critérios mais
+// frouxos (só excluíam status "concluído"), contando ~660 tarefas
+// canceladas/reprovadas/aguardando com prazo vencido a mais do que o card do
+// Dashboard — os números "não batiam" entre as telas.
+const TERMINAL_KEYWORDS = ['conclu', 'aprovado', 'fechado', 'cancel', 'reprova'];
+const BLOCKED_KEYWORDS = ['aguardando', 'pendente', 'enviada', 'em espera', 'bloqueada', 'em analise', 'em análise'];
+
+export function isTaskLate(task: { status?: string; dueDate?: string; startDate?: string }): boolean {
+  const status = (task.status || '').toLowerCase();
+  if (TERMINAL_KEYWORDS.some((kw) => status.includes(kw))) return false;
+  if (BLOCKED_KEYWORDS.some((kw) => status.includes(kw))) return false;
+  if (!task.dueDate) return false;
+  if (task.startDate) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const start = parseLocalDate(task.startDate);
+    if (today < start) return false;
+  }
+  const today = new Date();
+  const due = parseLocalDate(task.dueDate);
+  due.setHours(23, 59, 59, 999);
+  return today > due;
 }
 
 // Status inicial de uma tarefa nova: primeiro option do grupo de status da

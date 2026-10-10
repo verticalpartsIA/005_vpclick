@@ -13,6 +13,10 @@ import {
   differenceInDays, eachDayOfInterval, isWeekend, isToday, startOfWeek
 } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+// exibe/edita sempre em dd/mm/aaaa, ao contrário do <input type="date"> cru
+// (issue #102).
+import { DateFieldEditor } from '@/components/DateFieldEditor';
+import { parseLocalDate, formatLocalDate } from '@/lib/dates';
 
 type GanttScale = 'day' | 'week' | 'month' | 'quarter';
 type GanttGroupBy = 'none' | 'assignee' | 'status' | 'list';
@@ -63,22 +67,13 @@ interface GanttViewProps {
   // review: App.tsx monta as colunas do Kanban a partir do status group
   // configurado da lista).
   statusGroups?: StatusGroup[];
+  // Sem isso o Gantt não sabe se `tasks` é a empresa inteira ou uma lista —
+  // ver guard de activeListId logo antes do render principal.
+  activeListId?: string | null;
 }
 
-// `startDate`/`dueDate` são "YYYY-MM-DD" (sem hora); `new Date(string)`
-// interpreta isso como meia-noite UTC, que em fusos atrás de UTC cai no dia
-// anterior ao comparar com datas locais. Parseamos/formatamos manualmente
-// para não deslocar um dia (mesmo cuidado do resto do app, ver App.tsx).
-function parseLocalDate(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-function formatLocalDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
+// parseLocalDate/formatLocalDate agora vivem em lib/dates (issue #102,
+// achado 3 — eram cópias idênticas às de App.tsx e CalendarView).
 
 type DragMode = 'move' | 'resize-left' | 'resize-right';
 
@@ -105,7 +100,7 @@ interface VisualRow {
   task?: Task;
 }
 
-export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpdateTask, users = [], lists = [], currentUserId, statusGroups = [] }) => {
+export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpdateTask, users = [], lists = [], currentUserId, statusGroups = [], activeListId }) => {
   const [scale, setScale] = useState<GanttScale>('day');
   const [zoomLevel, setZoomLevel] = useState(SCALE_CONFIG.day.defaultZoom); // pixels per day
   const [viewStart, setViewStart] = useState(subDays(new Date(), 7));
@@ -147,11 +142,20 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   // mesmo formato de fetchTaskDependencies (usado no modal de detalhe), só
   // que buscadas em lote pra não fazer um round-trip por tarefa visível.
   const [dependenciesByTask, setDependenciesByTask] = useState<Record<string, TaskDependency[]>>({});
+  // taskIdsKey existe só pra dar ao useEffect abaixo um valor primitivo
+  // estável (independente da ordem) — um array novo do .map() a cada render
+  // de `tasks` dispararia o efeito toda vez, mesmo sem o conjunto de ids
+  // realmente mudar. visibleIdsRef guarda a lista de ids de verdade (sem
+  // sort/join) num ref espelhado a cada render, pra não precisar desfazer o
+  // join(',') com um split(',') dentro do efeito — escopos com milhares de
+  // tarefas geravam uma string de ~200KB só pra recriar o array em seguida.
   const taskIdsKey = useMemo(() => tasks.map(t => t.id).sort().join(','), [tasks]);
+  const visibleIdsRef = useRef<string[]>([]);
+  visibleIdsRef.current = useMemo(() => tasks.map(t => t.id), [tasks]);
   useEffect(() => {
     if (!taskIdsKey) { setDependenciesByTask({}); return; }
     let cancelled = false;
-    const visibleIds = taskIdsKey.split(',');
+    const visibleIds = visibleIdsRef.current;
 
     const reloadDependencies = () => fetchTaskDependenciesForTasks(visibleIds)
       .then(deps => {
@@ -348,6 +352,14 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     }).filter(b => !b.isOverlapping);
   }, [filteredTasks, viewStart, zoomLevel, dateOverrides]);
 
+  // Indexado uma vez (O(n)) em vez de taskBars.find() a cada linha renderizada
+  // e a cada dependência desenhada — o mesmo O(n²) já corrigido no Kanban.
+  const taskBarsById = useMemo(() => {
+    const map = new Map<string, (typeof taskBars)[number]>();
+    for (const b of taskBars) map.set(b.id, b);
+    return map;
+  }, [taskBars]);
+
   // Bloqueio (Codex_Gantt_04): só depende da dependência DIRETA da própria
   // tarefa, então é confiável mesmo sem enxergar o grafo inteiro — ao
   // contrário do caminho crítico abaixo, que precisa de todo o subgrafo
@@ -497,7 +509,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
       (dependenciesByTask[taskId] || []).forEach(dep => {
         if (dep.type !== 'blocked_by') return;
         const predMoved = movedById.get(dep.depends_on_id);
-        const predEnd = predMoved ? predMoved.newEnd : taskBars.find(b => b.id === dep.depends_on_id)?.end;
+        const predEnd = predMoved ? predMoved.newEnd : taskBarsById.get(dep.depends_on_id)?.end;
         if (predEnd && newStart < predEnd) {
           conflicts.push(`"${titleOf(taskId)}" começaria antes do fim de "${titleOf(dep.depends_on_id)}"`);
         }
@@ -510,7 +522,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
         if (dep.type !== 'blocked_by') return;
         const predMoved = movedById.get(dep.depends_on_id);
         if (!predMoved) return;
-        const successorStart = taskBars.find(b => b.id === successorId)?.start;
+        const successorStart = taskBarsById.get(successorId)?.start;
         if (successorStart && successorStart < predMoved.newEnd) {
           conflicts.push(`"${titleOf(dep.depends_on_id)}" passaria a terminar depois do início de "${titleOf(successorId)}"`);
         }
@@ -518,7 +530,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     });
 
     return conflicts;
-  }, [dependenciesByTask, taskBars, tasks]);
+  }, [dependenciesByTask, taskBarsById, tasks]);
 
   // Movimentação em lote (Codex_Gantt_10): tenta a operação batch/atômica no
   // banco primeiro (uma única instrução SQL, RLS decide linha a linha) e só
@@ -615,7 +627,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   // os mesmos cálculos (clamps inclusive) de handleWindowMouseMove abaixo,
   // só que devolvidos em vez de escritos direto num elemento específico.
   const getLiveBarRect = useCallback((taskId: string): { left: number; width: number } | null => {
-    const base = taskBars.find(b => b.id === taskId);
+    const base = taskBarsById.get(taskId);
     if (!base) return null;
     let { left, width } = base;
     const drag = dragStateRef.current;
@@ -635,7 +647,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
       }
     }
     return { left, width };
-  }, [taskBars, zoomLevel]);
+  }, [taskBarsById, zoomLevel]);
 
   const updateDependencyPath = useCallback((edge: { key: string; sourceId: string; targetId: string }) => {
     const pathEl = pathRefs.current[edge.key];
@@ -839,7 +851,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     if (!currentUserId) return;
     e.preventDefault();
     e.stopPropagation();
-    const bar = taskBars.find(b => b.id === task.id);
+    const bar = taskBarsById.get(task.id);
     const svg = svgContainerRef.current;
     if (!bar || !svg) return;
     const rect = svg.getBoundingClientRect();
@@ -856,7 +868,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     if (!onUpdateTask) return; // sem permissão/serviço de update, barra fica só clicável
     e.preventDefault();
     e.stopPropagation();
-    const bar = taskBars.find(b => b.id === task.id);
+    const bar = taskBarsById.get(task.id);
     if (!bar) return;
 
     // Movimentação em lote (Codex_Gantt_10): se a tarefa arrastada faz parte
@@ -867,7 +879,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
     if (mode === 'move' && selectedTaskIds.has(task.id) && selectedTaskIds.size > 1) {
       groupOriginals = {};
       selectedTaskIds.forEach(id => {
-        const b = taskBars.find(x => x.id === id);
+        const b = taskBarsById.get(id);
         if (b) groupOriginals![id] = { start: b.start, end: b.end };
       });
     }
@@ -987,6 +999,21 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
   const timelineWidth = scale === 'day'
     ? timelineDays.length * zoomLevel
     : (headerGroups || []).reduce((sum, g) => sum + g.width, 0);
+
+  // Sem lista selecionada, `tasks` chega aqui com a empresa inteira (~9 mil
+  // tarefas) — o mesmo achado real do Kanban (2026-09): sem virtualização de
+  // linhas, o Gantt tentaria montar uma barra de timeline por tarefa de uma
+  // vez, travando a tela. Mesma solução: exigir uma lista.
+  if (!activeListId) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 px-4 text-center">
+        <p className="text-sm font-semibold text-gray-600">Selecione uma lista para ver o Gantt</p>
+        <p className="max-w-sm text-xs text-gray-400">
+          O Gantt desenha uma linha do tempo por tarefa de uma lista por vez. Escolha uma lista na barra lateral — a visão geral (sem lista selecionada) tentaria desenhar as tarefas da empresa inteira de uma vez, o que trava a tela sem ser útil.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full bg-background overflow-hidden">
@@ -1244,8 +1271,8 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                 const targetIdx = taskRowIndex.get(edge.targetId);
                 if (sourceIdx === undefined || targetIdx === undefined) return null;
 
-                const sourceBar = taskBars.find(b => b.id === edge.sourceId);
-                const targetBar = taskBars.find(b => b.id === edge.targetId);
+                const sourceBar = taskBarsById.get(edge.sourceId);
+                const targetBar = taskBarsById.get(edge.targetId);
                 if (!sourceBar || !targetBar) return null;
 
                 const x1 = sourceBar.left + sourceBar.width;
@@ -1283,7 +1310,7 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                   return <div key={row.key} className="h-10 border-b bg-muted/40" />;
                 }
                 const task = row.task!;
-                const bar = taskBars.find(b => b.id === task.id);
+                const bar = taskBarsById.get(task.id);
                 return (
                   <div key={row.key} className="h-10 border-b flex items-center relative group">
                     {bar && (
@@ -1444,20 +1471,18 @@ export const GanttView: React.FC<GanttViewProps> = ({ tasks, onTaskClick, onUpda
                                    </label>
                                    <div className="grid grid-cols-2 gap-2">
                                      {!quickDraft.isMilestone && (
-                                       <input
-                                         type="date"
+                                       <DateFieldEditor
                                          value={quickDraft.startDate}
-                                         onChange={(e) => setQuickDraft({ ...quickDraft, startDate: e.target.value })}
+                                         onCommit={(v) => setQuickDraft({ ...quickDraft, startDate: v })}
                                          className="h-8 text-xs border rounded-md px-2"
-                                         title="Início"
+                                         ariaLabel="Início"
                                        />
                                      )}
-                                     <input
-                                       type="date"
+                                     <DateFieldEditor
                                        value={quickDraft.dueDate}
-                                       onChange={(e) => setQuickDraft({ ...quickDraft, dueDate: e.target.value })}
+                                       onCommit={(v) => setQuickDraft({ ...quickDraft, dueDate: v })}
                                        className={`h-8 text-xs border rounded-md px-2 ${quickDraft.isMilestone ? 'col-span-2' : ''}`}
-                                       title={quickDraft.isMilestone ? 'Data do marco' : 'Fim'}
+                                       ariaLabel={quickDraft.isMilestone ? 'Data do marco' : 'Fim'}
                                      />
                                    </div>
                                    {!quickDraft.isMilestone && quickDraft.startDate && quickDraft.dueDate && quickDraft.startDate > quickDraft.dueDate && (

@@ -12,35 +12,8 @@
 // sub-entidades), duplicação, dashboard e ações em massa. A orquestração e as
 // regras de negócio continuam no App (viram um TaskService na Fase 2).
 import { supabase } from './supabase';
+import { writeOk } from './dbWrite';
 import { CustomFieldValue, FormDef, FormMapsTo, FormQuestion, FormQuestionType, FormSubmission, Goal, GoalTarget, GoalTargetType, MindMapAccess, MindMapDef, Portfolio, Task, TaskPriority, TaskRecurrenceRule, TimeEntry, TimeTrackingBucket, UserCapacity, UserTimeOff, WhiteboardAccess, WhiteboardDef, WorkloadBucket } from '../types';
-
-// Escritas em `tasks` NÃO podem ser "mudas": quando a RLS nega o UPDATE (ou a
-// request sai sem sessão de usuário, caindo no role anon), o PostgREST responde
-// 2xx com 0 linhas afetadas e NENHUM erro. O app tratava isso como sucesso,
-// mostrava a mudança na tela e, ao sair/F5, o valor antigo voltava ("preenchi e
-// sumiu", "não consigo mudar o status" — relato Beatriz/Bianca, 2026-10-08).
-// `.select('id')` devolve as linhas realmente alteradas; confirmamos aqui.
-const WRITE_NOT_APPLIED_MESSAGE =
-  'A alteração não foi gravada (sem permissão ou sessão expirada). Atualize a página e entre de novo se persistir.';
-
-function checkWriteApplied(
-  res: { data: { id: string }[] | null; error: { message: string } | null },
-  expected: number,
-): string | null {
-  if (res.error) return res.error.message;
-  if ((res.data?.length ?? 0) < expected) return WRITE_NOT_APPLIED_MESSAGE;
-  return null;
-}
-
-// Resposta vazia pode ser "de verdade" ou o role anon (sessão perdida/lock
-// travado) — o PostgREST devolve 200 + [] nos dois casos. Antes de aceitar uma
-// lista vazia como verdade, confirma no servidor que a sessão ainda vale.
-export async function assertSessionStillValid(): Promise<void> {
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data?.user) {
-    throw new Error('Sessão inválida ou expirada ao carregar dados.');
-  }
-}
 
 const PAGE_SIZE = 1000;
 export const INITIAL_TASK_PAGE_SIZE = 100;
@@ -79,6 +52,7 @@ const TASK_ROW_SELECT = [
   'deletion_reason_text',
   'estimated_hours',
   'actual_delivery_date',
+  'sort_index',
 ].join(',');
 
 // ── Formato cru das linhas do banco (snake_case) ────────────────────────────
@@ -113,6 +87,7 @@ export interface TaskRow {
   deletion_reason_text: string | null;
   estimated_hours: number | string | null;
   actual_delivery_date: string | null;
+  sort_index: number | null;
 }
 interface AttachmentRow { id: string; task_id: string; name: string; url: string; type: string; size: number; uploaded_at: string; }
 interface CommentRow {
@@ -203,6 +178,7 @@ const mapTaskCore = (d: TaskRow) => ({
   deletionReasonText: d.deletion_reason_text || undefined,
   estimatedHours: d.estimated_hours != null ? Number(d.estimated_hours) : undefined,
   actualDeliveryDate: d.actual_delivery_date || undefined,
+  sortIndex: d.sort_index ?? undefined,
 });
 
 // Task "shell": campos preenchidos, sub-entidades vazias. Usado nas listagens,
@@ -584,12 +560,17 @@ export async function upsertUserCapacity(userId: string, weeklyHours: number): P
   return { ok: true };
 }
 
+// RPC (não select direto na tabela) porque `reason` é texto livre e pode
+// conter motivo médico/pessoal — get_visible_time_off() mascara pra null
+// quem não é o próprio dono nem gestor, a RLS de user_time_off só deixa
+// ver a linha inteira nesses dois casos (ver migration
+// 20260921010000_mask_time_off_reason.sql).
 export async function fetchUserTimeOff(userIds?: string[]): Promise<UserTimeOff[]> {
-  let q = supabase.from('user_time_off').select('id, user_id, start_date, end_date, reason').order('start_date', { ascending: false });
-  if (userIds && userIds.length > 0) q = q.in('user_id', userIds);
-  const { data, error } = await q;
+  const { data, error } = await supabase.rpc('get_visible_time_off', { p_user_ids: userIds && userIds.length > 0 ? userIds : null });
   if (error) { console.error('taskRepo.fetchUserTimeOff:', error); throw error; }
-  return (data ?? []).map((r: any) => ({ id: r.id, userId: r.user_id, startDate: r.start_date, endDate: r.end_date, reason: r.reason || undefined }));
+  return (data ?? [])
+    .map((r: any) => ({ id: r.id, userId: r.user_id, startDate: r.start_date, endDate: r.end_date, reason: r.reason || undefined }))
+    .sort((a: UserTimeOff, b: UserTimeOff) => b.startDate.localeCompare(a.startDate));
 }
 
 export async function addUserTimeOff(userId: string, startDate: string, endDate: string, reason: string | null, createdBy: string): Promise<{ ok: true } | { ok: false; message: string }> {
@@ -605,9 +586,8 @@ export async function deleteUserTimeOff(id: string): Promise<{ ok: true } | { ok
 }
 
 export async function updateTaskEstimatedHours(taskId: string, hours: number | null): Promise<{ ok: true } | { ok: false; message: string }> {
-  const res = await supabase.from('tasks').update({ estimated_hours: hours }).eq('id', taskId).select('id');
-  const failure = checkWriteApplied(res, 1);
-  if (failure) return { ok: false, message: failure };
+  const { error } = await supabase.from('tasks').update({ estimated_hours: hours }).eq('id', taskId);
+  if (error) return { ok: false, message: error.message };
   return { ok: true };
 }
 
@@ -905,6 +885,16 @@ export interface TaskDetailsResult {
   // de novo. `data` já vem com as partes que deram certo preenchidas (falha
   // parcial não zera o que funcionou).
   hasError: boolean;
+  // Quais campos de `data`, especificamente, vieram de uma sub-busca que
+  // falhou (ficaram como `[]`, não porque a tarefa realmente não tem nada).
+  // Achado real (2026-10): o chamador fazia `{...task, ...result.data}` sem
+  // olhar pra isso — uma falha passageira só nos comentários (a causa mais
+  // comum: renovação de token travando a fila do Supabase, ver
+  // connectionStatus.ts) sobrescrevia os comentários JÁ CARREGADOS (inclusive
+  // um que o usuário tinha acabado de postar, já salvo no banco) com `[]`.
+  // Agora o chamador usa isso pra manter o valor anterior nos campos que
+  // falharam, em vez de confiar que `[]` significa "está vazio mesmo".
+  failedFields: Array<keyof Pick<Task, 'attachments' | 'comments' | 'extensionHistory' | 'checklists' | 'activities' | 'watcherIds'>>;
 }
 
 // Sub-entidades de UMA tarefa (lazy-load ao abrir o detalhe).
@@ -917,25 +907,24 @@ export async function fetchTaskDetails(taskId: string): Promise<TaskDetailsResul
     fetchTaskSubEntity<ActivityRow>(() => supabase.from('task_activities').select('*').eq('task_id', taskId), 'atividade'),
     fetchTaskSubEntity<WatcherRow>(() => supabase.from('task_watchers').select('task_id, user_id').eq('task_id', taskId), 'observadores'),
   ]);
-  // Resposta 100% vazia de uma tarefa que o usuário acabou de abrir é suspeita
-  // (role anon devolve 200 + [] sem erro) — confirma a sessão antes de aceitar.
-  const allEmpty = [att, comm, log, check, act, watch].every((r) => !r.failed && r.data.length === 0);
-  let sessionLost = false;
-  if (allEmpty) {
-    try { await assertSessionStillValid(); } catch { sessionLost = true; }
-  }
-  // Só devolve as partes que carregaram de verdade: uma sub-busca que falhou NÃO
-  // pode sobrescrever (com []) o que já estava carregado na tela.
-  const data: Partial<Task> = {};
-  if (!att.failed && !sessionLost) data.attachments = att.data.map(mapAttachment);
-  if (!comm.failed && !sessionLost) data.comments = comm.data.map(mapComment);
-  if (!log.failed && !sessionLost) data.extensionHistory = log.data.map(mapLog);
-  if (!check.failed && !sessionLost) data.checklists = check.data.map(mapChecklist);
-  if (!act.failed && !sessionLost) data.activities = act.data.map(mapActivity);
-  if (!watch.failed && !sessionLost) data.watcherIds = watch.data.map((w) => w.user_id);
+  const failedFields: TaskDetailsResult['failedFields'] = [];
+  if (att.failed) failedFields.push('attachments');
+  if (comm.failed) failedFields.push('comments');
+  if (log.failed) failedFields.push('extensionHistory');
+  if (check.failed) failedFields.push('checklists');
+  if (act.failed) failedFields.push('activities');
+  if (watch.failed) failedFields.push('watcherIds');
   return {
-    data,
-    hasError: sessionLost || att.failed || comm.failed || log.failed || check.failed || act.failed || watch.failed,
+    data: {
+      attachments: att.data.map(mapAttachment),
+      comments: comm.data.map(mapComment),
+      extensionHistory: log.data.map(mapLog),
+      checklists: check.data.map(mapChecklist),
+      activities: act.data.map(mapActivity),
+      watcherIds: watch.data.map((w) => w.user_id),
+    } as Partial<Task>,
+    hasError: failedFields.length > 0,
+    failedFields,
   };
 }
 
@@ -1032,31 +1021,41 @@ export async function insertTask(input: NewTaskInput): Promise<{ task: Task } | 
 // TableView/KanbanView) — sem o `|| null` aqui, uma tentativa de limpar um
 // desses campos mandaria `''` pro Postgres, que rejeita `''` como uuid/date
 // (erro silencioso do lado do cliente, valor antigo nunca muda no banco).
+// Achado real (2026-10): sem `.select()`, um UPDATE bloqueado pelo `with
+// check` da policy `tasks_upd` (ver migration 30 — exige acesso à lista
+// destino, ou ser responsável/criador) retorna sucesso (`error: null`) com
+// ZERO linhas afetadas — Postgres/PostgREST não avisam. O chamador aplicava
+// a edição otimisticamente mesmo assim, então a tela mostrava "salvo" até o
+// próximo refetch (realtime ou reabrir a tarefa) trazer de volta o valor
+// antigo do banco — reportado como "status não muda"/"campo não salva".
+// writeOk (src/lib/dbWrite.ts) fecha esse buraco pra todo write do app:
+// pede a linha de volta e trata array vazio como falha (RLS ou id
+// inexistente) em vez de sucesso silencioso.
 export async function updateTaskFields(task: Task): Promise<{ ok: true } | { ok: false; message: string }> {
-  const res = await supabase
-    .from('tasks')
-    .update({
-      title: task.title,
-      description: task.description,
-      status: task.status,
-      priority: task.priority,
-      main_assignee_id: task.mainAssigneeId || null,
-      secondary_assignee_ids: task.secondaryAssigneeIds,
-      start_date: task.startDate || null,
-      due_date: task.dueDate || null,
-      list_id: task.listId,
-      project_id: task.projectId,
-      parent_id: task.parentId ?? null,
-      extension_count: task.extensionCount,
-      is_milestone: task.isMilestone ?? false,
-      estimated_hours: task.estimatedHours ?? null,
-      actual_delivery_date: task.actualDeliveryDate || null,
-    })
-    .eq('id', task.id)
-    .select('id');
-  const failure = checkWriteApplied(res, 1);
-  if (failure) return { ok: false, message: failure };
-  return { ok: true };
+  const res = await writeOk(
+    supabase
+      .from('tasks')
+      .update({
+        title: task.title,
+        description: task.description,
+        status: task.status,
+        priority: task.priority,
+        main_assignee_id: task.mainAssigneeId || null,
+        secondary_assignee_ids: task.secondaryAssigneeIds,
+        start_date: task.startDate || null,
+        due_date: task.dueDate || null,
+        list_id: task.listId,
+        project_id: task.projectId,
+        parent_id: task.parentId ?? null,
+        extension_count: task.extensionCount,
+        is_milestone: task.isMilestone ?? false,
+        estimated_hours: task.estimatedHours ?? null,
+        actual_delivery_date: task.actualDeliveryDate || null,
+      })
+      .eq('id', task.id),
+    { deniedMessage: 'Alteração não aplicada: você não tem permissão para editar esta tarefa (ou ela foi movida/excluída).' },
+  );
+  return res.ok === true ? { ok: true } : { ok: false, message: res.message };
 }
 
 // Issue #185, gota 2 — arquivar/desarquivar. Dimensão independente do
@@ -1549,8 +1548,11 @@ export interface RecurrenceRuleInput {
 }
 
 // Cria ou substitui a regra de recorrência da tarefa (uma tarefa tem no
-// máximo uma regra — upsert por task_id). Reseta occurrences_created/
-// last_generated_at ao recriar porque muda os parâmetros do zero.
+// máximo uma regra — upsert por task_id). occurrences_created/
+// last_generated_at nunca são tocados aqui de propósito: preservam o
+// progresso da regra através de uma edição. input.nextRunAt já vem correto
+// pra cada caso (recalculado só se o startAt mudou de verdade) — ver
+// buildRecurrenceRuleInput em App.tsx.
 export async function upsertRecurrenceRule(
   input: RecurrenceRuleInput,
   existingRuleId: string | null,
@@ -1684,18 +1686,18 @@ export async function fetchDashboardData(listIds: string[] | null): Promise<{ ta
 
 // ── Ações em massa ──────────────────────────────────────────────────────────
 export async function bulkUpdateStatus(ids: string[], status: string): Promise<{ error: string | null }> {
-  const res = await supabase.from('tasks').update({ status }).in('id', ids).select('id');
-  return { error: checkWriteApplied(res, ids.length) };
+  const { error } = await supabase.from('tasks').update({ status }).in('id', ids);
+  return { error: error ? error.message : null };
 }
 
 export async function bulkUpdatePriority(ids: string[], priority: TaskPriority): Promise<{ error: string | null }> {
-  const res = await supabase.from('tasks').update({ priority }).in('id', ids).select('id');
-  return { error: checkWriteApplied(res, ids.length) };
+  const { error } = await supabase.from('tasks').update({ priority }).in('id', ids);
+  return { error: error ? error.message : null };
 }
 
 export async function bulkMove(ids: string[], listId: string): Promise<{ error: string | null }> {
-  const res = await supabase.from('tasks').update({ list_id: listId }).in('id', ids).select('id');
-  return { error: checkWriteApplied(res, ids.length) };
+  const { error } = await supabase.from('tasks').update({ list_id: listId }).in('id', ids);
+  return { error: error ? error.message : null };
 }
 
 export async function bulkDelete(ids: string[]): Promise<{ error: string | null }> {

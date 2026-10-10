@@ -26,13 +26,22 @@ import { buildSlugIndex, slugify, type SlugIndex } from './lib/slug';
 import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
 import { subscribeSlowConnection } from './lib/connectionStatus';
 import { supabase } from './lib/supabase';
+import { writeRows } from './lib/dbWrite';
 import * as taskRepo from './lib/taskRepo';
-import { isDoneLikeStatus, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
+import {
+  parseLocalDate, formatLocalDate, isoToBr,
+  formatDateBR, formatDateTimeLongCleanBR, formatDayMonthNumericBR,
+} from './lib/dates';
+import { ErrorSummary } from './components/ui/error-summary';
+import { DateFieldEditor } from './components/DateFieldEditor';
+import { isDoneLikeStatus, isTaskLate, resolveDefaultStatus, getTaskCloseBlockReason, duplicateTask } from './lib/taskService';
 import { useDashboard } from './hooks/useDashboard';
 import { useTaskCountIndex } from './hooks/useTaskCountIndex';
 import { useUsers } from './hooks/useUsers';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
-import { startVersionCheck, formatBuildTimeShort } from './lib/versionCheck';
+import { startVersionCheck, formatBuildTimeShort, type UpdateNotice } from './lib/versionCheck';
+import { startBackgroundTabRecovery } from './lib/backgroundTabRecovery';
+import { NotificationBanner } from './components/ui/notification-banner';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
 import { avatarThumb } from './lib/avatarUrl';
@@ -976,6 +985,40 @@ const FALLBACK_USER: User = {
 // continua visível/gerenciável no Painel Admin.
 const AI_AGENT_EMAIL = 'agente.ia@vpsistema.com';
 
+// Colunas que a RPC `search_tasks` (bug #9 do #81) de fato devolve — bem menos
+// que TASK_ROW_SELECT em taskRepo.ts (faltam is_milestone, recurrence_*,
+// archived_*, deleted_*, purge_after, deletion_reason_*, estimated_hours,
+// actual_delivery_date, sort_index). Achado real (2026-10): `hydrateTaskRows`
+// usa o mesmo `mapTaskCore` de qualquer outra listagem, então essas colunas
+// ausentes viravam `false`/`undefined` no objeto hidratado — e o merge da
+// busca (`merged.set(t.id, t)`) SUBSTITUÍA o objeto inteiro já carregado,
+// "desarquivando" uma tarefa arquivada, tirando a marca de marco, zerando
+// horas estimadas etc. na tela, só porque ela deu match na busca. Agora o
+// merge só aceita os campos que a RPC realmente preenche; o resto vem do
+// que já estava carregado (quando existir).
+const SEARCH_RPC_TASK_FIELDS = [
+  'id', 'title', 'description', 'status', 'priority', 'mainAssigneeId',
+  'secondaryAssigneeIds', 'startDate', 'dueDate', 'extensionCount',
+  'listId', 'projectId', 'parentId', 'createdAt', 'createdBy', 'tags',
+] as const satisfies readonly (keyof Task)[];
+
+function mergeSearchHydratedTask(hydrated: Task, previousTask?: Task): Task {
+  if (!previousTask) return hydrated;
+  const merged: Task = { ...previousTask };
+  for (const field of SEARCH_RPC_TASK_FIELDS) {
+    (merged as any)[field] = hydrated[field];
+  }
+  // Sub-entidades vêm de fetchSubEntityInChunks (tabelas de verdade, não da
+  // RPC) — essas sim são confiáveis e devem substituir o que já havia.
+  merged.extensionHistory = hydrated.extensionHistory;
+  merged.checklists = hydrated.checklists;
+  merged.comments = hydrated.comments;
+  merged.attachments = hydrated.attachments;
+  merged.activities = hydrated.activities;
+  merged.watcherIds = hydrated.watcherIds;
+  return merged;
+}
+
 function preserveLoadedTaskDetails(nextTask: Task, previousTask?: Task): Task {
   if (!previousTask) return nextTask;
   return {
@@ -1010,8 +1053,19 @@ export default function App() {
 
   // Avisa quando uma nova versão foi publicada (deploy é um build estático,
   // sem invalidação — uma aba deixada aberta pode ficar rodando código
-  // antigo por muito tempo). Ver src/lib/versionCheck.ts.
-  useEffect(() => startVersionCheck(), []);
+  // antigo por muito tempo). Exibido como NotificationBanner (persistente,
+  // no fluxo do layout) em vez de toast — ver comentário em
+  // src/lib/versionCheck.ts sobre o bug que isso corrigiu.
+  const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null);
+  useEffect(() => startVersionCheck(setUpdateNotice), []);
+
+  // Achado real (2026-10): usuário se afasta da aba, volta, clica numa tarefa
+  // e nada acontece (sem erro, sem aviso) — a trava interna do supabase-js
+  // (ver lockTimeout.ts) fica presa depois de tempo em segundo plano, e só um
+  // F5 manual resolvia. Em vez de esperar o usuário descobrir isso tentando
+  // usar a tela, recupera sozinho assim que a aba volta a ficar visível (ver
+  // src/lib/backgroundTabRecovery.ts).
+  useEffect(() => startBackgroundTabRecovery(), []);
 
   // App montou com sucesso: libera um novo reload automático caso um chunk de
   // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
@@ -1713,18 +1767,28 @@ export default function App() {
   // filtro para ADMIN — ver dashboardListIds acima).
   const { dashboardTasks, dashboardLists, isDashboardLoading, loadDashboardTasks } = useDashboard(session, activeView, dashboardListIds);
 
+  // Achado real (2026-10): as 13 leituras abaixo iam num `Promise.all` nu —
+  // UMA falha passageira (a mesma causa recorrente de renovação de token que
+  // trava a fila do Supabase nesta base, ver connectionStatus.ts) rejeitava
+  // o lote INTEIRO, e nada era setado: `userAccess` ficava `{}`. Pra
+  // COLABORADOR/GESTOR, `allowedFolderIdSet` trata `userAccess[uid]`
+  // ausente como "zero pastas permitidas" (ver allowedFolderIdSet/scopeTasks
+  // abaixo) — o usuário via TODAS as tarefas da pasta sumirem, ou só as que
+  // ele é assignee direto, dependendo de quais outras dessas 13 queries
+  // também tinham falhado na mesma leva. Um F5 "às vezes" recarregava tudo
+  // (lote teve sorte), "às vezes" só parte — exatamente o relato de
+  // instabilidade. `Promise.allSettled` isola cada falha (as outras 12
+  // continuam valendo) + 1 retry automático do lote inteiro se alguma das
+  // queries que definem ACESSO (spaces/folders/lists/user_access) falhou,
+  // mesmo padrão de resiliência já usado em loadTasks/fetchTaskDetails.
+  const loadInitialDataRetriedRef = useRef(false);
   // Só o id do usuário entra nas dependências de carga: o objeto `session`
   // troca a cada renovação de token (TOKEN_REFRESHED), e reexecutar a carga
   // inteira a cada renovação era um dos gatilhos de recarga ao voltar para a aba.
   const sessionUserId = session?.user?.id;
-
   const loadInitialData = useCallback(async () => {
     try {
-      // As 13 leituras abaixo são independentes entre si (nenhuma usa o
-      // resultado de outra) — disparar todas em paralelo em vez de uma atrás
-      // da outra evita somar 13 round-trips de rede em sequência ao boot do
-      // app (facilmente vários segundos a mais em conexão ruim).
-      const results = await Promise.all([
+      const results = await Promise.allSettled([
         supabase.from('spaces').select('*'),
         supabase.from('folders').select('*'),
         supabase.from('lists').select('*'),
@@ -1740,28 +1804,40 @@ export default function App() {
         supabase.from('task_status_options').select('*').order('order_index'),
       ]);
 
-      // Antes, cada leitura era desestruturada só em `{ data }`: uma falha virava
-      // "sem dados" silencioso (listas e pastas vazias) e o workspace ainda era
-      // marcado como carregado. Agora qualquer erro aborta a carga inteira e cai
-      // no catch, que avisa o usuário e oferece nova tentativa.
-      const failed = results.find(r => r.error);
-      if (failed?.error) throw failed.error;
-
+      const labels = [
+        'spaces', 'folders', 'lists', 'custom_fields', 'docs', 'doc_attachments',
+        'projects', 'workspace_tags', 'user_access', 'teams', 'team_members',
+        'task_status_groups', 'task_status_options',
+      ];
+      const dataOf = (r: PromiseSettledResult<{ data: any }>, label: string): any => {
+        if (r.status === 'fulfilled') return r.value.data;
+        console.error(`Erro ao carregar dados iniciais (${label}):`, r.reason);
+        return null;
+      };
       const [
-        { data: spacesData },
-        { data: foldersData },
-        { data: listsData },
-        { data: fieldsData },
-        { data: docsData },
-        { data: attachmentsData },
-        { data: projectsData },
-        { data: tagsData },
-        { data: accessData },
-        { data: teamsData },
-        { data: teamMembersData },
-        { data: groupsData },
-        { data: optionsData },
-      ] = results;
+        spacesData, foldersData, listsData, fieldsData, docsData,
+        attachmentsData, projectsData, tagsData, accessData, teamsData,
+        teamMembersData, groupsData, optionsData,
+      ] = results.map((r, i) => dataOf(r, labels[i]));
+
+      // Essas 4 definem o que o usuário PODE ver (ver allowedFolderIdSet) —
+      // uma falha nelas não pode passar batido como "0 pastas permitidas".
+      const criticalFailed = [results[0], results[1], results[2], results[8]].some(r => r.status === 'rejected');
+      if (criticalFailed && !loadInitialDataRetriedRef.current) {
+        loadInitialDataRetriedRef.current = true;
+        setTimeout(() => { loadInitialData(); }, 1500);
+        return;
+      }
+      if (criticalFailed) {
+        toast.error('Não foi possível carregar espaços/pastas/permissões. Tarefas podem aparecer faltando.', {
+          action: {
+            label: 'Tentar novamente',
+            onClick: () => { loadInitialDataRetriedRef.current = false; loadInitialData(); },
+          },
+        });
+      } else {
+        loadInitialDataRetriedRef.current = false;
+      }
 
       if (spacesData) {
         setSpaces(spacesData.map((s: any) => ({
@@ -1894,16 +1970,8 @@ export default function App() {
       setWorkspaceMetaLoaded(true);
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
-      // Sem `setWorkspaceMetaLoaded(true)` aqui: o app segue esperando os dados
-      // (e não mostra pastas vazias como se fossem reais) até a nova tentativa.
-      toast.error('Não foi possível carregar os dados do workspace.', {
-        action: {
-          label: 'Tentar novamente',
-          onClick: () => { loadInitialData(); },
-        },
-      });
     }
-  }, [sessionUserId, workspace.id]);
+  }, [sessionUserId]);
 
   useEffect(() => {
     if (sessionUserId) {
@@ -2088,14 +2156,27 @@ export default function App() {
   // reload) enquanto uma chamada de loadTasks() ainda está em andamento, uma
   // resposta antiga que chegue depois de uma mais nova sobrescreveria `tasks`
   // com os dados do escopo errado — a lista parece ter tarefas e "fecha"
-  // sozinha (some) pouco depois, até um F5 disparar uma única chamada limpa.
-  // Cada chamada carimba um id crescente; só grava quem tiver um id mais novo
-  // que o da última chamada que efetivamente gravou (loadTasksCommittedIdRef)
-  // — não simplesmente "quem for a mais recente em voo", pra uma chamada mais
-  // nova que falhe (erro de rede) não invalidar/descartar o resultado bom de
-  // uma mais antiga que ainda está terminando.
+  // sozinha (some) pouco depois, até um F5 disparar uma única chamada limpa
+  // (achado real, 2026-09: era exatamente o "o link muda mas a tela não"
+  // relatado pelo usuário — navegar rápido entre duas listas podia deixar a
+  // tela travada em "Carregando..." ou mostrar os dados da lista ERRADA).
+  //
+  // A versão anterior comparava só pelo id da última chamada que efetivamente
+  // GRAVOU dado (loadTasksCommittedIdRef), não pela mais recente EM VOO — de
+  // propósito, pra uma chamada nova que falhasse (erro de rede) não descartar
+  // o resultado bom de uma mais antiga ainda terminando. Mas isso também
+  // deixava passar o problema oposto: se a chamada antiga (escopo já trocado)
+  // terminasse ANTES da nova ainda estar em voo, nada a impedia de gravar —
+  // exatamente o cenário do achado acima.
+  //
+  // A chave certa não é "qual chamada é mais nova", e sim "essa resposta
+  // ainda é do escopo que está na tela agora" — só grava se o escopo (lista/
+  // scope/view) da resposta bater com o escopo atual no momento em que ela
+  // chega, não importa a ordem de chegada. Uma nova tentativa (retry) do
+  // MESMO escopo continua podendo gravar (a chave não muda); só uma
+  // NAVEGAÇÃO de verdade invalida respostas antigas.
   const loadTasksRequestIdRef = useRef(0);
-  const loadTasksCommittedIdRef = useRef(0);
+  const loadTasksScopeKeyRef = useRef('');
   // Uma segunda tentativa automática por falha (não por request): erros de
   // rede/RLS logo após o login costumam ser transitórios e sumiam sem deixar
   // rastro (array vazio ficava travado até um F5 manual).
@@ -2130,7 +2211,18 @@ export default function App() {
         result = await taskRepo.fetchTaskDetails(id);
         if (cancelled) return;
       }
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, ...result.data } : t));
+      setTasks(prev => prev.map(t => {
+        if (t.id !== id) return t;
+        // Não sobrescreve com `[]` os campos cuja sub-busca falhou (ver
+        // failedFields em taskRepo.fetchTaskDetails) — senão um comentário
+        // que o usuário acabou de postar (já salvo no banco) sumia da tela
+        // se o refetch ao reabrir a tarefa desse um soluço de rede.
+        const safeData = { ...result.data };
+        for (const field of result.failedFields) {
+          delete safeData[field];
+        }
+        return { ...t, ...safeData };
+      }));
       if (result.hasError) {
         toast.error('Não foi possível carregar todos os detalhes da tarefa (comentários, checklist ou anexos).', {
           action: {
@@ -2186,6 +2278,11 @@ export default function App() {
     if (!hasResolvedInitialUrlRef.current) return;
 
     const requestId = ++loadTasksRequestIdRef.current;
+    // Escopo desta chamada especificamente — não `scopedListIds` (array
+    // derivado, pode trocar de referência sem o escopo ter mudado de
+    // verdade), só os valores primitivos que definem "que tela é essa".
+    const scopeKey = `${activeListId ?? ''}|${activeScope.type}|${activeScope.id ?? ''}|${activeView}`;
+    loadTasksScopeKeyRef.current = scopeKey;
     // "Tarefa não existe mais" (ver efeito logo abaixo) só pode confiar em
     // `tasks` depois que a carga estiver DE VERDADE completa — a 1ª página
     // (100 linhas) já dispara `tasks.length > 0` bem antes das páginas
@@ -2208,8 +2305,7 @@ export default function App() {
         const rows = await taskRepo.fetchMyTaskRows(currentUser.id);
         const mappedTasks = rows.map(taskRepo.mapRowToTaskShell);
 
-        if (requestId < loadTasksCommittedIdRef.current) return;
-        loadTasksCommittedIdRef.current = requestId;
+        if (loadTasksScopeKeyRef.current !== scopeKey) return;
         loadTasksRetriedRef.current = false;
         setMyTasks(mappedTasks);
         setTasks(prev => {
@@ -2253,14 +2349,13 @@ export default function App() {
         ? await taskRepo.fetchInitialTaskRowsByListId(activeListId)
         : await taskRepo.fetchInitialTaskRowsByListIds(listIds);
 
-      // 200 + [] também é o que o role anon recebe quando a sessão se perde
-      // (lock travado, token vencido): sem esta checagem a pasta "esvaziava" sem
-      // erro nenhum. Lista vazia só é aceita com sessão confirmada no servidor.
-      if (firstRows.length === 0) await taskRepo.assertSessionStillValid();
-
-      if (requestId < loadTasksCommittedIdRef.current) return; // um resultado de escopo mais novo já foi gravado
-      loadTasksCommittedIdRef.current = requestId;
+      if (loadTasksScopeKeyRef.current !== scopeKey) return; // a tela já navegou pra outro escopo
       setTasks(prev => {
+        // Map em vez de prev.find() dentro do .map() — O(n) em vez de O(n×m).
+        // Recarrega a cada evento realtime (qualquer tarefa da empresa, debounce
+        // de 1.2s — ver assinatura 'tasks-realtime' abaixo), então o custo desse
+        // merge se repete com frequência; com listas de milhares de tarefas o
+        // .find() linear virava um travamento perceptível a cada recarga.
         const prevById = new Map(prev.map(t => [t.id, t]));
         return firstRows
           .map(taskRepo.mapRowToTaskShell)
@@ -2283,7 +2378,7 @@ export default function App() {
         ? await taskRepo.fetchRemainingTaskRowsByListId(activeListId)
         : await taskRepo.fetchRemainingTaskRowsByListIds(listIds);
 
-      if (requestId !== loadTasksRequestIdRef.current) return;
+      if (loadTasksScopeKeyRef.current !== scopeKey) return;
       setTasks(prev => {
         const prevById = new Map(prev.map(t => [t.id, t]));
         return [...firstRows, ...remainingRows]
@@ -2344,18 +2439,30 @@ export default function App() {
     let cancelled = false;
     setIsSearching(true);
     const handle = setTimeout(async () => {
-      const rows = await taskRepo.searchTaskRowsByTitle(q, 200);
-      if (cancelled) return;
-      if (rows.length > 0) {
-        const hydrated = await taskRepo.hydrateTaskRows(rows);
+      // Achado real: sem try/catch aqui, qualquer rejeição inesperada (ex.:
+      // o timeout de 20s do fetch global, ver fetchWithTimeout em
+      // src/lib/supabase.ts) subia sem handler nenhum e pulava direto o
+      // `setIsSearching(false)` no fim — o spinner da busca ficava girando
+      // pra sempre, mesmo a requisição já tendo "terminado" (com erro).
+      try {
+        const rows = await taskRepo.searchTaskRowsByTitle(q, 200);
         if (cancelled) return;
-        setTasks(prev => {
-          const merged = new Map(prev.map(t => [t.id, t]));
-          for (const t of hydrated) merged.set(t.id, t);
-          return Array.from(merged.values());
-        });
+        if (rows.length > 0) {
+          const hydrated = await taskRepo.hydrateTaskRows(rows);
+          if (cancelled) return;
+          setTasks(prev => {
+            const prevById = new Map(prev.map(t => [t.id, t]));
+            const merged = new Map(prevById);
+            for (const t of hydrated) merged.set(t.id, mergeSearchHydratedTask(t, prevById.get(t.id)));
+            return Array.from(merged.values());
+          });
+        }
+      } catch (err) {
+        console.error('Erro ao buscar tarefas:', err);
+        if (!cancelled) toast.error('Erro ao buscar tarefas. Tente novamente.');
+      } finally {
+        if (!cancelled) setIsSearching(false);
       }
-      if (!cancelled) setIsSearching(false);
     }, 400);
     return () => { cancelled = true; clearTimeout(handle); };
   }, [searchQuery]);
@@ -3026,12 +3133,17 @@ export default function App() {
       }
     }
 
-    const { error } = await supabase
-      .from('tasks')
-      .update({ status: newStatus })
-      .eq('id', taskId);
+    // writeRows (src/lib/dbWrite.ts): sem `.select()`, um UPDATE barrado pelo
+    // `with check` da policy `tasks_upd` (precisa acessar a lista, ou ser
+    // responsável/criador — ver migration 30) volta `error: null` com ZERO
+    // linhas afetadas: a UI aplicava o novo status mesmo assim, e ele
+    // "voltava sozinho" no próximo refetch. Tratar array vazio como falha
+    // fecha esse buraco.
+    const statusWrite = await writeRows(
+      supabase.from('tasks').update({ status: newStatus }).eq('id', taskId),
+    );
 
-    if (!error) {
+    if (statusWrite.ok === true) {
       setTasks(prev => prev.map(t => {
         if (t.id === taskId) {
           const updatedTask = { ...t, status: newStatus };
@@ -3117,9 +3229,13 @@ export default function App() {
         return t;
       }));
       return true;
-    } else {
-      console.error('Erro ao atualizar status:', error);
+    } else if (statusWrite.reason === 'error') {
+      console.error('Erro ao atualizar status:', statusWrite.message);
       toast.error('Erro ao atualizar status. A tarefa voltou ao estado anterior.');
+      return false;
+    } else {
+      console.error('Atualização de status não aplicou nenhuma linha (RLS/permissão) para a tarefa', taskId);
+      toast.error('Você não tem permissão para alterar o status desta tarefa.');
       return false;
     }
   }, [currentUser, tasks, workspace.id]);
@@ -3147,12 +3263,20 @@ export default function App() {
     if (Object.keys(payload).length === 0) return true;
 
     setTasks(prev => prev.map(t => t.id === taskId ? { ...t, ...updates } : t));
-    const { error } = await supabase.from('tasks').update(payload).eq('id', taskId);
+    // writeRows: `error: null` + 0 linhas = UPDATE barrado pelo `with check`
+    // de `tasks_upd` (sem permissão na lista/tarefa) — mesmo caso de
+    // handleStatusChange acima.
+    const quickWrite = await writeRows(supabase.from('tasks').update(payload).eq('id', taskId));
 
-    if (error) {
+    if (quickWrite.ok === false) {
       setTasks(prev => prev.map(t => t.id === taskId ? previous : t));
-      console.error('Erro ao atualizar tarefa pelo Kanban:', error);
-      toast.error('Erro ao salvar alteração. A tarefa voltou ao estado anterior.');
+      if (quickWrite.reason === 'error') {
+        console.error('Erro ao atualizar tarefa pelo Kanban:', quickWrite.message);
+        toast.error('Erro ao salvar alteração. A tarefa voltou ao estado anterior.');
+      } else {
+        console.error('Atualização pelo Kanban não aplicou nenhuma linha (RLS/permissão) para a tarefa', taskId);
+        toast.error('Você não tem permissão para editar esta tarefa.');
+      }
       return false;
     }
 
@@ -3168,15 +3292,19 @@ export default function App() {
   }, [tasks, currentUser]);
 
   const handleUpdateFieldValue = useCallback(async (fieldId: string, entityId: string, value: any) => {
-    const { error } = await supabase
-      .from('custom_field_values')
-      .upsert({
-        field_id: fieldId,
-        entity_id: entityId,
-        value
-      }, { onConflict: 'field_id,entity_id' });
+    // writeRows: mesmo caso de handleStatusChange/handleQuickUpdateTask — a
+    // policy de UPDATE/INSERT de custom_field_values exige
+    // can_access_task(entity_id) (migration 30); sem `.select()` um upsert
+    // barrado por ela volta sucesso com zero linhas, e o valor do campo
+    // "sumia" ao reabrir a tarefa porque nunca tinha sido salvo de verdade.
+    const fieldWrite = await writeRows(
+      supabase
+        .from('custom_field_values')
+        .upsert({ field_id: fieldId, entity_id: entityId, value }, { onConflict: 'field_id,entity_id' }),
+      { selectColumns: 'entity_id' },
+    );
 
-    if (!error) {
+    if (fieldWrite.ok === true) {
       setFieldValues(prev => {
         const existingIndex = prev.findIndex(v => v.fieldId === fieldId && v.entityId === entityId);
         if (existingIndex > -1) {
@@ -3186,12 +3314,22 @@ export default function App() {
         }
         return [...prev, { fieldId, entityId, value }];
       });
+    } else if (fieldWrite.reason === 'error') {
+      console.error('Erro ao salvar valor do campo:', fieldWrite.message);
+      toast.error('Erro ao salvar valor do campo.');
     } else {
-      console.error('Erro ao salvar valor do campo:', error);
+      console.error('Upsert de valor de campo não aplicou nenhuma linha (RLS/permissão) para a tarefa', entityId);
+      toast.error('Você não tem permissão para editar este campo.');
     }
   }, []);
 
-  const handleCreateField = useCallback(async (newField: CustomField) => {
+  // Issue #97: retorna o campo criado (com o id de verdade gerado pelo
+  // Supabase — o id que o chamador manda em `newField` nunca é usado no
+  // insert, então sem esse retorno não haveria como saber o id real).
+  // Criação inline na tela de detalhes usa isso pra reexibir o campo na
+  // lista atual assim que ele é criado, sem esperar o usuário abrir o
+  // modal "Gerenciar campos" e ligar o toggle manualmente.
+  const handleCreateField = useCallback(async (newField: CustomField): Promise<CustomField | null> => {
     const { data, error } = await supabase
       .from('custom_fields')
       .insert({
@@ -3237,8 +3375,10 @@ export default function App() {
         const hiddenStandardKeys = hiddenStandardColumnKeysByList[l.id] ?? [];
         return taskRepo.upsertListColumnPrefs(l.id, hiddenFieldIds, hiddenStandardKeys, currentUser.id);
       })).catch((err) => console.error('Erro ao salvar preferência de coluna do campo novo:', err));
+      return field;
     } else {
       console.error('Erro ao criar campo personalizado:', error);
+      return null;
     }
   }, [currentUser.id, lists, hiddenTaskFieldIdsByList, hiddenStandardColumnKeysByList]);
 
@@ -3812,16 +3952,26 @@ export default function App() {
     }
 
     let result = baseTasks;
-    if (activeScope.type === 'folder' && activeScope.id) {
+    // Uma lista selecionada na sidebar (activeListId) é independente do
+    // activeScope de pasta/espaço — `onSetActiveListId` só seta activeListId,
+    // sem tocar activeScope (mesmo padrão do handleNavigate fazer o
+    // contrário: ele zera activeListId ao trocar de escopo). Sem esse
+    // `!activeListId` aqui, um activeScope "preso" numa pasta/espaço anterior
+    // filtrava a lista escolhida pra fora do resultado — achado real (2026-09):
+    // clicar numa lista de uma pasta diferente da última pasta/espaço visitada
+    // mostrava "Nenhuma tarefa encontrada", mesmo a lista tendo tarefas, porque
+    // esse filtro (que roda ANTES do filtro por activeListId em filteredTasks
+    // logo abaixo) já tinha zerado o resultado.
+    if (!activeListId && activeScope.type === 'folder' && activeScope.id) {
       const folderListIds = lists.filter(l => l.folderId === activeScope.id).map(l => l.id);
       result = result.filter(t => folderListIds.includes(t.listId));
-    } else if (activeScope.type === 'space' && activeScope.id) {
+    } else if (!activeListId && activeScope.type === 'space' && activeScope.id) {
       const spaceFolderIds = folders.filter(f => f.spaceId === activeScope.id).map(f => f.id);
       const spaceListIds = lists.filter(l => spaceFolderIds.includes(l.folderId)).map(l => l.id);
       result = result.filter(t => spaceListIds.includes(t.listId));
     }
     return result;
-  }, [tasks, activeScope, lists, folders, currentUser, allowedFolderIdSet]);
+  }, [tasks, activeScope, activeListId, lists, folders, currentUser, allowedFolderIdSet]);
 
   // ── Favorites (Supabase-synced, localStorage como seed inicial) ──────────
   const [favorites, setFavorites] = useState<{ type: 'list' | 'folder' | 'space'; id: string; name: string }[]>(() => {
@@ -3923,6 +4073,18 @@ export default function App() {
 
     return result;
   }, [scopeTasks, activeListId, searchQuery, currentUser, activeScope, filterTags, sortConfig, showClosedInMyTasks]);
+
+  // Merge de myTasks com os detalhes já carregados em `tasks` (comentários,
+  // checklist, anexos — ver preserveLoadedTaskDetails) pra tela de "Minhas
+  // Tarefas". Estava inline no JSX como `tasks.find()` dentro de um `.map()`
+  // sem useMemo: recalculava em TODO re-render do App (ex.: digitar em
+  // qualquer campo de texto na tela, já que App é um componente só) — com
+  // useMemo, só recalcula quando myTasks/tasks realmente mudam. Map em vez de
+  // find() dentro do map: O(n) em vez de O(n×m).
+  const myTasksWithDetails = useMemo(() => {
+    const tasksById = new Map(tasks.map(t => [t.id, t]));
+    return myTasks.map(t => tasksById.get(t.id) || t);
+  }, [myTasks, tasks]);
 
   const fieldValueEntityIdsKey = useMemo(() => {
     const ids = new Set<string>();
@@ -4050,6 +4212,12 @@ export default function App() {
   return (
     <SSOHandler>
       <Toaster richColors position="top-right" />
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:rounded-md focus:bg-[var(--primary-color)] focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-white focus:shadow-lg"
+      >
+        Pular para o conteúdo principal
+      </a>
       <div
         className={`flex h-screen bg-background text-foreground font-sans selection:bg-[var(--primary-color)]/30 ${uiScaleClass}`}
         onClick={() => setIsUserMenuOpen(false)}
@@ -4104,10 +4272,24 @@ export default function App() {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col min-w-0 bg-muted">
+          {updateNotice && (
+            <NotificationBanner className="shrink-0" onDismiss={() => setUpdateNotice(null)}>
+              <span className="font-semibold">{updateNotice.message}</span>
+              <span className="mx-2 text-gray-400">·</span>
+              {updateNotice.description}
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="ml-3 font-semibold underline hover:no-underline"
+              >
+                Atualizar agora
+              </button>
+            </NotificationBanner>
+          )}
           {/* Header */}
           <header className="h-14 border-b bg-card flex items-center justify-between px-6 shrink-0 z-10">
             <div className="flex items-center gap-4">
-              <h1 className="text-lg font-bold text-gray-800 hidden md:block">
+              <h1 className="text-lg font-bold text-gray-800 sr-only md:not-sr-only md:block">
                 {activeListId ? (lists.find(l => l.id === activeListId)?.name ?? activeScope.name) : activeScope.name}
               </h1>
               <div className="relative">
@@ -4434,7 +4616,7 @@ export default function App() {
               tem efeito e a barra horizontal só aparece depois de milhares de linhas,
               lá no rodapé real da página). As outras views continuam usando o scroll
               de página normal do <main>. */}
-          <main className={`flex-1 custom-scrollbar ${activeView === 'Table' ? 'overflow-hidden flex flex-col' : 'overflow-auto p-4 sm:p-6'}`}>
+          <main id="main-content" tabIndex={-1} className={`flex-1 custom-scrollbar focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--primary-color)] ${activeView === 'Table' ? 'overflow-hidden flex flex-col' : 'overflow-auto p-4 sm:p-6'}`}>
           <div key={activeView} className={`animate-in fade-in slide-in-from-bottom-1 duration-200 ${activeView === 'Table' ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
           <React.Suspense
             fallback={
@@ -4577,6 +4759,7 @@ export default function App() {
                 lists={lists}
                 currentUserId={currentUser.id}
                 statusGroups={statusGroups}
+                activeListId={activeListId}
               />
             )}
             {activeView === 'Map' && (
@@ -4631,7 +4814,7 @@ export default function App() {
                 currentUser={currentUser}
                 users={adminUsers}
                 tasks={(myTasks.length > 0 || isMyTasksLoading)
-                  ? myTasks.map(t => tasks.find(existing => existing.id === t.id) || t)
+                  ? myTasksWithDetails
                   : filteredTasks}
                 isLoading={isMyTasksLoading && myTasks.length === 0}
                 onOpenTask={setSelectedTaskId}
@@ -4681,6 +4864,7 @@ export default function App() {
                 workspaceTags={workspaceTags}
                 hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
                 onHideTaskFieldForList={handleToggleTaskFieldForList}
+                allowedFolderIdSet={allowedFolderIdSet}
               />
             )}
             {activeView === 'Workload' && (
@@ -4806,6 +4990,10 @@ export default function App() {
               fieldValues={fieldValues}
               onUpdateFieldValue={handleUpdateFieldValue}
               hiddenTaskFieldIdsByList={hiddenTaskFieldIdsByList}
+              onHideTaskFieldForList={handleToggleTaskFieldForList}
+              onCreateField={handleCreateField}
+              onUpdateField={handleUpdateField}
+              onDeleteField={handleDeleteField}
               onManageFields={(listId: string) => {
                 setFieldManagerListIdOverride(listId || null);
                 setIsFieldManagerOpen(true);
@@ -5208,7 +5396,7 @@ function SpaceOverview({ space, folders, lists, listProgressMap, tasks, onNaviga
           </div>
         )}
         <div>
-          <h1 className="text-2xl font-bold text-foreground">{space.name}</h1>
+          <h2 className="text-2xl font-bold text-foreground">{space.name}</h2>
           <p className="text-sm text-muted-foreground">{folders.length} pasta{folders.length !== 1 ? 's' : ''} · {spaceLists.length} lista{spaceLists.length !== 1 ? 's' : ''} · {totalTasks} tarefa{totalTasks !== 1 ? 's' : ''}</p>
         </div>
       </div>
@@ -5642,7 +5830,7 @@ function DocView({ doc, allDocs = [], onUpdate, onSelectDoc, onCreateSubpage, cu
           onPaste={handlePaste}
           onClick={handleContentClick}
           dangerouslySetInnerHTML={{ __html: linkifyHtml(doc.content) }}
-          className="w-full min-h-[300px] text-xl text-gray-700 leading-relaxed outline-none prose prose-orange max-w-none focus:prose-orange [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer hover:[&_a]:text-blue-800"
+          className="w-full min-h-[300px] text-xl text-gray-700 leading-relaxed outline-none prose prose-orange max-w-none rounded-lg focus:prose-orange focus:ring-2 focus:ring-orange-300 [&_a]:text-blue-600 [&_a]:underline [&_a]:cursor-pointer hover:[&_a]:text-blue-800"
         />
 
         {/* Subpáginas */}
@@ -5881,6 +6069,10 @@ function Sidebar({
   const [expandedSpaces, setExpandedSpaces] = useState<string[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<string[]>([]);
   const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
+  // Issue #125: busca do submenu "Mover para" — fica no componente (não
+  // dentro do .map() de listas, que violaria as regras de hooks) já que só
+  // um desses submenus fica aberto por vez; reseta ao fechar o menu pai.
+  const [moveToFolderSearch, setMoveToFolderSearch] = useState('');
 
   // "Mais" (item 9 do Início, estilo ClickUp): escolher um item no dropdown
   // "fixa" ele na sidebar, substituindo o que estava fixado antes — só o
@@ -6707,7 +6899,7 @@ function Sidebar({
                                               >
                                                 <svg className="w-3 h-3" fill={favorites?.some((f: any) => f.type === 'list' && f.id === list.id) ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth={1.5} viewBox="0 0 14 14"><path d="M7 1l1.5 4h4l-3.3 2.4 1.3 4L7 9l-3.5 2.4 1.3-4L1.5 5h4z"/></svg>
                                               </button>
-                                              <DropdownMenu>
+                                              <DropdownMenu onOpenChange={(open: boolean) => { if (!open) setMoveToFolderSearch(''); }}>
                                                 <DropdownMenuTrigger asChild>
                                                   <button onClick={(e) => e.stopPropagation()} className="p-1 text-sidebar-foreground/40 hover:text-sidebar-foreground"><MoreHorizontal className="h-3 w-3" /></button>
                                                 </DropdownMenuTrigger>
@@ -6720,15 +6912,47 @@ function Sidebar({
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onRenameList(list.id, list.name); }}>Renomear lista</DropdownMenuItem>
                                                   <DropdownMenuSub>
                                                     <DropdownMenuSubTrigger className="text-xs">Mover para</DropdownMenuSubTrigger>
-                                                    <DropdownMenuSubContent>
-                                                      {(folders as any[]).filter((f: any) => f.id !== list.folderId).map((f: any) => (
-                                                        <DropdownMenuItem key={f.id} className="text-xs" onClick={(e) => { e.stopPropagation(); onMoveList?.(list.id, f.id); }}>
-                                                          {f.name}
-                                                        </DropdownMenuItem>
-                                                      ))}
-                                                      {(folders as any[]).filter((f: any) => f.id !== list.folderId).length === 0 && (
-                                                        <DropdownMenuItem className="text-xs text-gray-400" disabled>Nenhuma outra pasta</DropdownMenuItem>
-                                                      )}
+                                                    <DropdownMenuSubContent className="w-64">
+                                                      {/* Issue #125: antes era uma lista plana com pastas de espaços não
+                                                          relacionados misturadas — agora agrupa por espaço (ordem
+                                                          alfabética) e tem busca por nome da pasta. */}
+                                                      <div className="sticky top-0 z-10 bg-popover p-1">
+                                                        <input
+                                                          type="text"
+                                                          autoFocus
+                                                          value={moveToFolderSearch}
+                                                          onChange={(e) => setMoveToFolderSearch(e.target.value)}
+                                                          onKeyDown={(e) => e.stopPropagation()}
+                                                          onClick={(e) => e.stopPropagation()}
+                                                          placeholder="Buscar pasta..."
+                                                          className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                                                        />
+                                                      </div>
+                                                      {(() => {
+                                                        const query = moveToFolderSearch.trim().toLowerCase();
+                                                        const groups = (spaces as any[])
+                                                          .map((space: any) => ({
+                                                            space,
+                                                            folderList: (folders as any[])
+                                                              .filter((f: any) => f.spaceId === space.id && f.id !== list.folderId)
+                                                              .filter((f: any) => !query || f.name.toLowerCase().includes(query)),
+                                                          }))
+                                                          .filter((group: any) => group.folderList.length > 0)
+                                                          .sort((a: any, b: any) => a.space.name.localeCompare(b.space.name, 'pt-BR'));
+                                                        if (groups.length === 0) {
+                                                          return <DropdownMenuItem className="text-xs text-gray-400" disabled>Nenhuma pasta encontrada</DropdownMenuItem>;
+                                                        }
+                                                        return groups.map(({ space, folderList }: any) => (
+                                                          <div key={space.id}>
+                                                            <p className="px-2 pt-1.5 pb-0.5 text-[10px] font-bold uppercase text-muted-foreground">{space.name}</p>
+                                                            {folderList.map((f: any) => (
+                                                              <DropdownMenuItem key={f.id} className="text-xs" onClick={(e) => { e.stopPropagation(); onMoveList?.(list.id, f.id); }}>
+                                                                {f.name}
+                                                              </DropdownMenuItem>
+                                                            ))}
+                                                          </div>
+                                                        ));
+                                                      })()}
                                                     </DropdownMenuSubContent>
                                                   </DropdownMenuSub>
                                                   <DropdownMenuItem className="text-xs" onClick={(e) => { e.stopPropagation(); onDuplicateList?.(list.id, list.name); }}>Duplicar projeto</DropdownMenuItem>
@@ -6927,7 +7151,7 @@ function AllSpacesModal({ spaces, hiddenSpaceIds, onToggleHidden, onCreateSpace,
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as any)}
-            className="text-xs border rounded-md px-2 py-1.5 bg-gray-50 text-gray-600 focus:outline-none"
+            className="text-xs border rounded-md px-2 py-1.5 bg-gray-50 text-gray-600 focus:outline-none focus:ring-2 focus:ring-[var(--primary-color)]"
           >
             <option value="recommended">Recomendado</option>
             <option value="created">Data de criação</option>
@@ -7572,13 +7796,15 @@ function DuplicateTaskModal({
   );
 }
 
+// parseLocalDate / formatLocalDate agora vivem em ./lib/dates (issue #102,
+// achado 3) — importadas no topo deste arquivo.
 const WEEKDAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const NTH_WEEK_LABELS: Record<number, string> = { 1: '1ª', 2: '2ª', 3: '3ª', 4: '4ª', 5: 'última' };
 
 // Converte um Date pra valor de <input type="datetime-local"> no fuso local
 // do navegador (não usa toISOString — isso converteria pra UTC e descolaria
 // a hora exibida da hora que o usuário quis dizer).
-function toDatetimeLocalValue(date: Date): string {
+export function toDatetimeLocalValue(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
@@ -7661,6 +7887,7 @@ function ruleToRecurrenceForm(rule: TaskRecurrenceRule): RecurrenceFormState {
 // função pura diretamente, no mesmo estilo Vitest já usado no resto do repo).
 export function buildRecurrenceRuleInput(
   form: RecurrenceFormState,
+  existingRule?: TaskRecurrenceRule | null,
 ): { input: Omit<import('./lib/taskRepo').RecurrenceRuleInput, 'taskId' | 'listId' | 'createdBy'> } | { error: string } {
   const startAtDate = new Date(form.startAt);
   if (Number.isNaN(startAtDate.getTime())) {
@@ -7669,6 +7896,19 @@ export function buildRecurrenceRuleInput(
   if (form.frequencyType === 'weekly' && form.weekdays.length === 0) {
     return { error: 'Selecione ao menos um dia da semana.' };
   }
+
+  // Achado real: editar QUALQUER campo de uma regra já em andamento (ex:
+  // política de conflito, herança de responsáveis) sem mexer na data
+  // rebobinava next_run_at pro start_at original — na próxima execução do
+  // scheduler, a regra aparecia "atrasada" há meses e ele recriava um
+  // backlog inteiro de tarefas retroativas (ou, com misfire "mais recente",
+  // fabricava uma ocorrência com data errada). Só recalcula nextRunAt a
+  // partir do novo startAt quando o usuário de fato mudou a data de início
+  // (o form já vem pré-preenchido com a data original — ruleToRecurrenceForm
+  // — então comparar contra o valor atual do form detecta a mudança); senão
+  // preserva o progresso (next_run_at) que a regra já tinha.
+  const startAtUnchanged = !!existingRule && form.startAt === toDatetimeLocalValue(new Date(existingRule.startAt));
+  const nextRunAt = startAtUnchanged ? (existingRule!.nextRunAt ?? startAtDate.toISOString()) : startAtDate.toISOString();
 
   return {
     input: {
@@ -7679,9 +7919,7 @@ export function buildRecurrenceRuleInput(
       monthWeek: form.frequencyType === 'monthly' && form.monthMode === 'nth' ? form.monthWeek : null,
       monthWeekday: form.frequencyType === 'monthly' && form.monthMode === 'nth' ? form.monthWeekday : null,
       startAt: startAtDate.toISOString(),
-      // A primeira ocorrência gerada é exatamente o start_at — o scheduler
-      // avança a partir daí a cada execução (ver task-recurrence-scheduler).
-      nextRunAt: startAtDate.toISOString(),
+      nextRunAt,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Sao_Paulo',
       skipWeekends: form.skipWeekends,
       skipHolidays: form.skipHolidays,
@@ -7744,7 +7982,7 @@ function RecurrenceConfigModal({
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (isSubmitting) return;
-    const result = buildRecurrenceRuleInput(form);
+    const result = buildRecurrenceRuleInput(form, rule);
     if ('error' in result) {
       toast.error(result.error);
       return;
@@ -8201,26 +8439,6 @@ function HolidaysManagerModal({
   );
 }
 
-// Datas de tarefa (dueDate/startDate) são strings "YYYY-MM-DD" (sem hora).
-// `new Date("YYYY-MM-DD")` interpreta isso como meia-noite UTC, que em fusos
-// atrás de UTC (ex: Brasil) cai no dia anterior ao formatar/comparar em
-// horário local. Parseamos os componentes manualmente para obter a
-// meia-noite local do dia correto.
-function parseLocalDate(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('T')[0].split('-').map(Number);
-  return new Date(y, m - 1, d);
-}
-
-// Inverso de parseLocalDate: formata um Date usando os componentes locais
-// (ano/mês/dia), nunca `toISOString()` — que converte para UTC e pode
-// arredondar para o dia errado em fusos atrás de UTC (ex: Brasil, UTC-3).
-function formatLocalDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-}
-
 // Reexportado para não quebrar `import { linkifyText } from './App'` já em uso
 // (ex.: src/test/linkifyText.test.tsx). A implementação vive em ./lib/linkify
 // porque MentionText (lib/mentions.tsx) também precisa dela, e mentions.tsx é
@@ -8356,9 +8574,12 @@ function ListView({
       });
     }
     return order;
-    // Usamos JSON.stringify para evitar novos arrays idênticos disparando o useEffect
-    // Adicionamos t.status para que mudanças de status disparem a re-calculação mesmo se tasks.length não mudar
-  }, [tasks.length, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(tasks.map(t => t.status)), JSON.stringify(statusGroups?.[0]?.options)]);
+    // `tasks` (não tasks.length + JSON.stringify) como dependência: o app já
+    // substitui o array de forma imutável a cada mudança real, então a
+    // referência já é suficiente pra disparar o recálculo — sem pagar um
+    // `.map()` + `JSON.stringify()` sobre TODAS as tarefas em todo render
+    // do ListView só para montar a chave de comparação do useMemo.
+  }, [tasks, activeListId, JSON.stringify(activeStatusOptions), JSON.stringify(statusGroups?.[0]?.options)]);
 
   const [expandedStatuses, setExpandedStatuses] = useState<string[]>([]);
 
@@ -8458,13 +8679,23 @@ function ListView({
     [hiddenStandardColumnsForActiveList],
   );
 
+  // Indexado por entityId uma vez (O(n)) em vez de escanear TODOS os
+  // fieldValues da empresa a cada célula de custom field renderizada — com
+  // milhares de valores isso era O(linhas × colunas × fieldValues).
+  const fieldValuesByEntity = useMemo(() => {
+    const map = new Map<string, CustomFieldValue[]>();
+    for (const v of fieldValues as CustomFieldValue[]) {
+      const list = map.get(v.entityId);
+      if (list) list.push(v); else map.set(v.entityId, [v]);
+    }
+    return map;
+  }, [fieldValues]);
+
   const getFieldValue = useCallback(
     (fieldId: string, entityId: string) => {
-      return (fieldValues as CustomFieldValue[]).find(
-        (v) => v.fieldId === fieldId && v.entityId === entityId,
-      )?.value;
+      return fieldValuesByEntity.get(entityId)?.find((v) => v.fieldId === fieldId)?.value;
     },
-    [fieldValues],
+    [fieldValuesByEntity],
   );
 
 
@@ -8617,7 +8848,10 @@ function ListView({
       </div>
 
       {tasks.length === 0 ? (
-        <div className="px-4 py-12 text-center text-gray-400 italic">
+        // Issue #127: usava cor cinza fixa + itálico, divergente do padrão de
+        // "vazio" do resto do app (ex.: "Nenhuma lista criada" mais abaixo),
+        // que usa os tokens de tema (`text-muted-foreground`, sem itálico).
+        <div className="px-4 py-12 text-center text-muted-foreground">
           {isLoading ? 'Carregando tarefas deste contexto...' : 'Nenhuma tarefa encontrada neste contexto.'}
         </div>
       ) : (
@@ -8895,7 +9129,7 @@ function ListView({
                                       <div className="text-xs font-mono text-blue-600 bg-blue-50 px-2 py-1 rounded border border-blue-100 italic">
                                         <FormulaValue
                                           formula={field.config?.formula || ''}
-                                          context={{ ...t, ...Object.fromEntries(fieldValues.filter(fv => fv.entityId === t.id).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) }}
+                                          context={{ ...t, ...Object.fromEntries((fieldValuesByEntity.get(t.id) || []).map(fv => [customFields.find(f => f.id === fv.fieldId)?.name || '', fv.value])) }}
                                         />
                                       </div>
                                     ) : field.type === CustomFieldType.DROPDOWN ? (
@@ -9167,22 +9401,34 @@ function TaskTimeTracking({ taskId, currentUser, isReadOnly, estimatedHours, use
 
   const handleStart = async () => {
     setIsStarting(true);
-    const res = await taskRepo.startTimer(taskId, currentUser.id, true);
-    setIsStarting(false);
-    if (!res.ok) { toast.error(res.message); return; }
-    setRunningTimer(res.entry);
-    setEntries(prev => [res.entry, ...prev]);
+    try {
+      const res = await taskRepo.startTimer(taskId, currentUser.id, true);
+      if (!res.ok) { toast.error(res.message); return; }
+      setRunningTimer(res.entry);
+      setEntries(prev => [res.entry, ...prev]);
+    } catch (err) {
+      console.error('Erro ao iniciar cronômetro:', err);
+      toast.error('Erro inesperado ao iniciar o cronômetro. Tente novamente.');
+    } finally {
+      setIsStarting(false);
+    }
   };
 
   const handleStop = async () => {
     if (!runningTimer) return;
     setIsStopping(true);
-    const res = await taskRepo.stopTimer(runningTimer.id);
-    setIsStopping(false);
-    if (!res.ok) { toast.error(res.message); return; }
-    setRunningTimer(null);
-    setEntries(prev => prev.map(e => e.id === res.entry.id ? res.entry : e));
-    toast.success('Cronômetro parado.');
+    try {
+      const res = await taskRepo.stopTimer(runningTimer.id);
+      if (!res.ok) { toast.error(res.message); return; }
+      setRunningTimer(null);
+      setEntries(prev => prev.map(e => e.id === res.entry.id ? res.entry : e));
+      toast.success('Cronômetro parado.');
+    } catch (err) {
+      console.error('Erro ao parar cronômetro:', err);
+      toast.error('Erro inesperado ao parar o cronômetro. Tente novamente.');
+    } finally {
+      setIsStopping(false);
+    }
   };
 
   const handleDelete = async (entryId: string) => {
@@ -9303,11 +9549,16 @@ function ManualTimeEntryForm({ taskId, currentUser, onClose, onAdded }: any) {
     const totalMinutes = h * 60 + m;
     if (totalMinutes <= 0) { toast.error('Informe uma duração válida.'); return; }
     setIsSaving(true);
-    const res = await taskRepo.addManualTimeEntry(taskId, currentUser.id, new Date(date + 'T09:00:00').toISOString(), totalMinutes, isBillable, description || null);
-    setIsSaving(false);
-    if (!res.ok) { toast.error('Erro ao lançar tempo: ' + res.message); return; }
-    toast.success('Tempo lançado.');
-    onAdded();
+    try {
+      const res = await taskRepo.addManualTimeEntry(taskId, currentUser.id, new Date(date + 'T09:00:00').toISOString(), totalMinutes, isBillable, description || null);
+      if (!res.ok) { toast.error('Erro ao lançar tempo: ' + res.message); return; }
+      toast.success('Tempo lançado.');
+      onAdded();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -9538,23 +9789,35 @@ function WorkloadCapacityModal({ users, capacities, timeOffs, currentUser, onClo
     const val = Number(localHours[userId]);
     if (!Number.isFinite(val) || val < 0) { toast.error('Horas semanais inválidas.'); return; }
     setSavingId(userId);
-    const res = await taskRepo.upsertUserCapacity(userId, val);
-    setSavingId(null);
-    if (!res.ok) { toast.error('Erro ao salvar capacidade: ' + res.message); return; }
-    toast.success('Capacidade salva.');
-    onSaved();
+    try {
+      const res = await taskRepo.upsertUserCapacity(userId, val);
+      if (!res.ok) { toast.error('Erro ao salvar capacidade: ' + res.message); return; }
+      toast.success('Capacidade salva.');
+      onSaved();
+    } catch (err) {
+      console.error('Erro ao salvar capacidade:', err);
+      toast.error('Erro inesperado ao salvar a capacidade. Tente novamente.');
+    } finally {
+      setSavingId(null);
+    }
   };
 
   const addTimeOff = async () => {
     if (!newTimeOff.userId || !newTimeOff.start || !newTimeOff.end) { toast.error('Preencha pessoa, início e fim.'); return; }
     if (newTimeOff.end < newTimeOff.start) { toast.error('Data final não pode ser antes da inicial.'); return; }
     setIsAddingTimeOff(true);
-    const res = await taskRepo.addUserTimeOff(newTimeOff.userId, newTimeOff.start, newTimeOff.end, newTimeOff.reason || null, currentUser.id);
-    setIsAddingTimeOff(false);
-    if (!res.ok) { toast.error('Erro ao registrar ausência: ' + res.message); return; }
-    setNewTimeOff({ userId: users[0]?.id || '', start: '', end: '', reason: '' });
-    toast.success('Ausência registrada.');
-    onSaved();
+    try {
+      const res = await taskRepo.addUserTimeOff(newTimeOff.userId, newTimeOff.start, newTimeOff.end, newTimeOff.reason || null, currentUser.id);
+      if (!res.ok) { toast.error('Erro ao registrar ausência: ' + res.message); return; }
+      setNewTimeOff({ userId: users[0]?.id || '', start: '', end: '', reason: '' });
+      toast.success('Ausência registrada.');
+      onSaved();
+    } catch (err) {
+      console.error('Erro ao registrar ausência:', err);
+      toast.error('Erro inesperado ao registrar a ausência. Tente novamente.');
+    } finally {
+      setIsAddingTimeOff(false);
+    }
   };
 
   const removeTimeOff = async (id: string) => {
@@ -9923,19 +10186,26 @@ function GoalFormModal({ goal, users, currentUser, onClose, onSaved }: any) {
   const handleSave = async () => {
     if (!name.trim()) { toast.error('Dê um nome pra meta.'); return; }
     setIsSaving(true);
-    if (goal) {
-      const res = await taskRepo.updateGoal(goal.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
-      if (res.ok) await taskRepo.updateGoalOwners(goal.id, ownerIds);
+    try {
+      if (goal) {
+        const res = await taskRepo.updateGoal(goal.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
+        if (res.ok) await taskRepo.updateGoalOwners(goal.id, ownerIds);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Meta atualizada.');
+      } else {
+        const res = await taskRepo.createGoal({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Meta criada.');
+      }
+      onSaved();
+    } catch (err) {
+      // Sem isto, uma falha de rede (não um erro controlado com {ok:false})
+      // nunca chegava a chamar setIsSaving(false) — o botão "Salvar" ficava
+      // desabilitado pra sempre, só voltava fechando e reabrindo o modal.
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Meta atualizada.');
-    } else {
-      const res = await taskRepo.createGoal({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Meta criada.');
     }
-    onSaved();
   };
 
   return (
@@ -10027,26 +10297,30 @@ function GoalTargetFormModal({ goal, target, onClose, onSaved }: any) {
     if (!name.trim()) { toast.error('Dê um nome pro target.'); return; }
     if (type === 'task' && !selectedTask && !target?.taskId) { toast.error('Escolha uma tarefa.'); return; }
     setIsSaving(true);
-    const payload = {
-      name: name.trim(),
-      unit: (type === 'number' || type === 'currency') ? (unit.trim() || null) : null,
-      startValue: (type === 'number' || type === 'currency') ? Number(startValue) || 0 : null,
-      targetValue: (type === 'number' || type === 'currency') ? Number(targetValue) || 0 : null,
-      currentValue: (type === 'number' || type === 'currency') ? Number(currentValue) || 0 : null,
-      taskId: type === 'task' ? (selectedTask?.id ?? target?.taskId ?? null) : null,
-    };
-    if (target) {
-      const res = await taskRepo.updateGoalTarget(target.id, payload);
+    try {
+      const payload = {
+        name: name.trim(),
+        unit: (type === 'number' || type === 'currency') ? (unit.trim() || null) : null,
+        startValue: (type === 'number' || type === 'currency') ? Number(startValue) || 0 : null,
+        targetValue: (type === 'number' || type === 'currency') ? Number(targetValue) || 0 : null,
+        currentValue: (type === 'number' || type === 'currency') ? Number(currentValue) || 0 : null,
+        taskId: type === 'task' ? (selectedTask?.id ?? target?.taskId ?? null) : null,
+      };
+      if (target) {
+        const res = await taskRepo.updateGoalTarget(target.id, payload);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Target atualizado.');
+      } else {
+        const res = await taskRepo.createGoalTarget(goal.id, { type, ...payload, orderIndex: goal.targets.length });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Target criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Target atualizado.');
-    } else {
-      const res = await taskRepo.createGoalTarget(goal.id, { type, ...payload, orderIndex: goal.targets.length });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Target criado.');
     }
-    onSaved();
   };
 
   return (
@@ -10373,22 +10647,26 @@ function PortfolioFormModal({ portfolio, users, lists, folders, spaces, currentU
     if (!name.trim()) { toast.error('Dê um nome pro portfolio.'); return; }
     if (listIds.length === 0) { toast.error('Escolha pelo menos uma lista.'); return; }
     setIsSaving(true);
-    if (portfolio) {
-      const res = await taskRepo.updatePortfolio(portfolio.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
-      if (res.ok) {
-        await taskRepo.updatePortfolioOwners(portfolio.id, ownerIds);
-        await taskRepo.updatePortfolioLists(portfolio.id, listIds);
+    try {
+      if (portfolio) {
+        const res = await taskRepo.updatePortfolio(portfolio.id, { name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access });
+        if (res.ok) {
+          await taskRepo.updatePortfolioOwners(portfolio.id, ownerIds);
+          await taskRepo.updatePortfolioLists(portfolio.id, listIds);
+        }
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Portfolio atualizado.');
+      } else {
+        const res = await taskRepo.createPortfolio({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds, listIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Portfolio criado.');
       }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Portfolio atualizado.');
-    } else {
-      const res = await taskRepo.createPortfolio({ name: name.trim(), description: description.trim() || null, color, dueDate: dueDate || null, access, createdBy: currentUser.id, ownerIds, listIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Portfolio criado.');
     }
-    onSaved();
   };
 
   return (
@@ -10787,25 +11065,29 @@ function FormBuilderModal({ form, lists, folders, spaces, users, statusGroups, c
     if (!name.trim()) { toast.error('Dê um nome pro formulário.'); return; }
     if (!listId) { toast.error('Escolha a lista de destino.'); return; }
     setIsSaving(true);
-    const payload = {
-      name: name.trim(), description: description.trim() || null,
-      defaultAssigneeId: defaultAssigneeId || null, defaultStatus: defaultStatus || null,
-      defaultPriority: defaultPriority || null, submitLabel: submitLabel.trim() || 'Enviar',
-      redirectUrl: redirectUrl.trim() || null, allowResubmit, requireConsent,
-      consentText: requireConsent ? (consentText.trim() || null) : null,
-    };
-    if (form) {
-      const res = await taskRepo.updateForm(form.id, payload);
+    try {
+      const payload = {
+        name: name.trim(), description: description.trim() || null,
+        defaultAssigneeId: defaultAssigneeId || null, defaultStatus: defaultStatus || null,
+        defaultPriority: defaultPriority || null, submitLabel: submitLabel.trim() || 'Enviar',
+        redirectUrl: redirectUrl.trim() || null, allowResubmit, requireConsent,
+        consentText: requireConsent ? (consentText.trim() || null) : null,
+      };
+      if (form) {
+        const res = await taskRepo.updateForm(form.id, payload);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Formulário atualizado.');
+      } else {
+        const res = await taskRepo.createForm({ ...payload, listId, createdBy: currentUser.id });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Formulário criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Formulário atualizado.');
-    } else {
-      const res = await taskRepo.createForm({ ...payload, listId, createdBy: currentUser.id });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Formulário criado.');
     }
-    onSaved();
   };
 
   return (
@@ -10922,23 +11204,27 @@ function FormQuestionModal({ form, question, customFields, onClose, onSaved }: a
     if (!label.trim()) { toast.error('Dê um nome pra pergunta.'); return; }
     if (mapsTo === 'custom_field' && !customFieldId) { toast.error('Escolha o campo personalizado.'); return; }
     setIsSaving(true);
-    const options = isChoiceType ? optionsText.split('\n').map((s) => s.trim()).filter(Boolean) : null;
-    const payload = {
-      label: label.trim(), helpText: helpText.trim() || null, isRequired,
-      mapsTo: (mapsTo || null) as FormMapsTo | null, customFieldId: mapsTo === 'custom_field' ? customFieldId : null, options,
-    };
-    if (question) {
-      const res = await taskRepo.updateFormQuestion(question.id, payload);
+    try {
+      const options = isChoiceType ? optionsText.split('\n').map((s) => s.trim()).filter(Boolean) : null;
+      const payload = {
+        label: label.trim(), helpText: helpText.trim() || null, isRequired,
+        mapsTo: (mapsTo || null) as FormMapsTo | null, customFieldId: mapsTo === 'custom_field' ? customFieldId : null, options,
+      };
+      if (question) {
+        const res = await taskRepo.updateFormQuestion(question.id, payload);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Pergunta atualizada.');
+      } else {
+        const res = await taskRepo.createFormQuestion(form.id, { ...payload, type, orderIndex: form.questions.length });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Pergunta criada.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Pergunta atualizada.');
-    } else {
-      const res = await taskRepo.createFormQuestion(form.id, { ...payload, type, orderIndex: form.questions.length });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Pergunta criada.');
     }
-    onSaved();
   };
 
   return (
@@ -11014,6 +11300,27 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
   const [consentChecked, setConsentChecked] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Achado real: "Permitir enviar de novo" (form.allowResubmit) era salvo
+  // no builder mas nunca checado em lugar nenhum — desmarcar a opção não
+  // tinha efeito algum, qualquer um podia responder o mesmo formulário
+  // (e criar tarefas duplicadas) quantas vezes quisesse. fetchFormSubmissions
+  // já vem filtrado pela RLS pra "só minhas respostas" quando quem preenche
+  // não é dono/gestor do form, mas filtra de novo por segurança pro caso de
+  // quem preenche também gerenciar o form (aí vê as respostas de todo
+  // mundo). A trava de verdade (contra corrida/duplo clique) é o trigger no
+  // banco — ver migration 20260921020000_enforce_form_resubmit_policy.sql.
+  const [alreadySubmitted, setAlreadySubmitted] = useState(false);
+  const [checkingResubmit, setCheckingResubmit] = useState(!form.allowResubmit);
+  useEffect(() => {
+    if (form.allowResubmit) { setCheckingResubmit(false); return; }
+    let cancelled = false;
+    taskRepo.fetchFormSubmissions(form.id)
+      .then((rows) => { if (!cancelled) setAlreadySubmitted(rows.some((r) => r.submittedBy === currentUser.id)); })
+      .catch((err) => console.error('FormFillModal: erro ao checar respostas anteriores', err))
+      .finally(() => { if (!cancelled) setCheckingResubmit(false); });
+    return () => { cancelled = true; };
+  }, [form.id, form.allowResubmit, currentUser.id]);
+
   const setAnswer = (qId: string, value: any) => setAnswers((prev) => ({ ...prev, [qId]: value }));
 
   const resolvedStatus = useMemo(() => {
@@ -11024,6 +11331,7 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
   }, [form, lists, statusGroups]);
 
   const handleSubmit = async () => {
+    if (alreadySubmitted) { toast.error('Você já respondeu esse formulário.'); return; }
     for (const q of form.questions as FormQuestion[]) {
       const v = answers[q.id];
       if (q.isRequired && (v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0))) {
@@ -11033,17 +11341,26 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
     }
     if (form.requireConsent && !consentChecked) { toast.error('Confirme o consentimento pra continuar.'); return; }
     setIsSubmitting(true);
-    const res = await taskRepo.submitForm({
-      formId: form.id, listId: form.listId, questions: form.questions, answers,
-      defaultAssigneeId: form.defaultAssigneeId || currentUser.id,
-      defaultStatus: resolvedStatus,
-      defaultPriority: (form.defaultPriority || TaskPriority.MEDIA) as TaskPriority,
-      currentUserId: currentUser.id,
-    });
-    setIsSubmitting(false);
-    if (!res.ok) { toast.error('Erro ao enviar: ' + res.message); return; }
-    toast.success('Formulário enviado — tarefa criada!');
-    onSubmitted();
+    try {
+      const res = await taskRepo.submitForm({
+        formId: form.id, listId: form.listId, questions: form.questions, answers,
+        defaultAssigneeId: form.defaultAssigneeId || currentUser.id,
+        defaultStatus: resolvedStatus,
+        defaultPriority: (form.defaultPriority || TaskPriority.MEDIA) as TaskPriority,
+        currentUserId: currentUser.id,
+      });
+      if (!res.ok) { toast.error('Erro ao enviar: ' + res.message); return; }
+      toast.success('Formulário enviado — tarefa criada!');
+      onSubmitted();
+    } catch (err) {
+      // Achado real: sem isto, uma falha de rede no meio do envio (comum em
+      // formulário grande, muitas perguntas) deixava o botão "Enviar" preso
+      // pra sempre — sem fechar o modal, o preenchimento inteiro se perdia se
+      // a pessoa desistisse e recarregasse a página.
+      toast.error('Erro inesperado ao enviar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -11056,6 +11373,16 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
           </div>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-5 h-5" /></button>
         </div>
+        {checkingResubmit ? (
+          <div className="p-8 text-center text-sm text-gray-400">Carregando...</div>
+        ) : alreadySubmitted ? (
+          <div className="p-6 flex flex-col items-center text-center gap-2">
+            <p className="text-sm font-semibold text-gray-700">Você já respondeu esse formulário.</p>
+            <p className="text-xs text-gray-500">Este formulário não aceita mais de uma resposta por pessoa.</p>
+            <button onClick={onClose} className="mt-2 px-3 py-1.5 text-sm rounded-lg border text-gray-600 hover:bg-gray-50">Fechar</button>
+          </div>
+        ) : (
+        <>
         <div className="flex-1 overflow-auto custom-scrollbar p-4 flex flex-col gap-4">
           {form.questions.map((q: FormQuestion) => (
             <div key={q.id}>
@@ -11116,6 +11443,8 @@ function FormFillModal({ form, lists, statusGroups, users, currentUser, onClose,
             {isSubmitting ? 'Enviando...' : (form.submitLabel || 'Enviar')}
           </button>
         </div>
+        </>
+        )}
       </div>
     </div>
   );
@@ -11363,19 +11692,24 @@ function WhiteboardFormModal({ whiteboard, users, currentUser, onClose, onSaved 
   const handleSave = async () => {
     if (!name.trim()) { toast.error('Dê um nome pro quadro.'); return; }
     setIsSaving(true);
-    if (whiteboard) {
-      const res = await taskRepo.updateWhiteboard(whiteboard.id, { name: name.trim(), description: description.trim() || null, access });
-      if (res.ok) await taskRepo.updateWhiteboardOwners(whiteboard.id, ownerIds);
+    try {
+      if (whiteboard) {
+        const res = await taskRepo.updateWhiteboard(whiteboard.id, { name: name.trim(), description: description.trim() || null, access });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        const ownersRes = await taskRepo.updateWhiteboardOwners(whiteboard.id, ownerIds);
+        if (!ownersRes.ok) { toast.error('Quadro atualizado, mas houve erro ao salvar os responsáveis: ' + ownersRes.message); return; }
+        toast.success('Quadro atualizado.');
+      } else {
+        const res = await taskRepo.createWhiteboard({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Quadro criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Quadro atualizado.');
-    } else {
-      const res = await taskRepo.createWhiteboard({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Quadro criado.');
     }
-    onSaved();
   };
 
   return (
@@ -11754,6 +12088,17 @@ function OrgChartTab({ users, canManage, onUpdateManager }: any) {
     return map;
   }, [users]);
 
+  // Raízes (topo do organograma) vêm abertas por padrão, mas só como estado
+  // INICIAL — mesmo achado real do Mapa Mental: antes isso era travado via
+  // `depth === 0` direto no isExpanded do renderNode, que ignorava o clique
+  // do usuário pra sempre nas pessoas do topo (a maioria do que se vê na
+  // tela). Semeamos aqui, uma vez por mudança na lista de usuários, e o
+  // isExpanded abaixo passa a respeitar o toggle normalmente.
+  useEffect(() => {
+    const rootIds = (childrenByManager['__root__'] || []).map((u: any) => u.id);
+    setExpandedIds(new Set(rootIds));
+  }, [childrenByManager]);
+
   const toggle = (id: string) => setExpandedIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
 
   const handleChangeManager = async (userId: string, managerId: string) => {
@@ -11774,7 +12119,7 @@ function OrgChartTab({ users, canManage, onUpdateManager }: any) {
   const renderNode = (u: any, depth: number): React.ReactNode => {
     if (depth > 25) return null;
     const children = childrenByManager[u.id] || [];
-    const isExpanded = depth === 0 || expandedIds.has(u.id);
+    const isExpanded = expandedIds.has(u.id);
     return (
       <div key={u.id} className="flex flex-col">
         <div className="flex items-center gap-2 py-1.5" style={{ paddingLeft: depth * 24 }}>
@@ -11870,7 +12215,19 @@ function MindMapTasksTab({ lists, users, onOpenTask, currentUser }: any) {
     if (!selectedListId) { setTasksInList([]); setIsLoading(false); return; }
     let cancelled = false;
     setIsLoading(true);
-    taskRepo.fetchTasksForList(selectedListId).then((rows) => { if (!cancelled) { setTasksInList(rows); setIsLoading(false); } });
+    taskRepo.fetchTasksForList(selectedListId).then((rows) => {
+      if (cancelled) return;
+      setTasksInList(rows);
+      setIsLoading(false);
+      // Raízes vêm abertas por padrão (mesmo efeito visual de antes), mas só
+      // como estado INICIAL — antes disso era travado via `depth === 0` no
+      // isExpanded do renderNode, o que ignorava o clique do usuário pra
+      // sempre nas tarefas de topo (achado real: botão de recolher/expandir
+      // "sem efeito" era exatamente essas tarefas raiz).
+      const idsInList = new Set(rows.map((t) => t.id));
+      const rootIds = rows.filter((t) => !t.parentId || !idsInList.has(t.parentId)).map((t) => t.id);
+      setExpandedIds(new Set(rootIds));
+    });
     return () => { cancelled = true; };
   }, [selectedListId]);
 
@@ -11924,7 +12281,7 @@ function MindMapTasksTab({ lists, users, onOpenTask, currentUser }: any) {
   const renderNode = (task: Task, depth: number): React.ReactNode => {
     if (depth > 30) return null; // rede de segurança, mesma lógica do organograma
     const children = childrenByParent[task.id] || [];
-    const isExpanded = depth === 0 || expandedIds.has(task.id);
+    const isExpanded = expandedIds.has(task.id);
     const assignee = users.find((u: any) => u.id === task.mainAssigneeId);
     return (
       <div key={task.id} className="flex flex-col">
@@ -12135,19 +12492,23 @@ function MindMapFormModal({ mindMap, users, currentUser, onClose, onSaved }: any
   const handleSave = async () => {
     if (!name.trim()) { toast.error('Dê um nome pro mapa.'); return; }
     setIsSaving(true);
-    if (mindMap) {
-      const res = await taskRepo.updateMindMap(mindMap.id, { name: name.trim(), description: description.trim() || null, access });
-      if (res.ok) await taskRepo.updateMindMapOwners(mindMap.id, ownerIds);
+    try {
+      if (mindMap) {
+        const res = await taskRepo.updateMindMap(mindMap.id, { name: name.trim(), description: description.trim() || null, access });
+        if (res.ok) await taskRepo.updateMindMapOwners(mindMap.id, ownerIds);
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Mapa atualizado.');
+      } else {
+        const res = await taskRepo.createMindMap({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
+        if (!res.ok) { toast.error('Erro: ' + res.message); return; }
+        toast.success('Mapa criado.');
+      }
+      onSaved();
+    } catch (err) {
+      toast.error('Erro inesperado ao salvar: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
       setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Mapa atualizado.');
-    } else {
-      const res = await taskRepo.createMindMap({ name: name.trim(), description: description.trim() || null, access, createdBy: currentUser.id, ownerIds });
-      setIsSaving(false);
-      if (!res.ok) { toast.error('Erro: ' + res.message); return; }
-      toast.success('Mapa criado.');
     }
-    onSaved();
   };
 
   return (
@@ -12317,24 +12678,39 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
       if (filterPriority && task.priority !== filterPriority) return false;
       if (filterAssignee && task.mainAssigneeId !== filterAssignee && !(task.secondaryAssigneeIds || []).includes(filterAssignee)) return false;
       if (filterTag && !(task.tags || []).includes(filterTag)) return false;
-      if (showOnlyOverdue) {
-        if (!task.dueDate) return false;
-        const due = parseLocalDate(task.dueDate);
-        due.setHours(23, 59, 59, 999);
-        if (due >= new Date()) return false;
-      }
+      // isTaskLate (não um check cru de due_date < hoje): mesma classificação
+      // do card "Atrasadas" do Dashboard — sem isso o filtro aqui contava
+      // tarefas concluídas/canceladas/aguardando com prazo vencido como
+      // atrasadas, coisa que o Dashboard corretamente não conta.
+      if (showOnlyOverdue && !isTaskLate(task)) return false;
       return true;
     });
   }, [tasks, boardSearch, filterPriority, filterAssignee, filterTag, showOnlyOverdue, lists]);
+
+  // Contagem de subtarefas por pai, pré-computada uma vez (O(n)) em vez de
+  // um tasks.filter() por CARD renderizado (O(n) por card => O(n²) no total
+  // da coluna) — com milhares de tarefas isso sozinho já é dezenas de
+  // milhões de comparações a cada render do Kanban.
+  const subtaskCountByParentId = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const t of tasks) {
+      if (!t.parentId) continue;
+      map.set(t.parentId, (map.get(t.parentId) || 0) + 1);
+    }
+    return map;
+  }, [tasks]);
 
   const getOrderedColumnTasks = (status: string) => {
     const columnTasks = boardTasks.filter((t: Task) => t.status?.toLowerCase() === status.toLowerCase());
     const savedOrder = localTaskOrder[status] || [];
     if (savedOrder.length === 0) return columnTasks;
     const byId = new Map(columnTasks.map((task: Task) => [task.id, task]));
+    // Set em vez de savedOrder.includes() dentro do filter — .includes() ali
+    // é O(n) por tarefa, virando O(n²) numa coluna reordenada manualmente.
+    const savedOrderSet = new Set(savedOrder);
     return [
       ...savedOrder.map(id => byId.get(id)).filter(Boolean),
-      ...columnTasks.filter((task: Task) => !savedOrder.includes(task.id)),
+      ...columnTasks.filter((task: Task) => !savedOrderSet.has(task.id)),
     ] as Task[];
   };
 
@@ -12538,6 +12914,23 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
     ) : null
   );
 
+  // Sem uma lista específica selecionada, o Kanban tentaria desenhar TODAS as
+  // tarefas visíveis (empresa inteira) numa coluna só — achado real (2026-09):
+  // ~9 mil tarefas, coluna "A Fazer" sozinha com 5.133 cartões, ~20s de
+  // travamento montando esse tanto de DOM de uma vez. Além do custo técnico,
+  // uma coluna com 5 mil cartões não é usável por ninguém de qualquer jeito —
+  // por isso pedir uma lista em vez de tentar renderizar tudo mesmo.
+  if (!activeListId) {
+    return (
+      <div className="flex h-full min-h-0 flex-col items-center justify-center gap-2 px-4 text-center">
+        <p className="text-sm font-semibold text-gray-600">Selecione uma lista para ver o Kanban</p>
+        <p className="max-w-sm text-xs text-gray-400">
+          O quadro Kanban mostra tarefas de uma lista por vez. Escolha uma lista na barra lateral — a visão geral (sem lista selecionada) tentaria juntar as tarefas da empresa inteira numa coluna só, o que trava a tela sem ser útil.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 px-2 pb-4" onClick={(e) => e.stopPropagation()}>
       <div className="flex flex-wrap items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-sm">
@@ -12551,7 +12944,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
             className="h-8 w-full rounded-md border border-gray-200 bg-gray-50 pl-8 pr-3 text-xs outline-none transition focus:border-blue-300 focus:bg-white focus:ring-2 focus:ring-blue-100"
           />
         </div>
-        <select value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 outline-none">
+        <select value={filterPriority} onChange={(e) => setFilterPriority(e.target.value)} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs text-gray-600 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100">
           <option value="">Prioridade</option>
           {Object.values(TaskPriority).map(priority => <option key={priority} value={priority}>{priority}</option>)}
         </select>
@@ -12646,7 +13039,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
                   const editable = canEditTask(task);
                   const isDragging = draggingTaskId === task.id;
                   const listName = lists?.find((l: any) => l.id === task.listId)?.name;
-                  const subtaskCount = tasks.filter((t: Task) => t.parentId === task.id).length;
+                  const subtaskCount = subtaskCountByParentId.get(task.id) || 0;
                   const completedChecklist = (task.checklists || []).filter((item: ChecklistItem) => item.completed).length;
                   const assignee = users?.find((u: User) => u.id === task.mainAssigneeId);
                   const secondaryAssignees = (task.secondaryAssigneeIds || [])
@@ -12654,11 +13047,13 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
                     .filter(Boolean);
                   const allAssignees = [assignee, ...secondaryAssignees].filter(Boolean);
                   const hasDueDate = task.dueDate && !isNaN(parseLocalDate(task.dueDate).getTime());
-                  const dueEnd = hasDueDate ? parseLocalDate(task.dueDate) : null;
-                  if (dueEnd) dueEnd.setHours(23, 59, 59, 999);
-                  const isOverdue = !!dueEnd && dueEnd < new Date() && !isDoneLikeStatus(task.status || '');
-                  const priorityFlag = PRIORITY_FLAG[task.priority];
                   const h = getTaskHealth(task);
+                  // Mesma classificação do card "Atrasadas" do Dashboard (h?.emoji
+                  // === '😡') — antes usava um check próprio que não excluía
+                  // status cancelado/aguardando, contando mais tarefas como
+                  // atrasadas aqui do que no Dashboard.
+                  const isOverdue = h?.emoji === '😡';
+                  const priorityFlag = PRIORITY_FLAG[task.priority];
                   const isQuickEditing = quickEditTaskId === task.id && quickDraft;
 
                   return (
@@ -12789,7 +13184,7 @@ function KanbanView({ tasks, onSelectTask, onStatusChange, onQuickUpdateTask, on
                               <select value={quickDraft.priority} onChange={(e) => setQuickDraft({ ...quickDraft, priority: e.target.value as TaskPriority })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs">
                                 {Object.values(TaskPriority).map(priority => <option key={priority} value={priority}>{priority}</option>)}
                               </select>
-                              <input type="date" value={quickDraft.dueDate || ''} onChange={(e) => setQuickDraft({ ...quickDraft, dueDate: e.target.value })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs" />
+                              <DateFieldEditor value={quickDraft.dueDate || ''} onCommit={(v) => setQuickDraft({ ...quickDraft, dueDate: v })} className="h-8 rounded-md border border-gray-200 bg-white px-2 text-xs" ariaLabel="Prazo" />
                             </div>
                             <select value={quickDraft.mainAssigneeId} onChange={(e) => setQuickDraft({ ...quickDraft, mainAssigneeId: e.target.value })} className="h-8 w-full rounded-md border border-gray-200 bg-white px-2 text-xs">
                               {availableUsers.map((user: User) => <option key={user.id} value={user.id}>{user.name}</option>)}
@@ -13268,7 +13663,7 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
                   : (a.newValue || '').toLowerCase().includes('cancel') ? '#6b7280'
                   : '#f59e0b';
                 const dt = new Date(a.createdAt);
-                const label = dt.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+                const label = formatDayMonthNumericBR(dt);
                 return (
                   <div key={i} className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-50 transition-colors">
                     <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: statusColor }} />
@@ -13293,6 +13688,10 @@ function DashboardView({ tasks, users, statusGroups, activeListId, lists, allLis
   );
 }
 
+// ErrorSummary agora vive em ./components/ui/error-summary (issue #102 /
+// achado 8 da auditoria: extração progressiva de componentes autocontidos
+// pra fora deste arquivo) — importado no topo.
+
 function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, initialScope, activeListId, currentUser, prefilledData, additionalTasks, statusGroups }: any) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -13305,6 +13704,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
   const [duration, setDuration] = useState('');
   const [dueDate, setDueDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitErrors, setSubmitErrors] = useState<{ id: string; message: string }[]>([]);
   const todayLabel = new Date().toLocaleDateString('pt-BR');
 
   // Esc fecha este modal (não tinha nenhum jeito de fechar por teclado antes).
@@ -13459,26 +13859,23 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
     // cliques são ignorados (evita criar a mesma tarefa várias vezes).
     if (isSubmitting) return;
 
-    if (!title.trim()) {
-      toast.error('Informe o nome da tarefa.');
-      return;
-    }
-
-    if (durationError) {
-      toast.error(durationError);
-      return;
-    }
-
+    // Junta todos os erros de uma vez (em vez de parar no primeiro) para
+    // alimentar o Error Summary — o usuário vê e corrige tudo numa só volta.
+    const errors: { id: string; message: string }[] = [];
+    if (!title.trim()) errors.push({ id: 'task-title', message: 'Informe o nome da tarefa.' });
+    if (durationError) errors.push({ id: 'task-duration', message: durationError });
     // Se uma pasta foi escolhida mas não existe lista, direcionamos o usuário a criar uma lista primeiro.
     if (selectedFolderId && availableLists.length === 0) {
-      toast.error('Esta pasta ainda não tem listas. Crie uma lista na sidebar e depois crie a tarefa.');
-      return;
+      errors.push({ id: 'task-folder', message: 'Esta pasta ainda não tem listas. Crie uma lista na sidebar e depois crie a tarefa.' });
+    } else if (!selectedListId) {
+      errors.push({ id: 'task-list', message: 'Selecione um Espaço, Pasta e Lista antes de criar a tarefa.' });
     }
 
-    if (!selectedListId) {
-      toast.error('Selecione um Espaço, Pasta e Lista antes de criar a tarefa.');
+    if (errors.length > 0) {
+      setSubmitErrors(errors);
       return;
     }
+    setSubmitErrors([]);
 
     setIsSubmitting(true);
     try {
@@ -13521,6 +13918,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 custom-scrollbar space-y-6">
+          <ErrorSummary errors={submitErrors} />
           {/* Hierarchy Selection */}
           <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 rounded-xl border ${!selectedListId ? 'bg-amber-50 border-amber-200' : 'bg-gray-50 border-gray-100'}`}>
             {!selectedListId && (
@@ -13545,6 +13943,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className={`text-xs font-bold uppercase ${selectedSpaceId && !selectedFolderId ? 'text-amber-600' : 'text-gray-400'}`}>Pasta *</label>
               <select
+                id="task-folder"
                 required
                 aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedSpaceId && !selectedFolderId ? 'border-amber-300' : ''}`}
@@ -13559,6 +13958,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div className="sm:col-span-2">
               <label className={`text-xs font-bold uppercase ${selectedFolderId && !selectedListId ? 'text-amber-600' : 'text-gray-400'}`}>Lista *</label>
               <select
+                id="task-list"
                 required
                 aria-required="true"
                 className={`w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none ${selectedFolderId && !selectedListId ? 'border-amber-300' : ''}`}
@@ -13576,6 +13976,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
             <div>
               <label className="text-xs font-bold text-gray-400 uppercase">Nome da Tarefa *</label>
               <input
+                id="task-title"
                 type="text"
                 required
                 aria-required="true"
@@ -13669,6 +14070,7 @@ function CreateTaskModal({ onClose, onCreate, users, spaces, folders, lists, ini
                 <div>
                   <label className="text-xs font-bold text-gray-400 uppercase">Duração (dias ou horas)</label>
                   <input
+                    id="task-duration"
                     type="text"
                     placeholder="Ex: 5 ou 3h"
                     aria-invalid={!!durationError}
@@ -13747,6 +14149,10 @@ function TaskDetailModal(props: any) {
     onUpdateFieldValue,
     onManageFields,
     hiddenTaskFieldIdsByList,
+    onHideTaskFieldForList,
+    onCreateField,
+    onUpdateField,
+    onDeleteField,
     onDelete,
     onDuplicate,
     onArchive,
@@ -13883,7 +14289,15 @@ function TaskDetailModal(props: any) {
         id: 'creation',
         unifiedType: 'CREATION',
         date: task.createdAt,
-        text: creator ? `${creator} criou esta tarefa` : 'Tarefa criada'
+        text: creator ? `${creator} criou esta tarefa` : 'Tarefa importada',
+        // Tarefas sem created_by não passaram pelo fluxo normal de criação do
+        // app — foram inseridas direto no banco por uma migração/import.
+        // Confirmado por auditoria em 2026-09-03 (issue #102, achado 2): o
+        // created_at delas bate com o horário do import (picos de milhares de
+        // tarefas no mesmo minuto, timestamps redondos), não com a criação
+        // real. Mostrar essa data como "criada em" seria inventar precisão
+        // que não existe — o timeline mostra o rótulo sem data nesse caso.
+        dateUnreliable: !creator,
       });
     }
     return all.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
@@ -13927,23 +14341,16 @@ function TaskDetailModal(props: any) {
     ).length;
     const extensions = (task.extensionHistory || []).length;
     const comments = (task.comments || []).length;
-    const daysOpen = task.createdAt
+    // Tarefas importadas (sem created_by, ver comentário na timeline acima)
+    // têm created_at igual à data do import, não da criação real — "aberta
+    // há N dias" contado a partir daí mentiria sobre a idade da tarefa.
+    const daysOpen = task.createdAt && task.createdBy
       ? Math.max(0, Math.floor((Date.now() - new Date(task.createdAt).getTime()) / 86400000))
       : null;
     return { statusChanges, priorityChanges, assigneeChanges, extensions, comments, daysOpen };
-  }, [task.activities, task.extensionHistory, task.comments, task.createdAt]);
+  }, [task.activities, task.extensionHistory, task.comments, task.createdAt, task.createdBy]);
 
-  const formatDate = (date: string) => {
-    if (!date) return '';
-    const d = new Date(date);
-    return d.toLocaleString('pt-BR', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).replace(' de ', ' ').replace('.', '');
-  };
+  const formatDate = formatDateTimeLongCleanBR;
 
   const taskCustomFields = useMemo(() => {
     // Respeita os campos ocultados por lista (toggles de "Adicionar um
@@ -13956,6 +14363,111 @@ function TaskDetailModal(props: any) {
       !hiddenForList.includes(f.id)
     );
   }, [customFields, currentUser.role, task.listId, hiddenTaskFieldIdsByList]);
+
+  // Issue #97 (MVP): "Adicionar um existente" do modal "Gerenciar Campos
+  // Personalizados", trazido pra dentro da própria seção — sem duplicar a
+  // regra de escopo, é o mesmo array de ocultos por lista que já existe.
+  const [addFieldSearch, setAddFieldSearch] = useState('');
+  const availableFieldsToAdd = useMemo(() => {
+    const hiddenForList: string[] = (task.listId && hiddenTaskFieldIdsByList?.[task.listId]) || [];
+    const query = addFieldSearch.trim().toLowerCase();
+    return (customFields || [])
+      .filter((f: CustomField) =>
+        f.target === 'TASK' &&
+        (f.visibleTo ?? []).includes(currentUser.role) &&
+        hiddenForList.includes(f.id) &&
+        (!query || f.name.toLowerCase().includes(query))
+      )
+      .sort((a: CustomField, b: CustomField) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [customFields, currentUser.role, task.listId, hiddenTaskFieldIdsByList, addFieldSearch]);
+
+  // Issue #97 (resto do escopo): criar/editar campo direto na seção,
+  // reaproveitando o mesmo formulário do modal (CustomFieldFormFields) e os
+  // mesmos handlers (onCreateField/onUpdateField) que "Gerenciar Campos
+  // Personalizados" já usa — sem lógica de negócio nova, só uma UI inline
+  // pra essas ações. Remover da lista (onHideTaskFieldForList, já usado
+  // acima) e excluir (onDeleteField) ficam diretos por linha, sem precisar
+  // de estado de formulário.
+  //
+  // Reordenar (onReorderField) NÃO foi exposto aqui: é uma reordenação
+  // GLOBAL (todas as listas, não por lista) e só em memória — nunca
+  // persistida (comentário no próprio handleReorderField admite ser
+  // "protótipo"), e hoje não é chamado por NENHUMA UI (nem o modal
+  // "Gerenciar campos" tem botão de mover). Expor isso aqui, numa visão
+  // filtrada por lista, quebraria de um jeito sutil: mover "para cima"
+  // trocaria de posição com o vizinho GLOBAL, que pode ser um campo oculto
+  // nesta lista — o clique pareceria não fazer nada. Implementar direito
+  // exige uma ordem por lista persistida no banco, fora do escopo de reuso
+  // desta issue (que pede reaproveitar o que já existe, não construir
+  // mecanismo novo).
+  const [fieldFormMode, setFieldFormMode] = useState<'closed' | 'create' | 'edit'>('closed');
+  const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
+  const [fieldFormName, setFieldFormName] = useState('');
+  const [fieldFormType, setFieldFormType] = useState<CustomFieldType>(CustomFieldType.TEXT);
+  const [fieldFormOptions, setFieldFormOptions] = useState<CustomFieldOption[]>([]);
+  const [fieldFormOptionSearch, setFieldFormOptionSearch] = useState('');
+  const [fieldFormFormula, setFieldFormFormula] = useState('');
+  const [fieldFormCurrency, setFieldFormCurrency] = useState('R$');
+  const [isSavingField, setIsSavingField] = useState(false);
+
+  const openCreateFieldForm = () => {
+    setEditingFieldId(null);
+    setFieldFormName('');
+    setFieldFormType(CustomFieldType.TEXT);
+    setFieldFormOptions([]);
+    setFieldFormOptionSearch('');
+    setFieldFormFormula('');
+    setFieldFormCurrency('R$');
+    setFieldFormMode('create');
+  };
+
+  const openEditFieldForm = (field: CustomField) => {
+    setEditingFieldId(field.id);
+    setFieldFormName(field.name);
+    setFieldFormType(field.type);
+    setFieldFormOptions(field.config?.options || []);
+    setFieldFormFormula(field.config?.formula || '');
+    setFieldFormCurrency(field.config?.currency || 'R$');
+    setFieldFormMode('edit');
+  };
+
+  const closeFieldForm = () => setFieldFormMode('closed');
+
+  const handleSaveInlineField = async () => {
+    if (!fieldFormName.trim()) return;
+    setIsSavingField(true);
+    try {
+      const config = buildCustomFieldConfig(fieldFormType, fieldFormOptions, fieldFormFormula, fieldFormCurrency);
+      if (editingFieldId) {
+        const existingField = (customFields || []).find((f: CustomField) => f.id === editingFieldId);
+        await onUpdateField?.({ ...existingField, name: fieldFormName.trim(), type: fieldFormType, config });
+      } else {
+        const created = await onCreateField?.({
+          id: Math.random().toString(36).substr(2, 9),
+          name: fieldFormName.trim(),
+          type: fieldFormType,
+          target: 'TASK',
+          config,
+          isMandatory: false,
+          visibleTo: [UserRole.ADMIN, UserRole.GESTOR, UserRole.COLABORADOR],
+          createdBy: currentUser.id,
+          createdAt: new Date().toISOString(),
+        });
+        // Critério de aceite da issue: o campo criado aparece imediatamente
+        // aqui. handleCreateField oculta campo novo em TODAS as listas por
+        // padrão (opt-in) — sem isso, "criar" pareceria não ter feito nada
+        // nesta tela.
+        if (created && task.listId && onHideTaskFieldForList) {
+          onHideTaskFieldForList(task.listId, created.id);
+        }
+      }
+      closeFieldForm();
+    } catch {
+      toast.error('Não foi possível salvar o campo personalizado.');
+    } finally {
+      setIsSavingField(false);
+    }
+  };
 
   // Registro de atividade é auxiliar (histórico/auditoria) — nunca deve impedir
   // a mudança real (status, prioridade, responsável) de acontecer. Antes, uma
@@ -13979,15 +14491,14 @@ function TaskDetailModal(props: any) {
     const autoDeliveryDate = (!isDoneLikeStatus(task.status) && isDoneLikeStatus(status) && !task.actualDeliveryDate)
       ? new Date().toISOString().slice(0, 10)
       : task.actualDeliveryDate;
-    // Só registra no histórico se a mudança foi realmente gravada.
-    const ok = await onUpdate({ ...task, status, actualDeliveryDate: autoDeliveryDate });
-    if (ok !== false) logActivitySafe(task.id, 'STATUS_CHANGE', task.status, status);
+    onUpdate({ ...task, status, actualDeliveryDate: autoDeliveryDate });
+    logActivitySafe(task.id, 'STATUS_CHANGE', task.status, status);
   };
 
   const handleUpdatePriority = async (priority: TaskPriority) => {
     if (priority === task.priority) return;
-    const ok = await onUpdate({ ...task, priority });
-    if (ok !== false) logActivitySafe(task.id, 'PRIORITY_CHANGE', task.priority, priority);
+    onUpdate({ ...task, priority });
+    logActivitySafe(task.id, 'PRIORITY_CHANGE', task.priority, priority);
   };
 
   // Issue #187 (Workload/Capacidade) — alimenta get_workload_summary.
@@ -14283,8 +14794,8 @@ function TaskDetailModal(props: any) {
             context={[
               `Título: ${task.title}`,
               `Status: ${task.status} | Prioridade: ${task.priority}`,
-              task.startDate ? `Início: ${parseLocalDate(task.startDate).toLocaleDateString('pt-BR')}` : '',
-              task.dueDate ? `Prazo: ${parseLocalDate(task.dueDate).toLocaleDateString('pt-BR')}` : '',
+              task.startDate ? `Início: ${formatDateBR(task.startDate)}` : '',
+              task.dueDate ? `Prazo: ${formatDateBR(task.dueDate)}` : '',
               `Responsável: ${users?.find((u: User) => u.id === task.mainAssigneeId)?.name || 'Sem responsável'}`,
               (task.secondaryAssigneeIds || []).length > 0
                 ? `Acompanhantes: ${(task.secondaryAssigneeIds || []).map((id: string) => users?.find((u: User) => u.id === id)?.name).filter(Boolean).join(', ')}`
@@ -14486,8 +14997,8 @@ function TaskDetailModal(props: any) {
                       <p className={`text-sm font-semibold ${h.text}`}>{name} está: {h.label}</p>
                       {task.dueDate && (
                         <p className={`text-xs mt-0.5 ${h.text} opacity-75`}>
-                          Prazo: {parseLocalDate(task.dueDate).toLocaleDateString('pt-BR')}
-                          {task.startDate && ` · Início: ${parseLocalDate(task.startDate).toLocaleDateString('pt-BR')}`}
+                          Prazo: {formatDateBR(task.dueDate)}
+                          {task.startDate && ` · Início: ${formatDateBR(task.startDate)}`}
                         </p>
                       )}
                     </div>
@@ -14773,21 +15284,116 @@ function TaskDetailModal(props: any) {
                   <section>
                     <div className="flex items-center justify-between mb-6">
                       <h3 className="text-sm font-bold text-gray-900">Campos personalizados</h3>
-                      {!isReadOnly && onManageFields && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
-                        <button
-                          type="button"
-                          onClick={() => onManageFields(task.listId)}
-                          className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
-                          title="Criar, adicionar, mostrar/ocultar e reordenar campos desta lista"
-                        >
-                          <Icons.Settings className="w-3.5 h-3.5" />
-                          Gerenciar campos
-                        </button>
+                      {!isReadOnly && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) && (
+                        <div className="flex items-center gap-3">
+                          {onCreateField && (
+                            <Popover open={fieldFormMode === 'create'} onOpenChange={(open) => { if (!open) closeFieldForm(); else openCreateFieldForm(); }}>
+                              <PopoverTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
+                                  title="Criar um novo campo personalizado"
+                                >
+                                  <Icons.Plus className="w-3.5 h-3.5" />
+                                  Criar campo
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent align="end" className="w-80 max-h-[70vh] overflow-y-auto space-y-4" onClick={(e) => e.stopPropagation()}>
+                                <h4 className="font-bold text-gray-800 text-sm">Criar Novo Campo</h4>
+                                <CustomFieldFormFields
+                                  name={fieldFormName} setName={setFieldFormName}
+                                  type={fieldFormType} setType={setFieldFormType}
+                                  options={fieldFormOptions} setOptions={setFieldFormOptions}
+                                  optionSearch={fieldFormOptionSearch} setOptionSearch={setFieldFormOptionSearch}
+                                  formula={fieldFormFormula} setFormula={setFieldFormFormula}
+                                  currencySymbol={fieldFormCurrency} setCurrencySymbol={setFieldFormCurrency}
+                                />
+                                <div className="flex justify-end gap-2 pt-2 border-t">
+                                  <button type="button" onClick={closeFieldForm} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded font-medium">Cancelar</button>
+                                  <button type="button" onClick={handleSaveInlineField} disabled={!fieldFormName.trim() || isSavingField} className="px-3 py-1.5 text-xs bg-[var(--primary-color)] text-[#2c3e50] font-bold rounded hover:shadow-md disabled:opacity-50 transition-all">
+                                    {isSavingField ? 'Salvando...' : 'Criar Campo'}
+                                  </button>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
+                          )}
+                          {onHideTaskFieldForList && task.listId && (
+                            <DropdownMenu onOpenChange={(open: boolean) => { if (!open) setAddFieldSearch(''); }}>
+                              <DropdownMenuTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
+                                  title="Adicionar um campo personalizado já existente a esta lista"
+                                >
+                                  <Icons.Plus className="w-3.5 h-3.5" />
+                                  Adicionar campo
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-64">
+                                <div className="sticky top-0 z-10 bg-popover p-1">
+                                  <input
+                                    type="text"
+                                    autoFocus
+                                    value={addFieldSearch}
+                                    onChange={(e) => setAddFieldSearch(e.target.value)}
+                                    onKeyDown={(e) => e.stopPropagation()}
+                                    onClick={(e) => e.stopPropagation()}
+                                    placeholder="Pesquisar campo existente..."
+                                    className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                                  />
+                                </div>
+                                <div className="max-h-64 overflow-y-auto">
+                                  {availableFieldsToAdd.length === 0 ? (
+                                    <div className="px-2 py-3 text-xs text-gray-400 text-center">
+                                      {addFieldSearch.trim()
+                                        ? 'Nenhum campo encontrado.'
+                                        : 'Todos os campos existentes já estão nesta lista.'}
+                                    </div>
+                                  ) : (
+                                    availableFieldsToAdd.map((field: CustomField) => (
+                                      <DropdownMenuItem
+                                        key={field.id}
+                                        className="text-xs"
+                                        onSelect={(e) => {
+                                          // preventDefault mantém o menu aberto: dá pra adicionar
+                                          // vários campos seguidos sem reabrir o dropdown a cada um.
+                                          e.preventDefault();
+                                          onHideTaskFieldForList(task.listId, field.id);
+                                        }}
+                                      >
+                                        {field.name}
+                                      </DropdownMenuItem>
+                                    ))
+                                  )}
+                                </div>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  className="text-xs text-gray-500"
+                                  onSelect={(e) => { e.preventDefault(); onManageFields?.(task.listId); }}
+                                >
+                                  Criar novo campo ou gerenciar todos...
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                          {onManageFields && (
+                            <button
+                              type="button"
+                              onClick={() => onManageFields(task.listId)}
+                              className="flex items-center gap-1.5 text-xs font-bold text-orange-500 hover:text-orange-600 hover:underline transition-colors"
+                              title="Criar, adicionar, mostrar/ocultar e reordenar campos desta lista"
+                            >
+                              <Icons.Settings className="w-3.5 h-3.5" />
+                              Gerenciar campos
+                            </button>
+                          )}
+                        </div>
                       )}
                     </div>
                     <div className="space-y-6">
                       {(taskCustomFields || []).map((field: CustomField) => {
                         const currentValue = (fieldValues || []).find(v => v.fieldId === field.id && v.entityId === task.id)?.value;
+                        const canManage = !isReadOnly && (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR);
                         return (
                           <div key={field.id} className="flex items-center gap-12 group">
                             <span className="w-48 flex items-center gap-2 text-sm text-gray-400 group-hover:text-gray-600 transition-colors">
@@ -14809,6 +15415,40 @@ function TaskDetailModal(props: any) {
                                 }}
                               />
                             </div>
+                            {canManage && (
+                              <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
+                                {(onCreateField || onUpdateField) && (
+                                  <Popover open={fieldFormMode === 'edit' && editingFieldId === field.id} onOpenChange={(open) => { if (!open) closeFieldForm(); else openEditFieldForm(field); }}>
+                                    <PopoverTrigger asChild>
+                                      <button type="button" className="p-1 text-gray-400 hover:text-blue-500" title="Editar configurações do campo"><Icons.Edit className="w-3.5 h-3.5" /></button>
+                                    </PopoverTrigger>
+                                    <PopoverContent align="end" className="w-80 max-h-[70vh] overflow-y-auto space-y-4" onClick={(e) => e.stopPropagation()}>
+                                      <h4 className="font-bold text-gray-800 text-sm">Editar Campo</h4>
+                                      <CustomFieldFormFields
+                                        name={fieldFormName} setName={setFieldFormName}
+                                        type={fieldFormType} setType={setFieldFormType}
+                                        options={fieldFormOptions} setOptions={setFieldFormOptions}
+                                        optionSearch={fieldFormOptionSearch} setOptionSearch={setFieldFormOptionSearch}
+                                        formula={fieldFormFormula} setFormula={setFieldFormFormula}
+                                        currencySymbol={fieldFormCurrency} setCurrencySymbol={setFieldFormCurrency}
+                                      />
+                                      <div className="flex justify-end gap-2 pt-2 border-t">
+                                        <button type="button" onClick={closeFieldForm} className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded font-medium">Cancelar</button>
+                                        <button type="button" onClick={handleSaveInlineField} disabled={!fieldFormName.trim() || isSavingField} className="px-3 py-1.5 text-xs bg-blue-600 text-white font-bold rounded hover:shadow-md disabled:opacity-50 transition-all">
+                                          {isSavingField ? 'Salvando...' : 'Salvar Alterações'}
+                                        </button>
+                                      </div>
+                                    </PopoverContent>
+                                  </Popover>
+                                )}
+                                {onHideTaskFieldForList && task.listId && (
+                                  <button type="button" onClick={() => onHideTaskFieldForList(task.listId, field.id)} className="p-1 text-gray-400 hover:text-amber-500" title="Remover desta lista (o campo continua existindo, só some daqui)"><Icons.EyeOff className="w-3.5 h-3.5" /></button>
+                                )}
+                                {onDeleteField && (
+                                  <button type="button" onClick={() => onDeleteField(field.id)} className="p-1 text-gray-400 hover:text-red-500" title="Excluir campo permanentemente (todas as listas e tarefas)"><Icons.Trash className="w-3.5 h-3.5" /></button>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -14934,7 +15574,7 @@ function TaskDetailModal(props: any) {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-bold text-gray-900 truncate">{linkifyText(attachment.name)}</p>
-                          <p className="text-[10px] text-gray-500">{formatFileSize(attachment.size)} • {new Date(attachment.uploadedAt).toLocaleDateString()}</p>
+                          <p className="text-[10px] text-gray-500">{formatFileSize(attachment.size)} • {formatDateBR(attachment.uploadedAt)}</p>
                         </div>
                         <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                           <a href={attachment.url} target="_blank" rel="noopener noreferrer" className="p-2 hover:bg-white rounded-lg text-gray-400 hover:text-gray-600 transition-colors">
@@ -15096,7 +15736,13 @@ function TaskDetailModal(props: any) {
                         <div className="absolute -left-[22px] top-1.5 w-2 h-2 rounded-full bg-gray-200 border-2 border-white shadow-sm"></div>
                         <div className="text-xs">
                           <span className="text-gray-500">{item.text}</span>
-                          <span className="text-gray-300 ml-2">{formatDate(item.date)}</span>
+                          {item.dateUnreliable ? (
+                            <span className="text-gray-300 ml-2" title="Tarefa migrada de outro sistema — a data de criação original não está disponível.">
+                              (data de criação original indisponível)
+                            </span>
+                          ) : (
+                            <span className="text-gray-300 ml-2">{formatDate(item.date)}</span>
+                          )}
                         </div>
                       </div>
                     );
@@ -15321,6 +15967,199 @@ const PRESET_COLORS = [
   '#fbcfe8', '#f472b6', '#ec4899', '#db2777', '#be185d', // Pinks
 ];
 
+// Issue #97: config de cada campo depende do tipo — regra de negócio única,
+// usada tanto pelo modal "Gerenciar Campos Personalizados" quanto pela
+// criação/edição inline na tela de detalhes da tarefa, pra não duas
+// implementações divergirem sobre "que shape de config cada tipo salva".
+function buildCustomFieldConfig(type: CustomFieldType, options: CustomFieldOption[], formula: string, currencySymbol: string) {
+  if (type === CustomFieldType.DROPDOWN) return { options: options.filter((o) => o.label.trim() !== '') };
+  if (type === CustomFieldType.FORMULA) return { formula };
+  if (type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) return { currency: currencySymbol.trim() || 'R$' };
+  return undefined;
+}
+
+// Issue #97: nome + tipo + configuração específica do tipo (opções da lista,
+// fórmula, símbolo de moeda) — o "miolo" do formulário de criar/editar campo,
+// extraído do modal "Gerenciar Campos Personalizados" pra ser consumido
+// também pela criação/adição inline na tela de detalhes da tarefa, sem
+// duplicar a UI de opções (drag/cor/exclusão) nem a de fórmula/moeda.
+function CustomFieldFormFields({
+  name, setName, type, setType, options, setOptions, optionSearch, setOptionSearch, formula, setFormula, currencySymbol, setCurrencySymbol,
+}: {
+  name: string; setName: (v: string) => void;
+  type: CustomFieldType; setType: (v: CustomFieldType) => void;
+  options: CustomFieldOption[]; setOptions: (v: CustomFieldOption[]) => void;
+  optionSearch: string; setOptionSearch: (v: string) => void;
+  formula: string; setFormula: (v: string) => void;
+  currencySymbol: string; setCurrencySymbol: (v: string) => void;
+}) {
+  const handleAddOption = (label: string) => {
+    if (!label.trim()) return;
+    const newOption: CustomFieldOption = {
+      id: Math.random().toString(36).substr(2, 9),
+      label: label.trim(),
+      color: PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)]
+    };
+    setOptions([...options, newOption]);
+    setOptionSearch('');
+  };
+
+  const updateOption = (id: string, updates: Partial<CustomFieldOption>) => {
+    setOptions(options.map(o => o.id === id ? { ...o, ...updates } : o));
+  };
+
+  const removeOption = (id: string) => {
+    setOptions(options.filter(o => o.id !== id));
+  };
+
+  return (
+    <>
+      <div>
+        <label className="text-xs font-bold text-gray-500 uppercase">Nome do Campo</label>
+        <input
+          type="text"
+          className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Ex: Orçamento Estimado"
+        />
+      </div>
+      <div>
+        <label className="text-xs font-bold text-gray-500 uppercase">Tipo de Dado</label>
+        <select
+          className="w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+          value={type}
+          onChange={(e) => setType(e.target.value as CustomFieldType)}
+        >
+          {Object.values(CustomFieldType).map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+      </div>
+
+      {type === CustomFieldType.DROPDOWN && (
+        <div className="space-y-3 bg-gray-50 p-4 rounded-lg border border-gray-100">
+          <div className="space-y-4">
+            <label className="text-xs font-bold text-gray-500 uppercase">Opções da Lista</label>
+
+            {/* Quick Add Input */}
+            <div className="relative">
+              <input
+                type="text"
+                className="w-full p-2.5 pl-3 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none shadow-sm transition-all"
+                placeholder="Pesquise ou adicione opções..."
+                value={optionSearch}
+                onChange={(e) => setOptionSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleAddOption(optionSearch);
+                  }
+                }}
+              />
+              {optionSearch.trim() && !options.some(o => o.label.toLowerCase() === optionSearch.toLowerCase()) && (
+                <button
+                  onClick={() => handleAddOption(optionSearch)}
+                  className="absolute right-2 top-2 px-2 py-0.5 bg-gray-100 hover:bg-gray-200 rounded text-[10px] font-bold text-gray-600 transition-colors"
+                >
+                  Enter para adicionar
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-1.5 max-h-60 overflow-y-auto custom-scrollbar pr-1">
+              {options.map((opt, idx) => (
+                <div key={opt.id} className="flex items-center gap-2 group/opt animate-in slide-in-from-left duration-200" style={{ '--delay': `${idx * 40}ms` } as any}>
+                  <div className="p-1 cursor-grab active:cursor-grabbing text-gray-300">
+                    <Icons.Grip size={14} />
+                  </div>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className="flex-1 py-1.5 px-4 rounded font-bold text-white text-xs text-center shadow-sm hover:brightness-95 active:scale-[0.98] transition-all truncate"
+                        style={{ backgroundColor: opt.color }}
+                      >
+                        {opt.label}
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent className="p-4 w-64 shadow-2xl rounded-xl border-gray-200 z-[250]" align="center" side="right">
+                      <div className="space-y-4">
+                        <input
+                          type="text"
+                          value={opt.label}
+                          onChange={(e) => updateOption(opt.id, { label: e.target.value })}
+                          className="w-full p-2 border border-orange-500 rounded-lg text-sm font-medium focus:ring-0 outline-none"
+                          autoFocus
+                        />
+
+                        <div className="grid grid-cols-6 gap-2">
+                          {PRESET_COLORS.map(c => (
+                            <button
+                              key={c}
+                              onClick={() => updateOption(opt.id, { color: c })}
+                              className={`w-6 h-6 rounded-full border transition-all hover:scale-125 ${opt.color === c ? 'ring-2 ring-offset-2 ring-blue-500 scale-125 z-10' : 'border-transparent'}`}
+                              style={{ backgroundColor: c }}
+                            />
+                          ))}
+                        </div>
+
+                        <div className="pt-2 border-t">
+                          <button
+                            onClick={() => removeOption(opt.id)}
+                            className="w-full flex items-center justify-center gap-2 py-2 text-xs font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          >
+                            <Icons.Trash size={14} />
+                            Excluir
+                          </button>
+                        </div>
+                      </div>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ))}
+              {options.length === 0 && (
+                <div className="text-center py-8 border-2 border-dashed border-gray-100 rounded-xl bg-white/50">
+                  <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">
+                    Nenhuma opção definida
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {type === CustomFieldType.FORMULA && (
+        <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+          <label className="text-xs font-bold text-gray-500 uppercase">Fórmula</label>
+          <input
+            type="text"
+            className="w-full p-2 border rounded text-sm font-mono focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+            value={formula}
+            onChange={(e) => setFormula(e.target.value)}
+            placeholder="Ex: {{Preço}} * {{Quantidade}}"
+          />
+          <p className="text-[11px] text-gray-400">
+            Use <code className="bg-white border rounded px-1">{'{{Nome do Campo}}'}</code> para referenciar outros campos numéricos da tarefa. Calculado automaticamente, não é editável.
+          </p>
+        </div>
+      )}
+
+      {(type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) && (
+        <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
+          <label className="text-xs font-bold text-gray-500 uppercase">Símbolo da Moeda</label>
+          <input
+            type="text"
+            className="w-24 p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
+            value={currencySymbol}
+            onChange={(e) => setCurrencySymbol(e.target.value)}
+            placeholder="R$"
+            maxLength={5}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
 function CustomFieldsManager(props: any) {
   const {
     onClose,
@@ -15374,25 +16213,6 @@ function CustomFieldsManager(props: any) {
     return (hiddenStandardColumnKeysByList[activeListId] || []).includes(key);
   };
 
-  const handleAddOption = (label: string) => {
-    if (!label.trim()) return;
-    const newOption: CustomFieldOption = {
-      id: Math.random().toString(36).substr(2, 9),
-      label: label.trim(),
-      color: PRESET_COLORS[Math.floor(Math.random() * PRESET_COLORS.length)]
-    };
-    setOptions([...options, newOption]);
-    setOptionSearch('');
-  };
-
-  const updateOption = (id: string, updates: Partial<CustomFieldOption>) => {
-    setOptions(options.map(o => o.id === id ? { ...o, ...updates } : o));
-  };
-
-  const removeOption = (id: string) => {
-    setOptions(options.filter(o => o.id !== id));
-  };
-
   const startEditing = (field: CustomField) => {
     setEditingFieldId(field.id);
     setName(field.name);
@@ -15414,11 +16234,7 @@ function CustomFieldsManager(props: any) {
 
   const handleSave = () => {
     if (!name) return;
-    const config =
-      type === CustomFieldType.DROPDOWN ? { options: options.filter(o => o.label.trim() !== '') } :
-      type === CustomFieldType.FORMULA ? { formula } :
-      (type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) ? { currency: currencySymbol.trim() || 'R$' } :
-      undefined;
+    const config = buildCustomFieldConfig(type, options, formula, currencySymbol);
     const fieldData: any = {
       name,
       type,
@@ -15572,148 +16388,14 @@ function CustomFieldsManager(props: any) {
               <h4 className="font-bold text-gray-800 text-sm">
                 {editingFieldId ? 'Editar Campo' : 'Criar Novo Campo'}
               </h4>
-              <div>
-                <label className="text-xs font-bold text-gray-500 uppercase">Nome do Campo</label>
-                <input
-                  type="text"
-                  className="w-full p-2 border rounded mt-1 text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Ex: Orçamento Estimado"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-gray-500 uppercase">Tipo de Dado</label>
-                <select
-                  className="w-full p-2 border rounded mt-1 text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                  value={type}
-                  onChange={(e) => setType(e.target.value as CustomFieldType)}
-                >
-                  {Object.values(CustomFieldType).map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-
-              {type === CustomFieldType.DROPDOWN && (
-                <div className="space-y-3 bg-gray-50 p-4 rounded-lg border border-gray-100">
-                  <div className="space-y-4">
-                    <label className="text-xs font-bold text-gray-500 uppercase">Opções da Lista</label>
-
-                    {/* Quick Add Input */}
-                    <div className="relative">
-                      <input
-                        type="text"
-                        className="w-full p-2.5 pl-3 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-[var(--primary-color)] outline-none shadow-sm transition-all"
-                        placeholder="Pesquise ou adicione opções..."
-                        value={optionSearch}
-                        onChange={(e) => setOptionSearch(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            handleAddOption(optionSearch);
-                          }
-                        }}
-                      />
-                      {optionSearch.trim() && !options.some(o => o.label.toLowerCase() === optionSearch.toLowerCase()) && (
-                        <button
-                          onClick={() => handleAddOption(optionSearch)}
-                          className="absolute right-2 top-2 px-2 py-0.5 bg-gray-100 hover:bg-gray-200 rounded text-[10px] font-bold text-gray-600 transition-colors"
-                        >
-                          Enter para adicionar
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="space-y-1.5 max-h-60 overflow-y-auto custom-scrollbar pr-1">
-                      {options.map((opt, idx) => (
-                        <div key={opt.id} className="flex items-center gap-2 group/opt animate-in slide-in-from-left duration-200" style={{ '--delay': `${idx * 40}ms` } as any}>
-                          <div className="p-1 cursor-grab active:cursor-grabbing text-gray-300">
-                            <Icons.Grip size={14} />
-                          </div>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <button
-                                className="flex-1 py-1.5 px-4 rounded font-bold text-white text-xs text-center shadow-sm hover:brightness-95 active:scale-[0.98] transition-all truncate"
-                                style={{ backgroundColor: opt.color }}
-                              >
-                                {opt.label}
-                              </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent className="p-4 w-64 shadow-2xl rounded-xl border-gray-200 z-[250]" align="center" side="right">
-                              <div className="space-y-4">
-                                <input
-                                  type="text"
-                                  value={opt.label}
-                                  onChange={(e) => updateOption(opt.id, { label: e.target.value })}
-                                  className="w-full p-2 border border-orange-500 rounded-lg text-sm font-medium focus:ring-0 outline-none"
-                                  autoFocus
-                                />
-
-                                <div className="grid grid-cols-6 gap-2">
-                                  {PRESET_COLORS.map(c => (
-                                    <button
-                                      key={c}
-                                      onClick={() => updateOption(opt.id, { color: c })}
-                                      className={`w-6 h-6 rounded-full border transition-all hover:scale-125 ${opt.color === c ? 'ring-2 ring-offset-2 ring-blue-500 scale-125 z-10' : 'border-transparent'}`}
-                                      style={{ backgroundColor: c }}
-                                    />
-                                  ))}
-                                </div>
-
-                                <div className="pt-2 border-t">
-                                  <button
-                                    onClick={() => removeOption(opt.id)}
-                                    className="w-full flex items-center justify-center gap-2 py-2 text-xs font-bold text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                                  >
-                                    <Icons.Trash size={14} />
-                                    Excluir
-                                  </button>
-                                </div>
-                              </div>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </div>
-                      ))}
-                      {options.length === 0 && (
-                        <div className="text-center py-8 border-2 border-dashed border-gray-100 rounded-xl bg-white/50">
-                          <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">
-                            Nenhuma opção definida
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {type === CustomFieldType.FORMULA && (
-                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Fórmula</label>
-                  <input
-                    type="text"
-                    className="w-full p-2 border rounded text-sm font-mono focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                    value={formula}
-                    onChange={(e) => setFormula(e.target.value)}
-                    placeholder="Ex: {{Preço}} * {{Quantidade}}"
-                  />
-                  <p className="text-[11px] text-gray-400">
-                    Use <code className="bg-white border rounded px-1">{'{{Nome do Campo}}'}</code> para referenciar outros campos numéricos da tarefa. Calculado automaticamente, não é editável.
-                  </p>
-                </div>
-              )}
-
-              {(type === CustomFieldType.MONEY || type === CustomFieldType.CURRENCY) && (
-                <div className="space-y-2 bg-gray-50 p-4 rounded-lg border border-gray-100">
-                  <label className="text-xs font-bold text-gray-500 uppercase">Símbolo da Moeda</label>
-                  <input
-                    type="text"
-                    className="w-24 p-2 border rounded text-sm focus:ring-2 focus:ring-[var(--primary-color)] outline-none"
-                    value={currencySymbol}
-                    onChange={(e) => setCurrencySymbol(e.target.value)}
-                    placeholder="R$"
-                    maxLength={5}
-                  />
-                </div>
-              )}
+              <CustomFieldFormFields
+                name={name} setName={setName}
+                type={type} setType={setType}
+                options={options} setOptions={setOptions}
+                optionSearch={optionSearch} setOptionSearch={setOptionSearch}
+                formula={formula} setFormula={setFormula}
+                currencySymbol={currencySymbol} setCurrencySymbol={setCurrencySymbol}
+              />
             </div>
           )}
         </div>
@@ -15964,99 +16646,9 @@ function CreateFolderModal({ onClose, onCreate }: any) {
   );
 }
 
-// Input de data para campos personalizados/tabela. Inputs nativos <input
-// type="date"> disparam onChange a cada tecla digitada, inclusive enquanto
-// a data está incompleta (ex: só o dia e mês, ou só 1-2 dígitos do ano) —
-// nesses casos `e.target.value` vem vazio. Sem tratamento isso causava dois
-// problemas: (1) cada tecla parcial disparava um upsert salvando valor
-// vazio, criando uma corrida entre requisições que podia sobrescrever a
-// data completa digitada por último com uma parcial que resolveu depois;
-// (2) como o valor exibido é controlado pela prop `value` (só atualizada
-// depois que o upsert assíncrono termina), qualquer re-render do app nesse
-// intervalo (ex: outra tarefa mudando via realtime) forçava o campo de
-// volta ao valor antigo, apagando visualmente o que o usuário tinha
-// acabado de digitar — exatamente o sintoma relatado de "a data não fica
-// gravada assim que termino de digitar o ano". Por isso: (a) mantemos um
-// valor local que não depende do round-trip de rede para continuar exibindo
-// o que foi digitado, e (b) só disparamos onCommit quando o usuário termina
-// uma data válida ou explicitamente limpa um valor que já existia.
-// ISO 'YYYY-MM-DD' (formato de armazenamento) → 'dd/mm/aaaa' (exibição pt-BR).
-function isoToBr(iso: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
-  return m ? `${m[3]}/${m[2]}/${m[1]}` : '';
-}
-
-// 'dd/mm/aaaa' → ISO 'YYYY-MM-DD'. Retorna '' se a data estiver incompleta ou
-// for inválida (ex: 31/02) — assim só persistimos datas completas e reais.
-function brToIso(br: string): string {
-  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((br || '').trim());
-  if (!m) return '';
-  const dd = Number(m[1]), mo = Number(m[2]), yyyy = Number(m[3]);
-  if (mo < 1 || mo > 12 || dd < 1 || dd > 31) return '';
-  const dt = new Date(yyyy, mo - 1, dd);
-  if (dt.getFullYear() !== yyyy || dt.getMonth() !== mo - 1 || dt.getDate() !== dd) return '';
-  return `${m[3]}-${m[2]}-${m[1]}`;
-}
-
-// Aplica a máscara dd/mm/aaaa a uma sequência crua de dígitos.
-function maskBrDate(raw: string): string {
-  const d = (raw || '').replace(/\D/g, '').slice(0, 8);
-  if (d.length > 4) return `${d.slice(0, 2)}/${d.slice(2, 4)}/${d.slice(4)}`;
-  if (d.length > 2) return `${d.slice(0, 2)}/${d.slice(2)}`;
-  return d;
-}
-
-// Editor de data para campos personalizados/tabela. Exibe e aceita entrada
-// SEMPRE em dd/mm/aaaa — o <input type="date"> nativo formatava no locale do
-// NAVEGADOR (mostrava mm/dd/aaaa para muitos usuários, apesar da página ser
-// pt-BR). Aqui o texto é um input mascarado determinístico; o calendário nativo
-// continua disponível num input oculto acionado pelo botão (showPicker). O valor
-// persistido continua ISO 'YYYY-MM-DD'. O buffer local preserva o que foi
-// digitado independentemente do round-trip do upsert (ver histórico abaixo).
-export function DateFieldEditor({ value, onCommit, className }: { value: any; onCommit: (v: string) => void; className?: string }) {
-  const [text, setText] = useState(() => isoToBr(value ?? ''));
-  const pickerRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { setText(isoToBr(value ?? '')); }, [value]);
-
-  const commitFromText = (raw: string) => {
-    const masked = maskBrDate(raw);
-    setText(masked);
-    if (masked === '') { if (value) onCommit(''); return; }
-    const iso = brToIso(masked);
-    if (iso) onCommit(iso); // só persiste data completa e válida
-  };
-
-  return (
-    <div className="relative">
-      <input
-        type="text"
-        inputMode="numeric"
-        placeholder="dd/mm/aaaa"
-        value={text}
-        onChange={(e) => commitFromText(e.target.value)}
-        className={`${className ?? ''} pr-9`}
-      />
-      <button
-        type="button"
-        tabIndex={-1}
-        aria-label="Abrir calendário"
-        onClick={() => pickerRef.current?.showPicker?.()}
-        className="absolute inset-y-0 right-0 flex items-center px-2 text-gray-400 hover:text-gray-600"
-      >
-        <Icons.Calendar className="h-4 w-4" />
-      </button>
-      <input
-        ref={pickerRef}
-        type="date"
-        value={value ?? ''}
-        onChange={(e) => { const v = e.target.value; setText(isoToBr(v)); if (v || value) onCommit(v); }}
-        tabIndex={-1}
-        aria-hidden="true"
-        className="sr-only absolute right-0 bottom-0"
-      />
-    </div>
-  );
-}
+// DateFieldEditor agora vive em ./components/DateFieldEditor (issue #102 /
+// achado 8 da auditoria: extração progressiva de componentes autocontidos
+// pra fora deste arquivo) — importado no topo.
 
 // Input de texto/número para campos personalizados/tabela. Mesmo problema do
 // DateFieldEditor, mas mais severo aqui: como o valor exibido dependia

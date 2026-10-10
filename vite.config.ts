@@ -3,7 +3,6 @@ import react from "@vitejs/plugin-react-swc";
 import path from "path";
 import fs from "fs";
 import { execSync } from "child_process";
-import { componentTagger } from "lovable-tagger";
 
 // Escreve dist/version.json a cada build, pra o app rodando no navegador
 // conseguir detectar quando uma nova versão foi publicada (ver
@@ -24,7 +23,7 @@ function writeVersionFile(buildTime: string, commit: string): Plugin {
 }
 
 // https://vitejs.dev/config/
-export default defineConfig(({ mode }) => {
+export default defineConfig(() => {
   const buildTime = new Date().toISOString();
   const commit =
     process.env.GITHUB_SHA ||
@@ -46,7 +45,6 @@ export default defineConfig(({ mode }) => {
     },
     plugins: [
       react(),
-      mode === "development" && componentTagger(),
       writeVersionFile(buildTime, commit),
     ].filter(Boolean),
     resolve: {

@@ -11,6 +11,7 @@ import {
   Filter,
   FolderOpen,
   GripVertical,
+  Layers,
   MoreHorizontal,
   Plus,
   RotateCcw,
@@ -32,6 +33,7 @@ import {
   Task,
   TaskPriority,
   User,
+  UserRole,
   WorkspaceTag,
 } from '../../types';
 import { TagBadge } from '@/components/TagBadge';
@@ -39,12 +41,23 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { toast } from 'sonner';
+// DateFieldEditor exibe/edita SEMPRE em dd/mm/aaaa, independente do locale
+// do navegador — ao contrário de um <input type="date"> cru, que muda de
+// formato conforme o locale (dd/mm no navegador em pt-BR, mm/dd em en-US).
+// Ver issue #102, achado 1.
+import { DateFieldEditor } from '@/components/DateFieldEditor';
+import { parseLocalDate, formatDateBR } from '@/lib/dates';
+import { supabase, reorderTasksInList } from '@/lib/supabase';
+import { isTaskLate } from '@/lib/taskService';
+import * as taskRepo from '@/lib/taskRepo';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 interface TableViewProps {
   tasks: Task[];
@@ -72,6 +85,12 @@ interface TableViewProps {
   workspaceTags?: WorkspaceTag[];
   hiddenTaskFieldIdsByList?: Record<string, string[]>;
   onHideTaskFieldForList?: (listId: string, fieldId: string) => void;
+  // Issues #137/#143/#162/#163: `null` = acesso total (admin, mesmo
+  // sentinela usado em App.tsx); um Set = ids de pasta liberados pro
+  // usuário (via espaço ou pasta concedida direto). Usado só pra ESCONDER
+  // ações que a RLS já bloquearia de qualquer jeito — nunca é a fonte de
+  // verdade de permissão, só evita cliques que dariam em erro.
+  allowedFolderIdSet?: Set<string> | null;
 }
 
 type ColumnDef = {
@@ -91,6 +110,9 @@ type TablePrefs = {
 };
 
 const DEFAULT_COLUMNS = ['title', 'status', 'priority', 'assignee', 'dueDate'];
+// Issue #144: recorte de colunas mostrado abaixo do breakpoint mobile, além
+// das colunas `required` (hoje só "title"). Ver uso em `effectiveVisibleColumns`.
+const MOBILE_ESSENTIAL_COLUMNS = ['status', 'priority', 'dueDate'];
 const DEFAULT_WIDTHS: Record<string, number> = {
   title: 320,
   status: 150,
@@ -111,36 +133,59 @@ const PRIORITY_ORDER: Record<string, number> = {
   [TaskPriority.BAIXA]: 3,
 };
 
-const parseDate = (value?: string) => {
-  if (!value) return null;
-  const [datePart] = value.split('T');
-  const [year, month, day] = datePart.split('-').map(Number);
-  if (!year || !month || !day) return null;
-  return new Date(year, month - 1, day);
-};
+// parseLocalDate/formatDateBR agora vivem em lib/dates (issue #102, achado
+// 3) — mantemos aqui só o wrapper com guarda de nulo que isOverdue e o
+// filtro "próximos 7 dias" abaixo já esperam.
+const parseDate = (value?: string) => (value ? parseLocalDate(value) : null);
 
-const formatDate = (value?: string) => {
-  const date = parseDate(value);
-  if (!date) return '-';
-  return date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' });
-};
+const formatDate = (value?: string) => formatDateBR(value) || '-';
 
 const toInputDate = (value?: string) => value?.split('T')[0] || '';
 
-const isOverdue = (task: Task) => {
-  const due = parseDate(task.dueDate);
-  if (!due) return false;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  due.setHours(23, 59, 59, 999);
-  return due < today && !task.status?.toLowerCase().includes('conclu');
-};
+// isTaskLate (lib/taskService) em vez de um check local: mesma classificação
+// do card "Atrasadas" do Dashboard (SQL get_dashboard_summary) — o check
+// anterior só excluía status "concluído", contando tarefas
+// canceladas/reprovadas/aguardando com prazo vencido como atrasadas aqui, o
+// que o Dashboard corretamente não fazia (achado real: números divergiam
+// entre a Tabela e o Dashboard).
+const isOverdue = isTaskLate;
 
 const normalize = (value: unknown) =>
   String(value ?? '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
+
+// Issue #165: filtro de contexto (Space/Pasta/Lista) combin\u00e1vel com os
+// demais filtros da Tabela, independente de qual seja o "escopo" ativo
+// (contexto atual, agregado, ou a sele\u00e7\u00e3o manual de listas abaixo). Extra\u00edda
+// como fun\u00e7\u00e3o pura (em vez de inline no useMemo de displayedTasks) pra dar
+// pra testar sem montar o componente inteiro.
+export function taskMatchesContextFilters(
+  context: { list?: { id: string } | null; folder?: { id: string } | null; space?: { id: string } | null },
+  filters: { spaceId?: string; folderId?: string; listId?: string }
+): boolean {
+  if (filters.listId && context.list?.id !== filters.listId) return false;
+  if (filters.folderId && context.folder?.id !== filters.folderId) return false;
+  if (filters.spaceId && context.space?.id !== filters.spaceId) return false;
+  return true;
+}
+
+// Issue #165: resolve o conjunto de tarefas do escopo ativo. Uma sele\u00e7\u00e3o
+// manual de listas espec\u00edficas (`multiListIds` n\u00e3o vazio) tem prioridade
+// sobre o `scopeId` cl\u00e1ssico (Contexto atual/Todos os contextos/Space/
+// Pasta/Lista) \u2014 os dois mecanismos n\u00e3o se combinam, escolher listas
+// espec\u00edficas substitui o escopo hier\u00e1rquico enquanto estiver ativo.
+export function resolveScopedTasks<T>(
+  scopeId: string,
+  scopeOptions: { id: string; taskSource: T[] }[],
+  fallbackTasks: T[],
+  multiListIds: string[],
+  multiListTasks: T[]
+): T[] {
+  if (multiListIds.length > 0) return multiListTasks;
+  return scopeOptions.find((option) => option.id === scopeId)?.taskSource ?? fallbackTasks;
+}
 
 export const TableView: React.FC<TableViewProps> = ({
   tasks,
@@ -168,6 +213,7 @@ export const TableView: React.FC<TableViewProps> = ({
   workspaceTags = [],
   hiddenTaskFieldIdsByList = {},
   onHideTaskFieldForList,
+  allowedFolderIdSet = null,
 }) => {
   const scopeOptions = useMemo(() => {
     const source = allTasks || tasks;
@@ -206,7 +252,51 @@ export const TableView: React.FC<TableViewProps> = ({
     setScopeId(activeListId ? `list:${activeListId}` : 'current');
   }, [activeListId, activeScope?.id, activeScope?.type]);
 
-  const scopedTasks = useMemo(() => scopeOptions.find((option) => option.id === scopeId)?.taskSource || tasks, [scopeId, scopeOptions, tasks]);
+  // Issue #165: "Listas específicas" — multi-seleção arbitrária de Lists,
+  // sem depender de compartilharem Space/Pasta. Diferente do escopo
+  // hierárquico acima (que só reagrupa tarefas já carregadas pela navegação
+  // atual em `tasks`/`allTasks`), busca as tarefas dessas listas direto do
+  // Supabase, então funciona mesmo pra listas fora do contexto de navegação
+  // atual. RLS (tasks_select) filtra o resultado normalmente — pedir uma
+  // lista sem acesso simplesmente não traz linha nenhuma dela, não é um
+  // buraco de segurança novo.
+  const [multiListIds, setMultiListIds] = useState<string[]>([]);
+  const [multiListSearch, setMultiListSearch] = useState('');
+  const [multiListTasks, setMultiListTasks] = useState<Task[]>([]);
+  const [isMultiListLoading, setIsMultiListLoading] = useState(false);
+
+  useEffect(() => {
+    if (multiListIds.length === 0) {
+      setMultiListTasks([]);
+      return;
+    }
+    let cancelled = false;
+    setIsMultiListLoading(true);
+    (async () => {
+      try {
+        const firstRows = await taskRepo.fetchInitialTaskRowsByListIds(multiListIds);
+        if (cancelled) return;
+        let rows = firstRows;
+        if (firstRows.length >= taskRepo.INITIAL_TASK_PAGE_SIZE) {
+          const remainingRows = await taskRepo.fetchRemainingTaskRowsByListIds(multiListIds);
+          if (cancelled) return;
+          rows = [...firstRows, ...remainingRows];
+        }
+        setMultiListTasks(rows.map(taskRepo.mapRowToTaskShell));
+      } catch (err) {
+        console.error('Erro ao carregar tarefas das listas selecionadas:', err);
+        if (!cancelled) toast.error('Não foi possível carregar as tarefas das listas selecionadas.');
+      } finally {
+        if (!cancelled) setIsMultiListLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [multiListIds]);
+
+  const scopedTasks = useMemo(
+    () => resolveScopedTasks(scopeId, scopeOptions, tasks, multiListIds, multiListTasks),
+    [scopeId, scopeOptions, tasks, multiListIds, multiListTasks]
+  );
 
   const taskFields = useMemo(() => {
     return customFields.filter((field) => {
@@ -217,7 +307,11 @@ export const TableView: React.FC<TableViewProps> = ({
   }, [customFields, currentUser?.role]);
 
   const allColumns = useMemo<ColumnDef[]>(() => {
-    const contextColumns: ColumnDef[] = scopeId === 'current' && activeListId
+    // Issue #165: colunas de contexto (Space/Pasta/Lista) também aparecem
+    // com uma seleção manual de "Listas específicas" ativa — as tarefas
+    // exibidas podem vir de listas em pastas/spaces diferentes, então
+    // esconder essas colunas deixaria o contexto de cada linha invisível.
+    const contextColumns: ColumnDef[] = scopeId === 'current' && activeListId && multiListIds.length === 0
       ? []
       : [
           { id: 'space', label: 'Space', kind: 'context', defaultWidth: DEFAULT_WIDTHS.space },
@@ -235,7 +329,7 @@ export const TableView: React.FC<TableViewProps> = ({
       { id: 'tags', label: 'Tags', kind: 'system', defaultWidth: DEFAULT_WIDTHS.tags },
       ...taskFields.map((field) => ({ id: `cf_${field.id}`, label: field.name, kind: 'custom' as const, defaultWidth: 170 })),
     ];
-  }, [activeListId, scopeId, taskFields]);
+  }, [activeListId, multiListIds, scopeId, taskFields]);
 
   const prefsKey = `vp_table_prefs_${currentUser?.id || 'anon'}_${scopeId}`;
   const defaultPrefs = useMemo<TablePrefs>(() => ({
@@ -251,10 +345,21 @@ export const TableView: React.FC<TableViewProps> = ({
   const [filterStatus, setFilterStatus] = useState<string[]>([]);
   const [filterPriority, setFilterPriority] = useState<TaskPriority[]>([]);
   const [filterAssignee, setFilterAssignee] = useState('');
-  const [filterTag, setFilterTag] = useState('');
+  // Issue #139: era valor único (string) mesmo o filtro se comportando como
+  // "combinável" no resto do app — agora aceita múltiplos valores de verdade
+  // (toggle, mesmo padrão já usado pelo filtro de Status).
+  const [filterTag, setFilterTag] = useState<string[]>([]);
   const [filterDue, setFilterDue] = useState('');
-  const [customFilterFieldId, setCustomFilterFieldId] = useState('');
-  const [customFilterValue, setCustomFilterValue] = useState('');
+  // Issue #165: filtro dedicado por contexto (Space/Pasta/Lista) — antes só
+  // dava pra "achar" o contexto pela busca textual, que casa com o NOME e
+  // não distingue contexto de conteúdo. Cada um é single-select porque é
+  // hierárquico (escolher uma Lista já implica o Space/Pasta dela).
+  const [filterSpaceId, setFilterSpaceId] = useState('');
+  const [filterFolderId, setFilterFolderId] = useState('');
+  const [filterListId, setFilterListId] = useState('');
+  // Issue #139: antes só dava pra filtrar por 1 campo customizado por vez;
+  // agora é uma lista de filtros combináveis (AND entre eles, como os demais).
+  const [customFilters, setCustomFilters] = useState<{ fieldId: string; value: string }[]>([]);
   const [sortField, setSortField] = useState<'dueDate' | 'priority' | 'title' | 'list' | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
@@ -270,14 +375,33 @@ export const TableView: React.FC<TableViewProps> = ({
   const resizingRef = useRef<{ colId: string; startX: number; startWidth: number } | null>(null);
   const rowOrderKey = `vp_table_row_order_${currentUser?.id || 'anon'}_${scopeId}`;
 
+  // Issue #140: localStorage sozinho não sobrevive a troca de
+  // navegador/dispositivo nem a limpeza de dados do site. Lê do cache local
+  // primeiro (pinta na hora, sem esperar rede) e depois reconcilia com o
+  // backend (table_view_prefs, por usuário+escopo — fonte de verdade pra
+  // sincronizar entre dispositivos). Local continua sendo escrito também,
+  // como cache rápido, não como única fonte.
   useEffect(() => {
+    let cancelled = false;
     try {
       const saved = localStorage.getItem(prefsKey);
       setPrefs(saved ? { ...defaultPrefs, ...JSON.parse(saved) } : defaultPrefs);
     } catch {
       setPrefs(defaultPrefs);
     }
-  }, [defaultPrefs, prefsKey]);
+    if (!currentUser?.id) return;
+    supabase
+      .from('table_view_prefs')
+      .select('prefs')
+      .eq('user_id', currentUser.id)
+      .eq('scope_id', scopeId)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled || error || !data?.prefs) return;
+        setPrefs({ ...defaultPrefs, ...(data.prefs as Partial<TablePrefs>) });
+      });
+    return () => { cancelled = true; };
+  }, [currentUser?.id, defaultPrefs, prefsKey, scopeId]);
 
   useEffect(() => {
     try {
@@ -285,16 +409,45 @@ export const TableView: React.FC<TableViewProps> = ({
     } catch {
       // Preferencias visuais continuam funcionais na sessao mesmo sem storage.
     }
-  }, [prefs, prefsKey]);
+    if (!currentUser?.id) return;
+    // Debounce: resize de coluna dispara mudança de prefs a cada pixel
+    // arrastado — sem isso, cada frame do drag viraria uma escrita no banco.
+    const timeout = setTimeout(() => {
+      supabase
+        .from('table_view_prefs')
+        .upsert(
+          { user_id: currentUser.id, scope_id: scopeId, prefs, updated_at: new Date().toISOString() },
+          { onConflict: 'user_id,scope_id' }
+        )
+        .then(({ error }) => {
+          if (error) console.error('Erro ao salvar preferências da Tabela:', error);
+        });
+    }, 600);
+    return () => clearTimeout(timeout);
+  }, [currentUser?.id, prefs, prefsKey, scopeId]);
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem(rowOrderKey);
-      setRowOrder(saved ? JSON.parse(saved) : []);
+      if (saved) {
+        setRowOrder(JSON.parse(saved));
+        return;
+      }
     } catch {
-      setRowOrder([]);
+      // cai no fallback do backend abaixo
     }
-  }, [rowOrderKey]);
+    // Issue #138: sem cache local (primeiro acesso neste navegador, ou dados
+    // limpos), usa a ordem já persistida no backend (sort_index) como ponto
+    // de partida — é o que faz a ordem sobreviver a troca de dispositivo.
+    const withOrder = scopedTasks.filter((task) => task.sortIndex != null);
+    if (withOrder.length === 0) {
+      setRowOrder([]);
+      return;
+    }
+    const ordered = [...withOrder].sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0)).map((task) => task.id);
+    const withoutOrder = scopedTasks.filter((task) => task.sortIndex == null).map((task) => task.id);
+    setRowOrder([...ordered, ...withoutOrder]);
+  }, [rowOrderKey, scopedTasks]);
 
   useEffect(() => {
     setNewTaskListId(activeListId || '');
@@ -308,6 +461,7 @@ export const TableView: React.FC<TableViewProps> = ({
 
   const getFieldValue = useCallback((taskId: string, fieldId: string) => fieldValueMap.get(`${taskId}:${fieldId}`), [fieldValueMap]);
   const listById = useMemo(() => new Map(lists.map((list) => [list.id, list])), [lists]);
+  const taskById = useMemo(() => new Map(scopedTasks.map((task) => [task.id, task])), [scopedTasks]);
   const folderById = useMemo(() => new Map(folders.map((folder) => [folder.id, folder])), [folders]);
   const spaceById = useMemo(() => new Map(spaces.map((space) => [space.id, space])), [spaces]);
   const userById = useMemo(() => new Map(users.map((user) => [user.id, user])), [users]);
@@ -318,6 +472,37 @@ export const TableView: React.FC<TableViewProps> = ({
     const space = folder ? spaceById.get(folder.spaceId) : undefined;
     return { list, folder, space };
   }, [folderById, listById, spaceById]);
+
+  // Issues #137/#143/#162/#163: só pra ESCONDER ações que a RLS de qualquer
+  // jeito bloquearia (evita cliques que dão em erro) — nunca é a fonte de
+  // verdade. Cobre 4 das 5 condições reais de tasks_upd (ADMIN/GESTOR,
+  // responsável principal/secundário, criador, acesso à lista via
+  // pasta/espaço); a 5ª (observador) não dá pra checar aqui porque a linha
+  // "leve" que a Tabela recebe não traz watcherIds (só carregado sob
+  // demanda ao abrir o detalhe) — um observador puro, sem nenhuma das
+  // outras 4 condições, pode ver uma ação escondida que o backend na
+  // verdade permitiria. Caso raro e sem risco de segurança (só esconde
+  // ação de mais, nunca de menos do que a RLS já barraria).
+  const canEditTaskInTable = useCallback((task: Task) => {
+    if (!currentUser) return false;
+    if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) return true;
+    if (task.mainAssigneeId === currentUser.id) return true;
+    if ((task.secondaryAssigneeIds || []).includes(currentUser.id)) return true;
+    if (task.createdBy === currentUser.id) return true;
+    if (allowedFolderIdSet === null) return true;
+    const list = listById.get(task.listId);
+    return Boolean(list && allowedFolderIdSet.has(list.folderId));
+  }, [allowedFolderIdSet, currentUser, listById]);
+
+  // Issue #162: criar tarefa depende só de acesso à LISTA (tasks_ins =
+  // can_access_list), não das condições de dono/responsável acima.
+  const canCreateInList = useCallback((listId: string) => {
+    if (!currentUser) return false;
+    if (currentUser.role === UserRole.ADMIN || currentUser.role === UserRole.GESTOR) return true;
+    if (allowedFolderIdSet === null) return true;
+    const list = listById.get(listId);
+    return Boolean(list && allowedFolderIdSet.has(list.folderId));
+  }, [allowedFolderIdSet, currentUser, listById]);
 
   const availableStatuses = useMemo(() => {
     const fromGroups = statusGroups.flatMap((group) => group.options.map((option) => option.label));
@@ -355,7 +540,21 @@ export const TableView: React.FC<TableViewProps> = ({
       });
   }, [allColumns, prefs.columnOrder, prefs.visibleColumns, hiddenFieldIdsForList]);
 
-  const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag || filterDue || (customFilterFieldId && customFilterValue));
+  // Issue #144: abaixo do breakpoint mobile, renderiza só um recorte
+  // essencial de colunas — a alternativa (todas as colunas com as mesmas
+  // larguras mínimas de desktop) força scroll horizontal constante e
+  // dificulta achar a informação principal. É um filtro só de EXIBIÇÃO,
+  // aplicado por cima de `visibleColumns`: nunca mexe em `prefs`, então a
+  // preferência de colunas do usuário (persistida em table_view_prefs) não
+  // é alterada nem sobrescrita — ao voltar pro desktop, tudo volta como
+  // estava configurado.
+  const isMobile = useIsMobile();
+  const effectiveVisibleColumns = useMemo(() => {
+    if (!isMobile) return visibleColumns;
+    return visibleColumns.filter((column) => column.required || MOBILE_ESSENTIAL_COLUMNS.includes(column.id));
+  }, [visibleColumns, isMobile]);
+
+  const hasActiveFilters = Boolean(search || filterStatus.length || filterPriority.length || filterAssignee || filterTag.length || filterDue || filterSpaceId || filterFolderId || filterListId || customFilters.some((filter) => filter.fieldId && filter.value));
 
   const displayedTasks = useMemo(() => {
     let result = scopedTasks.filter((task) => !task.parentId);
@@ -386,7 +585,10 @@ export const TableView: React.FC<TableViewProps> = ({
     if (filterStatus.length > 0) result = result.filter((task) => filterStatus.includes(task.status));
     if (filterPriority.length > 0) result = result.filter((task) => filterPriority.includes(task.priority));
     if (filterAssignee) result = result.filter((task) => task.mainAssigneeId === filterAssignee || task.secondaryAssigneeIds?.includes(filterAssignee));
-    if (filterTag) result = result.filter((task) => task.tags?.includes(filterTag));
+    if (filterTag.length > 0) result = result.filter((task) => task.tags?.some((tag) => filterTag.includes(tag)));
+    if (filterSpaceId || filterFolderId || filterListId) {
+      result = result.filter((task) => taskMatchesContextFilters(getTaskContext(task), { spaceId: filterSpaceId, folderId: filterFolderId, listId: filterListId }));
+    }
     if (filterDue === 'overdue') result = result.filter(isOverdue);
     if (filterDue === 'without') result = result.filter((task) => !task.dueDate);
     if (filterDue === 'with') result = result.filter((task) => Boolean(task.dueDate));
@@ -401,14 +603,17 @@ export const TableView: React.FC<TableViewProps> = ({
       });
     }
 
-    if (customFilterFieldId && customFilterValue) {
-      const query = normalize(customFilterValue);
-      result = result.filter((task) => {
-        const field = taskFields.find((item) => item.id === customFilterFieldId);
-        const value = getFieldValue(task.id, customFilterFieldId);
-        const option = field?.config?.options?.find((item) => item.id === value);
-        return normalize(option?.label || value).includes(query);
-      });
+    const activeCustomFilters = customFilters.filter((filter) => filter.fieldId && filter.value);
+    if (activeCustomFilters.length > 0) {
+      result = result.filter((task) =>
+        activeCustomFilters.every(({ fieldId, value }) => {
+          const query = normalize(value);
+          const field = taskFields.find((item) => item.id === fieldId);
+          const fieldValue = getFieldValue(task.id, fieldId);
+          const option = field?.config?.options?.find((item) => item.id === fieldValue);
+          return normalize(option?.label || fieldValue).includes(query);
+        })
+      );
     }
 
     if (sortField) {
@@ -439,7 +644,7 @@ export const TableView: React.FC<TableViewProps> = ({
     }
 
     return result;
-  }, [customFilterFieldId, customFilterValue, filterAssignee, filterDue, filterPriority, filterStatus, filterTag, getFieldValue, getTaskContext, hasActiveFilters, rowOrder, scopedTasks, search, sortDir, sortField, taskFields, userById]);
+  }, [customFilters, filterAssignee, filterDue, filterFolderId, filterListId, filterPriority, filterSpaceId, filterStatus, filterTag, getFieldValue, getTaskContext, hasActiveFilters, rowOrder, scopedTasks, search, sortDir, sortField, taskFields, userById]);
 
   useEffect(() => {
     setSelectedTaskIds((prev) => {
@@ -454,13 +659,39 @@ export const TableView: React.FC<TableViewProps> = ({
     setFilterStatus([]);
     setFilterPriority([]);
     setFilterAssignee('');
-    setFilterTag('');
+    setFilterTag([]);
     setFilterDue('');
-    setCustomFilterFieldId('');
-    setCustomFilterValue('');
+    setFilterSpaceId('');
+    setFilterFolderId('');
+    setFilterListId('');
+    setCustomFilters([]);
   };
 
+  const toggleFilterTag = (tag: string) => {
+    setFilterTag((prev) => (prev.includes(tag) ? prev.filter((item) => item !== tag) : [...prev, tag]));
+  };
+
+  const addCustomFilter = () => {
+    setCustomFilters((prev) => [...prev, { fieldId: '', value: '' }]);
+  };
+
+  const updateCustomFilter = (index: number, patch: Partial<{ fieldId: string; value: string }>) => {
+    setCustomFilters((prev) => prev.map((filter, i) => (i === index ? { ...filter, ...patch } : filter)));
+  };
+
+  const removeCustomFilter = (index: number) => {
+    setCustomFilters((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // Issue #137: choque único de permissão pra toda edição de célula (inline
+  // e em lote, que passam por aqui) — evita repetir a checagem em cada tipo
+  // de coluna/editor.
   const commitTaskUpdate = async (taskId: string, updates: Partial<Task>) => {
+    const task = taskById.get(taskId);
+    if (task && !canEditTaskInTable(task)) {
+      toast.error('Você não tem permissão para editar esta tarefa.');
+      return;
+    }
     try {
       await onUpdateTask(taskId, updates);
     } catch {
@@ -469,6 +700,11 @@ export const TableView: React.FC<TableViewProps> = ({
   };
 
   const commitFieldUpdate = async (taskId: string, fieldId: string, value: any) => {
+    const task = taskById.get(taskId);
+    if (task && !canEditTaskInTable(task)) {
+      toast.error('Você não tem permissão para editar esta tarefa.');
+      return;
+    }
     try {
       await onUpdateFieldValue(fieldId, taskId, value);
     } catch {
@@ -493,31 +729,38 @@ export const TableView: React.FC<TableViewProps> = ({
     }
   };
 
-  const handleResizeMouseDown = useCallback((e: React.MouseEvent, colId: string) => {
+  // Issue #144: Pointer Events (em vez de mouse-only) fazem o mesmo handler
+  // funcionar com mouse, caneta e toque — sem isso, redimensionar coluna era
+  // impossível em tablet/celular. `setPointerCapture` no próprio elemento
+  // evita perder o arraste quando o dedo/cursor sai da faixa fina do handle.
+  const handleResizeMouseDown = useCallback((e: React.PointerEvent<HTMLDivElement>, colId: string) => {
     e.preventDefault();
     e.stopPropagation();
     const startWidth = prefs.columnWidths[colId] ?? allColumns.find((column) => column.id === colId)?.defaultWidth ?? 150;
     resizingRef.current = { colId, startX: e.clientX, startWidth };
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
 
-    const handleMouseMove = (ev: MouseEvent) => {
+    const handlePointerMove = (ev: PointerEvent) => {
       if (!resizingRef.current) return;
       const delta = ev.clientX - resizingRef.current.startX;
       const newWidth = Math.max(resizingRef.current.colId === 'title' ? 220 : 90, resizingRef.current.startWidth + delta);
       setPrefs((prev) => ({ ...prev, columnWidths: { ...prev.columnWidths, [resizingRef.current!.colId]: newWidth } }));
     };
 
-    const handleMouseUp = () => {
+    const handlePointerUp = (ev: PointerEvent) => {
       resizingRef.current = null;
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
+      handle.releasePointerCapture(ev.pointerId);
+      handle.removeEventListener('pointermove', handlePointerMove);
+      handle.removeEventListener('pointerup', handlePointerUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
 
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
+    handle.addEventListener('pointermove', handlePointerMove);
+    handle.addEventListener('pointerup', handlePointerUp);
   }, [allColumns, prefs.columnWidths]);
 
   const reorderColumn = (targetId: string) => {
@@ -535,8 +778,9 @@ export const TableView: React.FC<TableViewProps> = ({
   };
 
   const canReorderRows = !sortField && !hasActiveFilters;
-  const reorderRow = (targetId: string) => {
+  const reorderRow = async (targetId: string) => {
     if (!draggedRowId || draggedRowId === targetId || !canReorderRows) return;
+    const previousIds = rowOrder.length > 0 ? rowOrder : displayedTasks.map((task) => task.id);
     const currentIds = displayedTasks.map((task) => task.id);
     const from = currentIds.indexOf(draggedRowId);
     const to = currentIds.indexOf(targetId);
@@ -548,6 +792,34 @@ export const TableView: React.FC<TableViewProps> = ({
       localStorage.setItem(rowOrderKey, JSON.stringify(currentIds));
     } catch {
       toast.error('A ordem foi alterada, mas não foi possível salvar a preferência local.');
+    }
+
+    // Issue #138: persiste no backend (sort_index) pra sobreviver a
+    // reload/troca de dispositivo. sort_index é por lista — um escopo
+    // agregando várias listas (ex.: "Todos os contextos") precisa de uma
+    // chamada por lista, cada uma só com a ordem relativa das SUAS tarefas
+    // dentro da sequência nova. Atualização otimista com rollback: se
+    // qualquer lista falhar em persistir, desfaz a mudança local inteira.
+    const taskById = new Map(scopedTasks.map((task) => [task.id, task]));
+    const idsByList = new Map<string, string[]>();
+    currentIds.forEach((id) => {
+      const listId = taskById.get(id)?.listId;
+      if (!listId) return;
+      const arr = idsByList.get(listId) || [];
+      arr.push(id);
+      idsByList.set(listId, arr);
+    });
+    const results = await Promise.all(
+      Array.from(idsByList.entries()).map(([listId, ids]) => reorderTasksInList(listId, ids))
+    );
+    if (results.some((result) => result === null)) {
+      setRowOrder(previousIds);
+      try {
+        localStorage.setItem(rowOrderKey, JSON.stringify(previousIds));
+      } catch {
+        // preferência local não é crítica pro rollback funcionar
+      }
+      toast.error('Não foi possível salvar a nova ordem. A ordem anterior foi restaurada.');
     }
   };
 
@@ -575,8 +847,11 @@ export const TableView: React.FC<TableViewProps> = ({
     });
   };
 
+  // Issue #143: só seleciona (e portanto só permite ação em lote sobre)
+  // tarefas que o usuário pode editar — evita marcar tudo e a ação falhar
+  // silenciosamente por linha na RLS.
   const selectAllVisible = () => {
-    const visibleIds = displayedTasks.map((task) => task.id);
+    const visibleIds = displayedTasks.filter(canEditTaskInTable).map((task) => task.id);
     const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedTaskIds.has(id));
     setSelectedTaskIds(allSelected ? new Set() : new Set(visibleIds));
   };
@@ -604,6 +879,12 @@ export const TableView: React.FC<TableViewProps> = ({
       toast.error('Escolha uma lista para criar a tarefa.');
       return;
     }
+    // Issue #162: criar depende de acesso à lista (tasks_ins), não das
+    // condições de dono/responsável de canEditTaskInTable.
+    if (!canCreateInList(targetListId)) {
+      toast.error('Você não tem permissão para criar tarefas nesta lista.');
+      return;
+    }
     await onCreateTask({ title: newTaskTitle.trim(), listId: targetListId });
     setNewTaskTitle('');
   };
@@ -629,7 +910,15 @@ export const TableView: React.FC<TableViewProps> = ({
       );
     }
     if (field.type === CustomFieldType.DATE) {
-      return <input type="date" value={toInputDate(value)} onClick={(e) => e.stopPropagation()} onChange={(e) => commitFieldUpdate(task.id, field.id, e.target.value)} className="h-8 w-full rounded border border-border bg-background px-2 text-xs" />;
+      return (
+        <span onClick={(e) => e.stopPropagation()}>
+          <DateFieldEditor
+            value={toInputDate(value)}
+            onCommit={(v) => commitFieldUpdate(task.id, field.id, v)}
+            className="h-8 w-full rounded border border-border bg-background px-2 text-xs"
+          />
+        </span>
+      );
     }
     if (field.type === CustomFieldType.PROGRESS) {
       return <input type="number" min={0} max={100} value={value ?? 0} onClick={(e) => e.stopPropagation()} onChange={(e) => commitFieldUpdate(task.id, field.id, Number(e.target.value))} className="h-8 w-full rounded border border-border bg-background px-2 text-xs" />;
@@ -697,7 +986,17 @@ export const TableView: React.FC<TableViewProps> = ({
     }
 
     if (column.id === 'dueDate') {
-      return <td key={column.id} className={baseClass} style={{ width, minWidth: width, maxWidth: width }}><input type="date" value={toInputDate(task.dueDate)} onClick={(e) => e.stopPropagation()} onChange={(e) => commitTaskUpdate(task.id, { dueDate: e.target.value })} className="h-8 w-full rounded border border-border bg-background px-2 text-xs" title={formatDate(task.dueDate)} /></td>;
+      return (
+        <td key={column.id} className={baseClass} style={{ width, minWidth: width, maxWidth: width }} title={formatDate(task.dueDate)}>
+          <span onClick={(e) => e.stopPropagation()}>
+            <DateFieldEditor
+              value={toInputDate(task.dueDate)}
+              onCommit={(v) => commitTaskUpdate(task.id, { dueDate: v })}
+              className="h-8 w-full rounded border border-border bg-background px-2 text-xs"
+            />
+          </span>
+        </td>
+      );
     }
 
     if (column.id === 'tags') {
@@ -753,9 +1052,77 @@ export const TableView: React.FC<TableViewProps> = ({
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Buscar na tabela" className="h-9 w-full rounded-md border border-border bg-background pl-8 pr-3 text-sm outline-none focus:border-primary" />
           </div>
-          <select value={scopeId} onChange={(e) => setScopeId(e.target.value)} className="h-9 max-w-[260px] rounded-md border border-border bg-background px-2 text-sm">
+          <select value={scopeId} disabled={multiListIds.length > 0} onChange={(e) => setScopeId(e.target.value)} className="h-9 max-w-[260px] rounded-md border border-border bg-background px-2 text-sm disabled:opacity-50">
             {scopeOptions.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
           </select>
+          {/* Issue #165: "Listas específicas" — agrega Lists arbitrárias
+              (não precisam compartilhar Space/Pasta), tipo Table View do
+              Trello. Substitui o escopo hierárquico acima enquanto ativo
+              (por isso o <select> fica desabilitado); busca as tarefas
+              dessas listas direto do backend, então funciona mesmo fora do
+              contexto de navegação atual. */}
+          <DropdownMenu onOpenChange={(open) => { if (!open) setMultiListSearch(''); }}>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className={multiListIds.length > 0 ? 'border-primary text-primary' : ''}>
+                <Layers className="mr-2 h-4 w-4" />
+                {multiListIds.length > 0 ? `${multiListIds.length} lista${multiListIds.length > 1 ? 's' : ''}${isMultiListLoading ? '…' : ''}` : 'Listas específicas'}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-72">
+              <div className="sticky top-0 z-10 bg-popover p-1">
+                <input
+                  type="text"
+                  autoFocus
+                  value={multiListSearch}
+                  onChange={(e) => setMultiListSearch(e.target.value)}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                  placeholder="Buscar lista..."
+                  className="w-full rounded border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary"
+                />
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {(() => {
+                  const query = multiListSearch.trim().toLowerCase();
+                  const groups = spaces
+                    .map((space) => ({
+                      space,
+                      listOptions: lists
+                        .filter((list) => folderById.get(list.folderId)?.spaceId === space.id)
+                        .filter((list) => !query || list.name.toLowerCase().includes(query)),
+                    }))
+                    .filter((group) => group.listOptions.length > 0);
+                  if (groups.length === 0) {
+                    return <div className="px-2 py-3 text-xs text-gray-400 text-center">Nenhuma lista encontrada.</div>;
+                  }
+                  return groups.map(({ space, listOptions }) => (
+                    <div key={space.id}>
+                      <p className="px-2 pt-1.5 pb-0.5 text-[10px] font-bold uppercase text-muted-foreground">{space.name}</p>
+                      {listOptions.map((list) => (
+                        <DropdownMenuCheckboxItem
+                          key={list.id}
+                          checked={multiListIds.includes(list.id)}
+                          onSelect={(e) => e.preventDefault()}
+                          onCheckedChange={(checked) => setMultiListIds((prev) => checked ? [...prev, list.id] : prev.filter((id) => id !== list.id))}
+                          className="text-xs"
+                        >
+                          {list.name}
+                        </DropdownMenuCheckboxItem>
+                      ))}
+                    </div>
+                  ));
+                })()}
+              </div>
+              {multiListIds.length > 0 && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={(e) => { e.preventDefault(); setMultiListIds([]); }} className="text-xs text-muted-foreground">
+                    <RotateCcw className="mr-2 h-4 w-4" />Limpar seleção
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" className={hasActiveFilters ? 'border-primary text-primary' : ''}><Filter className="mr-2 h-4 w-4" />Filtros{hasActiveFilters && <span className="ml-2 rounded-full bg-primary px-1.5 text-[10px] font-bold text-primary-foreground">ativo</span>}</Button>
@@ -767,15 +1134,53 @@ export const TableView: React.FC<TableViewProps> = ({
                   {availableStatuses.map((status) => <button key={status} type="button" onClick={() => setFilterStatus((prev) => prev.includes(status) ? prev.filter((item) => item !== status) : [...prev, status])} className={`rounded-full border px-2 py-1 text-[11px] ${filterStatus.includes(status) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>{status}</button>)}
                 </div>
               </div>
+              <div>
+                {/* Issue #139: era um <select> de valor único — agora, mesmo
+                    padrão de toggle do Status acima, dá pra combinar mais de
+                    uma prioridade no filtro. */}
+                <p className="mb-1.5 text-[10px] font-bold uppercase text-muted-foreground">Prioridade</p>
+                <div className="flex flex-wrap gap-1">
+                  {PRIORITY_VALUES.map((priority) => <button key={priority} type="button" onClick={() => setFilterPriority((prev) => prev.includes(priority) ? prev.filter((item) => item !== priority) : [...prev, priority])} className={`rounded-full border px-2 py-1 text-[11px] ${filterPriority.includes(priority) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>{priority}</button>)}
+                </div>
+              </div>
+              {availableTags.length > 0 && (
+                <div>
+                  <p className="mb-1.5 text-[10px] font-bold uppercase text-muted-foreground">Tags</p>
+                  <div className="flex flex-wrap gap-1">
+                    {availableTags.map((tag) => <button key={tag} type="button" onClick={() => toggleFilterTag(tag)} className={`rounded-full border px-2 py-1 text-[11px] ${filterTag.includes(tag) ? 'border-primary bg-primary/10 text-primary' : 'border-border text-muted-foreground'}`}>{tag}</button>)}
+                  </div>
+                </div>
+              )}
+              <div>
+                {/* Issue #165: filtro dedicado por contexto — antes só dava
+                    pra "achar" o contexto pela busca textual (casa com o
+                    NOME, não distingue contexto de conteúdo). Cada select
+                    reseta os de baixo ao mudar, pra nunca ficar numa
+                    combinação impossível (ex.: pasta de um space diferente
+                    do escolhido). */}
+                <p className="mb-1.5 text-[10px] font-bold uppercase text-muted-foreground">Contexto</p>
+                <div className="grid grid-cols-3 gap-2">
+                  <select value={filterSpaceId} onChange={(e) => { setFilterSpaceId(e.target.value); setFilterFolderId(''); setFilterListId(''); }} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Space</option>{spaces.map((space) => <option key={space.id} value={space.id}>{space.name}</option>)}</select>
+                  <select value={filterFolderId} onChange={(e) => { setFilterFolderId(e.target.value); setFilterListId(''); }} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Pasta</option>{folders.filter((folder) => !filterSpaceId || folder.spaceId === filterSpaceId).map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select>
+                  <select value={filterListId} onChange={(e) => setFilterListId(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Lista</option>{lists.filter((list) => (!filterFolderId || list.folderId === filterFolderId) && (!filterSpaceId || folderById.get(list.folderId)?.spaceId === filterSpaceId)).map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select>
+                </div>
+              </div>
               <div className="grid grid-cols-2 gap-2">
-                <select value={filterPriority[0] || ''} onChange={(e) => setFilterPriority(e.target.value ? [e.target.value as TaskPriority] : [])} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Prioridade</option>{PRIORITY_VALUES.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select>
                 <select value={filterAssignee} onChange={(e) => setFilterAssignee(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Responsável</option>{users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select>
-                <select value={filterTag} onChange={(e) => setFilterTag(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Tags</option>{availableTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select>
                 <select value={filterDue} onChange={(e) => setFilterDue(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Prazo</option><option value="overdue">Atrasadas</option><option value="week">Próximos 7 dias</option><option value="with">Com prazo</option><option value="without">Sem prazo</option></select>
               </div>
-              <div className="grid grid-cols-[1fr_1fr] gap-2">
-                <select value={customFilterFieldId} onChange={(e) => setCustomFilterFieldId(e.target.value)} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Campo customizado</option>{taskFields.filter((field) => field.type !== CustomFieldType.FORMULA).map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
-                <input value={customFilterValue} onChange={(e) => setCustomFilterValue(e.target.value)} placeholder="Valor" className="h-9 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary" />
+              <div className="space-y-2">
+                {/* Issue #139: antes só dava pra filtrar por 1 campo
+                    customizado de cada vez — agora é uma lista, combinável
+                    (AND) com os demais filtros. */}
+                {customFilters.map((filter, index) => (
+                  <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+                    <select value={filter.fieldId} onChange={(e) => updateCustomFilter(index, { fieldId: e.target.value })} className="h-9 rounded-md border border-border bg-background px-2 text-xs"><option value="">Campo customizado</option>{taskFields.filter((field) => field.type !== CustomFieldType.FORMULA).map((field) => <option key={field.id} value={field.id}>{field.name}</option>)}</select>
+                    <input value={filter.value} onChange={(e) => updateCustomFilter(index, { value: e.target.value })} placeholder="Valor" className="h-9 rounded-md border border-border bg-background px-2 text-xs outline-none focus:border-primary" />
+                    <button type="button" onClick={() => removeCustomFilter(index)} className="flex h-9 w-9 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-muted" aria-label="Remover filtro de campo customizado"><X className="h-4 w-4" /></button>
+                  </div>
+                ))}
+                <Button variant="ghost" size="sm" onClick={addCustomFilter} className="w-full justify-center text-muted-foreground"><Plus className="mr-2 h-4 w-4" />Adicionar filtro de campo</Button>
               </div>
               {hasActiveFilters && <Button variant="ghost" size="sm" onClick={resetFilters} className="w-full justify-center text-muted-foreground"><RotateCcw className="mr-2 h-4 w-4" />Limpar filtros</Button>}
             </DropdownMenuContent>
@@ -819,9 +1224,16 @@ export const TableView: React.FC<TableViewProps> = ({
         <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2 text-xs text-muted-foreground">
           <span>{displayedTasks.length} de {scopedTasks.length} tarefas</span>
           {search && <Badge variant="outline">Busca: {search}</Badge>}
+          {filterPriority.map((priority) => <Badge key={priority} variant="outline">{priority}</Badge>)}
           {filterAssignee && <Badge variant="outline"><UserCircle className="mr-1 h-3 w-3" />{userById.get(filterAssignee)?.name}</Badge>}
-          {filterTag && <Badge variant="outline"><Tags className="mr-1 h-3 w-3" />{filterTag}</Badge>}
+          {filterTag.map((tag) => <Badge key={tag} variant="outline"><Tags className="mr-1 h-3 w-3" />{tag}</Badge>)}
           {filterDue && <Badge variant="outline"><Calendar className="mr-1 h-3 w-3" />{filterDue}</Badge>}
+          {filterSpaceId && <Badge variant="outline"><Layers className="mr-1 h-3 w-3" />{spaceById.get(filterSpaceId)?.name}</Badge>}
+          {filterFolderId && <Badge variant="outline"><FolderOpen className="mr-1 h-3 w-3" />{folderById.get(filterFolderId)?.name}</Badge>}
+          {filterListId && <Badge variant="outline"><Layers className="mr-1 h-3 w-3" />{listById.get(filterListId)?.name}</Badge>}
+          {customFilters.filter((filter) => filter.fieldId && filter.value).map((filter, index) => (
+            <Badge key={`${filter.fieldId}-${index}`} variant="outline">{taskFields.find((field) => field.id === filter.fieldId)?.name}: {filter.value}</Badge>
+          ))}
           <button type="button" onClick={resetFilters} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted"><X className="h-3 w-3" />Limpar</button>
         </div>
       )}
@@ -830,10 +1242,14 @@ export const TableView: React.FC<TableViewProps> = ({
         <table className="border-collapse text-left" style={{ width: 'max-content', minWidth: '100%' }}>
           <thead className="sticky top-0 z-20 bg-muted">
             <tr>
-              <th className="sticky left-0 z-30 border border-border bg-muted px-2 py-2" style={{ width: 44, minWidth: 44 }}>
-                <input type="checkbox" checked={displayedTasks.length > 0 && displayedTasks.every((task) => selectedTaskIds.has(task.id))} onChange={selectAllVisible} className="h-4 w-4 rounded border-border" aria-label="Selecionar tarefas visíveis" />
+              <th className="sticky left-0 z-30 border border-border bg-muted p-0" style={{ width: 44, minWidth: 44 }}>
+                {/* Issue #144: label preenchendo os 44px da célula em vez de
+                    só o checkbox (16px) — área de toque confiável em mobile. */}
+                <label className="flex h-11 w-11 cursor-pointer items-center justify-center">
+                  <input type="checkbox" checked={displayedTasks.length > 0 && displayedTasks.every((task) => selectedTaskIds.has(task.id))} onChange={selectAllVisible} className="h-4 w-4 rounded border-border" aria-label="Selecionar tarefas visíveis" />
+                </label>
               </th>
-              {visibleColumns.map((column) => {
+              {effectiveVisibleColumns.map((column) => {
                 const width = prefs.columnWidths[column.id] ?? column.defaultWidth;
                 const stickyClass = column.id === 'title' && prefs.stickyTitle ? 'sticky left-[44px] z-30 shadow-[8px_0_10px_-12px_rgba(0,0,0,0.45)]' : '';
                 return (
@@ -842,7 +1258,7 @@ export const TableView: React.FC<TableViewProps> = ({
                       {!column.required && <GripVertical className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
                       <span className="flex-1 truncate text-xs font-semibold uppercase text-muted-foreground">{column.label}</span>
                     </div>
-                    <div className="absolute right-0 top-0 z-40 h-full w-2 cursor-col-resize hover:bg-primary/40" onMouseDown={(e) => handleResizeMouseDown(e, column.id)} />
+                    <div className="absolute right-0 top-0 z-40 h-full w-3 touch-none cursor-col-resize hover:bg-primary/40" onPointerDown={(e) => handleResizeMouseDown(e, column.id)} />
                   </th>
                 );
               })}
@@ -867,23 +1283,39 @@ export const TableView: React.FC<TableViewProps> = ({
                   className={`group cursor-pointer hover:bg-muted/40 ${dragOverRowId === task.id ? 'outline outline-2 outline-primary/40' : ''}`}
                   style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${virtualRow.start}px)` }}
                 >
-                  <td className="sticky left-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 44, minWidth: 44 }}>
-                    <div className="flex items-center justify-center gap-1">
-                      <GripVertical className={`h-4 w-4 ${canReorderRows ? 'text-muted-foreground' : 'text-muted-foreground/30'}`} />
-                      <input type="checkbox" checked={selectedTaskIds.has(task.id)} onClick={(e) => e.stopPropagation()} onChange={() => toggleSelected(task.id)} className="h-4 w-4 rounded border-border" />
+                  <td className="sticky left-0 z-10 border border-border bg-background px-1 py-2 text-center group-hover:bg-muted/40" style={{ width: 44, minWidth: 44 }}>
+                    <div className="flex items-center justify-center gap-0.5">
+                      <GripVertical className={`h-4 w-4 shrink-0 ${canReorderRows ? 'text-muted-foreground' : 'text-muted-foreground/30'}`} />
+                      {/* Issue #144: label aumenta a área de toque do checkbox
+                          sem mudar a largura fixa da célula (44px, compartida
+                          com o ícone de arrastar). */}
+                      <label className="flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center" onClick={(e) => e.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          checked={selectedTaskIds.has(task.id)}
+                          disabled={!canEditTaskInTable(task)}
+                          title={canEditTaskInTable(task) ? undefined : 'Você não tem permissão para editar esta tarefa'}
+                          onChange={() => toggleSelected(task.id)}
+                          className="h-4 w-4 rounded border-border disabled:cursor-not-allowed disabled:opacity-40"
+                        />
+                      </label>
                     </div>
                   </td>
-                  {visibleColumns.map((column) => renderCell(task, column))}
+                  {effectiveVisibleColumns.map((column) => renderCell(task, column))}
                   <td className="sticky right-0 z-10 border border-border bg-background px-2 py-2 text-center group-hover:bg-muted/40" style={{ width: 48, minWidth: 48 }} onClick={(e) => e.stopPropagation()}>
                     <DropdownMenu>
-                      <DropdownMenuTrigger asChild><button type="button" className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Ações da tarefa"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
+                      <DropdownMenuTrigger asChild><button type="button" className="rounded p-2.5 text-muted-foreground hover:bg-muted hover:text-foreground" aria-label="Ações da tarefa"><MoreHorizontal className="h-4 w-4" /></button></DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-52">
                         <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Abrir tarefa</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Editar detalhes</DropdownMenuItem>
-                        {onDuplicateTask && <DropdownMenuItem onClick={() => onDuplicateTask(task)}><Copy className="mr-2 h-4 w-4" />Duplicar</DropdownMenuItem>}
+                        {/* Issue #163: "Editar detalhes"/Duplicar/Mover/Excluir escondidos
+                            quando o usuário não pode editar a tarefa — "Abrir"/"Copiar
+                            link" continuam sempre disponíveis (visualizar é mais
+                            permissivo que editar, mesma lógica da RLS tasks_select). */}
+                        {canEditTaskInTable(task) && <DropdownMenuItem onClick={() => onTaskClick(task.id)}>Editar detalhes</DropdownMenuItem>}
+                        {canEditTaskInTable(task) && onDuplicateTask && <DropdownMenuItem onClick={() => onDuplicateTask(task)}><Copy className="mr-2 h-4 w-4" />Duplicar</DropdownMenuItem>}
                         <DropdownMenuItem onClick={() => copyTaskLink(task.id)}><Copy className="mr-2 h-4 w-4" />Copiar link</DropdownMenuItem>
-                        {onBulkMove && <><DropdownMenuSeparator />{lists.map((list) => <DropdownMenuItem key={list.id} onClick={() => onBulkMove([task.id], list.id)}><FolderOpen className="mr-2 h-4 w-4" />Mover para {list.name}</DropdownMenuItem>)}</>}
-                        {onDeleteTask && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => onDeleteTask(task.id)}><Trash2 className="mr-2 h-4 w-4" />Excluir</DropdownMenuItem></>}
+                        {canEditTaskInTable(task) && onBulkMove && <><DropdownMenuSeparator />{lists.map((list) => <DropdownMenuItem key={list.id} onClick={() => onBulkMove([task.id], list.id)}><FolderOpen className="mr-2 h-4 w-4" />Mover para {list.name}</DropdownMenuItem>)}</>}
+                        {canEditTaskInTable(task) && onDeleteTask && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onClick={() => onDeleteTask(task.id)}><Trash2 className="mr-2 h-4 w-4" />Excluir</DropdownMenuItem></>}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </td>
@@ -892,13 +1324,13 @@ export const TableView: React.FC<TableViewProps> = ({
             })}
           </tbody>
           <tbody>
-            {displayedTasks.length === 0 && <tr><td colSpan={visibleColumns.length + 2} className="border border-border px-4 py-12 text-center text-sm text-muted-foreground">Nenhuma tarefa encontrada na Tabela.</td></tr>}
+            {displayedTasks.length === 0 && <tr><td colSpan={effectiveVisibleColumns.length + 2} className="border border-border px-4 py-12 text-center text-sm text-muted-foreground">Nenhuma tarefa encontrada na Tabela.</td></tr>}
             <tr className="bg-muted/20">
               <td className="sticky left-0 z-10 border border-border bg-muted/20 px-2 py-2" style={{ width: 44, minWidth: 44 }} />
               <td className={`${prefs.stickyTitle ? 'sticky left-[44px] z-10 bg-muted/20' : ''} border border-border px-3 py-2`} style={{ minWidth: prefs.columnWidths.title ?? DEFAULT_WIDTHS.title }}>
                 <div className="flex min-w-[260px] items-center gap-2"><Plus className="h-4 w-4 shrink-0 text-muted-foreground" /><input value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') createInlineTask(); if (e.key === 'Escape') setNewTaskTitle(''); }} placeholder="Adicionar tarefa" className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm outline-none focus:border-primary" /></div>
               </td>
-              <td className="border border-border px-3 py-2" colSpan={Math.max(visibleColumns.length - 1, 1)}>
+              <td className="border border-border px-3 py-2" colSpan={Math.max(effectiveVisibleColumns.length - 1, 1)}>
                 <div className="flex flex-wrap items-center gap-2">
                   <select value={newTaskListId} onChange={(e) => setNewTaskListId(e.target.value)} className="h-9 max-w-[240px] rounded-md border border-border bg-background px-2 text-sm"><option value="">Escolher lista</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select>
                   <Button size="sm" onClick={createInlineTask} disabled={!newTaskTitle.trim() || !onCreateTask}><Check className="mr-2 h-4 w-4" />Criar</Button>
@@ -916,7 +1348,7 @@ export const TableView: React.FC<TableViewProps> = ({
           {onBulkStatusChange && <select defaultValue="" onChange={(e) => { if (!e.target.value) return; onBulkStatusChange(Array.from(selectedTaskIds), e.target.value); setSelectedTaskIds(new Set()); e.target.value = ''; }} className="h-8 rounded border border-white/20 bg-black/20 px-2 text-sm"><option value="" disabled>Status</option>{availableStatuses.map((status) => <option key={status} value={status}>{status}</option>)}</select>}
           {onBulkPriorityChange && <select defaultValue="" onChange={(e) => { if (!e.target.value) return; onBulkPriorityChange(Array.from(selectedTaskIds), e.target.value as TaskPriority); setSelectedTaskIds(new Set()); e.target.value = ''; }} className="h-8 rounded border border-white/20 bg-black/20 px-2 text-sm"><option value="" disabled>Prioridade</option>{PRIORITY_VALUES.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select>}
           <select defaultValue="" onChange={(e) => e.target.value && runBulkUpdate({ mainAssigneeId: e.target.value })} className="h-8 rounded border border-white/20 bg-black/20 px-2 text-sm"><option value="" disabled>Responsável</option>{users.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select>
-          <input type="date" onChange={(e) => e.target.value && runBulkUpdate({ dueDate: e.target.value })} className="h-8 rounded border border-white/20 bg-black/20 px-2 text-sm" />
+          <DateFieldEditor value="" onCommit={(v) => v && runBulkUpdate({ dueDate: v })} className="h-8 rounded border border-white/20 bg-black/20 px-2 text-sm text-background" ariaLabel="Definir prazo para os selecionados" />
           <select defaultValue="" onChange={(e) => e.target.value && runBulkTagAdd(e.target.value)} className="h-8 rounded border border-white/20 bg-black/20 px-2 text-sm"><option value="" disabled>Tag</option>{availableTags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select>
           {onBulkMove && <select defaultValue="" onChange={(e) => { if (!e.target.value) return; onBulkMove(Array.from(selectedTaskIds), e.target.value); setSelectedTaskIds(new Set()); e.target.value = ''; }} className="h-8 rounded border border-white/20 bg-black/20 px-2 text-sm"><option value="" disabled>Mover</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select>}
           {(onBulkDelete || onDeleteTask) && <button type="button" onClick={() => { const ids = Array.from(selectedTaskIds); if (onBulkDelete) onBulkDelete(ids); else if (ids.length === 1 && onDeleteTask) onDeleteTask(ids[0]); setSelectedTaskIds(new Set()); }} className="rounded px-2 py-1 text-sm text-red-300 hover:bg-white/10">Excluir</button>}
