@@ -34,10 +34,47 @@
 //      falhar, recarrega a página inteira — resolve garantidamente (é
 //      exatamente o que o F5 manual já resolve hoje), só que automático e
 //      ANTES que o usuário perceba o problema.
+//
+// REGRESSÃO (mesmo dia, PR #260): o commit que tratava `error` resolvido por
+// getSession() como sessão quebrada não distinguia isso de um erro
+// `isAcquireTimeout`/LockManager — que App.tsx.checkSession() (linha ~1389)
+// já trata como TRANSITÓRIO (duas abas/dispositivos disputando a mesma trava
+// ao mesmo tempo; não desloga ninguém, só pede pra tentar de novo). Sem essa
+// distinção, qualquer disputa normal de trava (comum com o site aberto em
+// celular + computador ao mesmo tempo) fazia a página recarregar sozinha —
+// e como o reload refaz a mesma disputa, podia repetir, parecendo "o site
+// fica se reinicializando sozinho". Pior que o bug original. Agora só
+// recarrega em erro genuíno (ex.: refresh token inválido), nunca em
+// contenção de lock transitória — e mesmo assim com um teto de segurança
+// (AUTO_RELOAD_COOLDOWN_MS) que impede qualquer sequência de reloads
+// automáticos mais rápida que isso, não importa a causa.
 import { supabase } from './supabase';
 
 const AWAY_THRESHOLD_MS = 60_000; // tempo mínimo ausente pra valer a pena checar — evita disparar à toa numa troca rápida de aba/janela
-const RECOVERY_CHECK_TIMEOUT_MS = 8_000; // bem menor que os 20-25s das travas internas — não faz sentido esperar o teto inteiro só pra decidir se recarrega
+const RECOVERY_CHECK_TIMEOUT_MS = 20_000; // perto do teto de 25s das travas internas (lockTimeout.ts) — só reage a hang real, não a uma fila normal de múltiplas abas/dispositivos
+const AUTO_RELOAD_COOLDOWN_MS = 300_000; // nunca mais de 1 reload automático a cada 5min, aconteça o que acontecer — trava dura contra qualquer loop (bem maior que AWAY_THRESHOLD_MS, senão um ciclo normal de ida-e-volta já consumiria o cooldown sozinho)
+const LAST_AUTO_RELOAD_KEY = 'vp-click-bg-recovery-last-reload';
+
+function isTransientLockError(error: unknown): boolean {
+  const e = error as { isAcquireTimeout?: boolean; message?: string } | null | undefined;
+  return !!e && (e.isAcquireTimeout === true || !!e.message?.includes('LockManager'));
+}
+
+function reloadIfSafe(reason: string): void {
+  try {
+    const lastRaw = sessionStorage.getItem(LAST_AUTO_RELOAD_KEY);
+    const last = lastRaw ? Number(lastRaw) : 0;
+    if (Date.now() - last < AUTO_RELOAD_COOLDOWN_MS) {
+      console.warn(`backgroundTabRecovery: reload automático suprimido (cooldown) — motivo: ${reason}.`);
+      return;
+    }
+    sessionStorage.setItem(LAST_AUTO_RELOAD_KEY, String(Date.now()));
+  } catch {
+    // sessionStorage bloqueado — segue pro reload mesmo assim, sem o guard
+  }
+  console.warn(`backgroundTabRecovery: ${reason} — recarregando a página.`);
+  window.location.reload();
+}
 
 export function startBackgroundTabRecovery(): () => void {
   let awaySince: number | null = null;
@@ -59,11 +96,7 @@ export function startBackgroundTabRecovery(): () => void {
       if (settled) return;
       settled = true;
       recovering = false;
-      console.warn(
-        `backgroundTabRecovery: sessão não respondeu em ${RECOVERY_CHECK_TIMEOUT_MS}ms após ` +
-        `${Math.round(awayDurationMs / 1000)}s ausente — recarregando a página.`
-      );
-      window.location.reload();
+      reloadIfSafe(`sessão não respondeu em ${RECOVERY_CHECK_TIMEOUT_MS}ms após ${Math.round(awayDurationMs / 1000)}s ausente`);
     }, RECOVERY_CHECK_TIMEOUT_MS);
 
     supabase.auth.getSession().then(
@@ -79,9 +112,14 @@ export function startBackgroundTabRecovery(): () => void {
         // "saudável" sem olhar pra esse campo deixava passar esse caso: a
         // trava nem chegou a travar, mas a sessão em si está morta, e o
         // usuário continuaria preso sem recuperação nenhuma.
-        if (error) {
-          console.warn('backgroundTabRecovery: getSession() voltou com erro ao retomar — recarregando a página.', error);
-          window.location.reload();
+        //
+        // MAS: `isAcquireTimeout`/LockManager é diferente — é a mesma disputa
+        // transitória de trava entre abas/dispositivos que checkSession() em
+        // App.tsx já trata sem deslogar nem recarregar (só pede pra tentar de
+        // novo). Tratar isso como "sessão quebrada" causava reload a cada
+        // disputa normal de trava — ver comentário no topo do arquivo.
+        if (error && !isTransientLockError(error)) {
+          reloadIfSafe('getSession() voltou com erro ao retomar');
         }
       },
       () => {
@@ -89,8 +127,7 @@ export function startBackgroundTabRecovery(): () => void {
         settled = true;
         recovering = false;
         clearTimeout(timer);
-        console.warn('backgroundTabRecovery: getSession() falhou ao retomar — recarregando a página.');
-        window.location.reload();
+        reloadIfSafe('getSession() falhou ao retomar');
       }
     );
   };
