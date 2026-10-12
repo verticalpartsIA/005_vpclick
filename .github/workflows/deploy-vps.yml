@@ -35,6 +35,7 @@ jobs:
           # em src/ é embutida em texto puro no bundle JS público. `npm run build`
           # não lê essa chave (nada em src/ a referencia) — só existia aqui à toa.
           VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
 
       # A VPS NÃO usa Traefik pra tráfego real (o container Traefik existe
       # mas nunca ficou publicado nas portas 80/443 do host). Quem serve
