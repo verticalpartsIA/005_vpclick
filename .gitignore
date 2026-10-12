@@ -36,3 +36,22 @@ bun.lock.txt
 *.sln
 *.sw?
 .claude/settings.local.json
+
+# Não fazem parte do site (relatórios, exportações, rascunhos, artefatos de
+# build/diagnóstico e anotações de sessões de IA). Ficam só na máquina local.
+repomix-output.*
+relatorio_*.md
+nunca commite/
+relatorios/
+reports/
+.rag/
+.Claude/
+.claude/launch.json
+Claude*.md
+dist.tar.gz
+errors.txt
+gitignore.txt
+instrucoes_limpeza.html
+tsc_output.txt
+tsc_final.txt
+vitest.config.ts.timestamp-*.mjs
