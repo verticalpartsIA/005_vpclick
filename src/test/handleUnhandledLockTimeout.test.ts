@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { handleUnhandledLockTimeout } from '../lib/supabase';
 import { LockOperationTimeoutError } from '../lib/lockTimeout';
+import { subscribeRecoveryNotice, dismissRecoveryNotice } from '../lib/recoveryNotice';
 
 // Regressão de um relato ao vivo (2026-10, console do usuário): o teto de
 // 25s em withLockTimeout funciona (força a liberação da trava e não deixa o
@@ -26,14 +27,19 @@ describe('handleUnhandledLockTimeout', () => {
     vi.restoreAllMocks();
   });
 
-  it('reloads the page and suppresses the console error for a LockOperationTimeoutError', () => {
+  it('suppresses the console error and warns the user, WITHOUT reloading, for a LockOperationTimeoutError', () => {
+    dismissRecoveryNotice();
+    const seen: unknown[] = [];
+    const off = subscribeRecoveryNotice((n) => seen.push(n));
     const preventDefault = vi.fn();
     const event = { reason: new LockOperationTimeoutError('lock:vp-click-user-auth', 25_000), preventDefault };
 
     handleUnhandledLockTimeout(event);
 
+    off();
     expect(preventDefault).toHaveBeenCalledTimes(1);
-    expect(reloadSpy).toHaveBeenCalledTimes(1);
+    expect(seen.at(-1)).not.toBeNull();
+    expect(reloadSpy).not.toHaveBeenCalled();
   });
 
   it('ignores unrelated unhandled rejections — does not reload for a normal error', () => {

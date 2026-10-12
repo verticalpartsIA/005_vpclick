@@ -1,3 +1,7 @@
+// ATUALIZAÇÃO: a recuperação por reload automático foi REMOVIDA (derrubava o que o
+// usuário digitava). Hoje só detecta e avisa via recoveryNotice.ts; os trechos
+// abaixo que falam em "recarrega" descrevem o comportamento antigo.
+//
 // Achado real (2026-10): usuário se afasta da aba, volta, clica numa tarefa e
 // NADA acontece — sem erro, sem aviso, sem toast. Causa: o navegador suspende
 // conexões de rede de abas em segundo plano (mais comum: a renovação
@@ -49,31 +53,20 @@
 // (AUTO_RELOAD_COOLDOWN_MS) que impede qualquer sequência de reloads
 // automáticos mais rápida que isso, não importa a causa.
 import { supabase } from './supabase';
+import { reportRecoverableProblem } from './recoveryNotice';
 
 const AWAY_THRESHOLD_MS = 60_000; // tempo mínimo ausente pra valer a pena checar — evita disparar à toa numa troca rápida de aba/janela
 const RECOVERY_CHECK_TIMEOUT_MS = 20_000; // perto do teto de 25s das travas internas (lockTimeout.ts) — só reage a hang real, não a uma fila normal de múltiplas abas/dispositivos
-const AUTO_RELOAD_COOLDOWN_MS = 300_000; // nunca mais de 1 reload automático a cada 5min, aconteça o que acontecer — trava dura contra qualquer loop (bem maior que AWAY_THRESHOLD_MS, senão um ciclo normal de ida-e-volta já consumiria o cooldown sozinho)
-const LAST_AUTO_RELOAD_KEY = 'vp-click-bg-recovery-last-reload';
 
 function isTransientLockError(error: unknown): boolean {
   const e = error as { isAcquireTimeout?: boolean; message?: string } | null | undefined;
   return !!e && (e.isAcquireTimeout === true || !!e.message?.includes('LockManager'));
 }
 
+// Não recarrega a página: só avisa (ver recoveryNotice.ts). O usuário pode estar
+// no meio de um texto; quem decide recarregar é ele, pelo banner.
 function reloadIfSafe(reason: string): void {
-  try {
-    const lastRaw = sessionStorage.getItem(LAST_AUTO_RELOAD_KEY);
-    const last = lastRaw ? Number(lastRaw) : 0;
-    if (Date.now() - last < AUTO_RELOAD_COOLDOWN_MS) {
-      console.warn(`backgroundTabRecovery: reload automático suprimido (cooldown) — motivo: ${reason}.`);
-      return;
-    }
-    sessionStorage.setItem(LAST_AUTO_RELOAD_KEY, String(Date.now()));
-  } catch {
-    // sessionStorage bloqueado — segue pro reload mesmo assim, sem o guard
-  }
-  console.warn(`backgroundTabRecovery: ${reason} — recarregando a página.`);
-  window.location.reload();
+  reportRecoverableProblem(reason);
 }
 
 export function startBackgroundTabRecovery(): () => void {

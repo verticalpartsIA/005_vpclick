@@ -23,7 +23,8 @@ import compactLogoWhite from './assets/logo-verticalparts-white.png';
 import bootLogoVideo from './assets/logo-limpo-video.mp4';
 import { recordRecentTaskId } from './lib/recentTasks';
 import { buildSlugIndex, slugify, type SlugIndex } from './lib/slug';
-import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
+import { lazyImportWithReload } from './lib/lazyRetry';
+import { subscribeRecoveryNotice, dismissRecoveryNotice, type RecoveryNotice } from './lib/recoveryNotice';
 import { subscribeSlowConnection } from './lib/connectionStatus';
 import { supabase } from './lib/supabase';
 import { writeRows } from './lib/dbWrite';
@@ -1072,7 +1073,8 @@ export default function App() {
   // App montou com sucesso: libera um novo reload automático caso um chunk de
   // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
   // src/lib/lazyRetry.ts — a flag sobrevive ao reload que ela mesma dispara).
-  useEffect(() => clearChunkReloadFlag(), []);
+  const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
+  useEffect(() => subscribeRecoveryNotice(setRecoveryNotice), []);
 
   // --- SSO LOGIC ---
   // "Failed to send a request to the Edge Function" é o erro que o supabase-js
@@ -4290,6 +4292,20 @@ export default function App() {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col min-w-0 bg-muted">
+          {recoveryNotice && (
+            <NotificationBanner className="shrink-0" onDismiss={dismissRecoveryNotice}>
+              <span className="font-semibold">A conexão ficou instável.</span>
+              <span className="mx-2 text-gray-400">·</span>
+              Nada foi perdido nem recarregado. Termine o que está escrevendo e recarregue quando quiser.
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="ml-3 font-semibold underline hover:no-underline"
+              >
+                Recarregar agora
+              </button>
+            </NotificationBanner>
+          )}
           {updateNotice && (
             <NotificationBanner className="shrink-0" onDismiss={() => setUpdateNotice(null)}>
               <span className="font-semibold">{updateNotice.message}</span>
