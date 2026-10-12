@@ -43,6 +43,7 @@ import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/
 import { startVersionCheck, formatBuildTimeShort, type UpdateNotice } from './lib/versionCheck';
 import { startBackgroundTabRecovery } from './lib/backgroundTabRecovery';
 import { queryFailed } from './lib/queryResults';
+import { logAuthEvent } from './lib/authEvents';
 import { NotificationBanner } from './components/ui/notification-banner';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
@@ -1042,6 +1043,11 @@ export default function App() {
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const [is2faVerified, setIs2faVerified] = useState(() => localStorage.getItem('vp_2fa_verified') === 'true');
   const [ssoError, setSsoError] = useState<string | null>(null);
+  // true quando a sessão cai com a página aberta (SIGNED_OUT sem logout manual):
+  // a LoginScreen avisa em vez de redirecionar ao portal sozinha.
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const hadSessionRef = useRef(false);
+  useEffect(() => { if (session) hadSessionRef.current = true; }, [session]);
   // Impede que getSession() libere a tela enquanto o SSO ainda está processando.
   // A URL já foi limpa do token antes do app montar (ver src/lib/ssoEntry.ts),
   // por isso a origem da informação é o módulo, não window.location.
@@ -1133,11 +1139,14 @@ export default function App() {
 
       if (verifyError) throw verifyError;
 
+      logAuthEvent('sso_entry_ok');
+      setSessionExpired(false);
       // SSO bypassa 2FA — marcar como verificado
       localStorage.setItem('vp_2fa_verified', 'true');
       setIs2faVerified(true);
     } catch (err) {
       console.error("SSO Error:", err);
+      logAuthEvent('sso_entry_fail', err instanceof Error ? err.message : String(err));
       setSsoError(err instanceof Error ? err.message : String(err));
       toast.error("Falha no login via SSO");
       setIsLoadingAuth(false);
@@ -1450,6 +1459,8 @@ export default function App() {
       }
 
       if (event === 'SIGNED_OUT') {
+        logAuthEvent('signed_out_event', hadSessionRef.current ? 'com sessão ativa' : 'sem sessão ativa');
+        if (hadSessionRef.current) setSessionExpired(true);
         setSession(null);
         setCurrentUser(FALLBACK_USER);
         setIs2faVerified(false);
@@ -4226,7 +4237,7 @@ export default function App() {
   }
 
   if (!session || !is2faVerified) {
-    return <LoginScreen onLogin={() => setIs2faVerified(true)} ssoError={ssoError} />;
+    return <LoginScreen onLogin={() => setIs2faVerified(true)} ssoError={ssoError} sessionExpired={sessionExpired} />;
   }
 
   return (
