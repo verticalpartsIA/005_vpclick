@@ -29,6 +29,7 @@ jobs:
           # em src/ é embutida em texto puro no bundle JS público. `npm run build`
           # não lê essa chave (nada em src/ a referencia) — só existia aqui à toa.
           VITE_MAPBOX_TOKEN: ${{ secrets.VITE_MAPBOX_TOKEN }}
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
 
       # O Hostinger deste projeto expõe apenas SSH/SFTP na porta 65002 — o deploy
       # antigo usava FTP (porta 21) e falhava sempre com "530 Login incorrect".

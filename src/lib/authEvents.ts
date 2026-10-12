@@ -4,6 +4,8 @@
 // Guarda os últimos eventos em localStorage (anel de 50) e escreve no console.
 // Para ler no navegador do usuário: readAuthEvents() ou a chave 'vp-auth-events'.
 // Nunca grava token nem e-mail; nunca lança erro.
+import { reportTelemetryEvent } from './telemetry';
+
 export type AuthEventType =
   | 'sso_entry_ok'
   | 'sso_entry_fail'
@@ -23,6 +25,7 @@ const MAX_EVENTS = 50;
 export function logAuthEvent(type: AuthEventType, detail?: string): void {
   try {
     console.info(`[auth-event] ${type}${detail ? ` — ${detail}` : ''}`);
+    reportTelemetryEvent(type, detail);
     const list: AuthEvent[] = JSON.parse(localStorage.getItem(KEY) || '[]');
     list.push({ at: new Date().toISOString(), type, detail });
     localStorage.setItem(KEY, JSON.stringify(list.slice(-MAX_EVENTS)));

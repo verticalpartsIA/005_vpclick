@@ -3,6 +3,8 @@
 // reclamações de "o site reinicia sozinho". Quando algo precisa de recarga
 // (sessão presa, chunk de deploy antigo), o código só AVISA por aqui e quem
 // decide é a pessoa, pelo botão do banner (ver App.tsx).
+import { reportTelemetryEvent } from './telemetry';
+
 export type RecoveryNotice = { reason: string };
 
 const listeners = new Set<(notice: RecoveryNotice | null) => void>();
@@ -10,6 +12,7 @@ let current: RecoveryNotice | null = null;
 
 export function reportRecoverableProblem(reason: string): void {
   console.warn(`recoveryNotice: ${reason} — aguardando o usuário decidir recarregar.`);
+  reportTelemetryEvent('recovery_banner_shown', reason);
   current = { reason };
   listeners.forEach((cb) => cb(current));
 }
