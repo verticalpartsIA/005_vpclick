@@ -41,6 +41,7 @@ import { useUsers } from './hooks/useUsers';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort, type UpdateNotice } from './lib/versionCheck';
 import { startBackgroundTabRecovery } from './lib/backgroundTabRecovery';
+import { queryFailed } from './lib/queryResults';
 import { NotificationBanner } from './components/ui/notification-banner';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
@@ -1782,7 +1783,8 @@ export default function App() {
   // continuam valendo) + 1 retry automático do lote inteiro se alguma das
   // queries que definem ACESSO (spaces/folders/lists/user_access) falhou,
   // mesmo padrão de resiliência já usado em loadTasks/fetchTaskDetails.
-  const loadInitialDataRetriedRef = useRef(false);
+  const loadInitialDataAttemptsRef = useRef(0);
+  const INITIAL_LOAD_MAX_RETRIES = 3;
   // Só o id do usuário entra nas dependências de carga: o objeto `session`
   // troca a cada renovação de token (TOKEN_REFRESHED), e reexecutar a carga
   // inteira a cada renovação era um dos gatilhos de recarga ao voltar para a aba.
@@ -1810,9 +1812,9 @@ export default function App() {
         'projects', 'workspace_tags', 'user_access', 'teams', 'team_members',
         'task_status_groups', 'task_status_options',
       ];
-      const dataOf = (r: PromiseSettledResult<{ data: any }>, label: string): any => {
-        if (r.status === 'fulfilled') return r.value.data;
-        console.error(`Erro ao carregar dados iniciais (${label}):`, r.reason);
+      const dataOf = (r: PromiseSettledResult<{ data: any; error?: any }>, label: string): any => {
+        if (r.status === 'fulfilled' && !r.value.error) return r.value.data;
+        console.error(`Erro ao carregar dados iniciais (${label}):`, r.status === 'rejected' ? r.reason : r.value.error);
         return null;
       };
       const [
@@ -1823,21 +1825,23 @@ export default function App() {
 
       // Essas 4 definem o que o usuário PODE ver (ver allowedFolderIdSet) —
       // uma falha nelas não pode passar batido como "0 pastas permitidas".
-      const criticalFailed = [results[0], results[1], results[2], results[8]].some(r => r.status === 'rejected');
-      if (criticalFailed && !loadInitialDataRetriedRef.current) {
-        loadInitialDataRetriedRef.current = true;
-        setTimeout(() => { loadInitialData(); }, 1500);
+      // queryFailed também pega erro do PostgREST (resposta fulfilled com `error`),
+      // que antes passava como "0 linhas" e virava pasta vazia sem aviso.
+      const criticalFailed = [results[0], results[1], results[2], results[8]].some(queryFailed);
+      if (criticalFailed && loadInitialDataAttemptsRef.current < INITIAL_LOAD_MAX_RETRIES) {
+        loadInitialDataAttemptsRef.current += 1;
+        setTimeout(() => { loadInitialData(); }, 1500 * loadInitialDataAttemptsRef.current);
         return;
       }
       if (criticalFailed) {
         toast.error('Não foi possível carregar espaços/pastas/permissões. Tarefas podem aparecer faltando.', {
           action: {
             label: 'Tentar novamente',
-            onClick: () => { loadInitialDataRetriedRef.current = false; loadInitialData(); },
+            onClick: () => { loadInitialDataAttemptsRef.current = 0; loadInitialData(); },
           },
         });
       } else {
-        loadInitialDataRetriedRef.current = false;
+        loadInitialDataAttemptsRef.current = 0;
       }
 
       if (spacesData) {
@@ -1968,7 +1972,10 @@ export default function App() {
         })));
       }
 
-      setWorkspaceMetaLoaded(true);
+      // Com espaços/pastas/listas/permissões faltando NÃO se marca como carregado:
+      // isso evita a carga de tarefas tratar "lista de pastas não chegou" como
+      // "pasta realmente vazia" (ver gate de workspaceMetaLoaded em loadTasks).
+      if (!criticalFailed) setWorkspaceMetaLoaded(true);
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
     }
