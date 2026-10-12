@@ -23,7 +23,8 @@ import compactLogoWhite from './assets/logo-verticalparts-white.png';
 import bootLogoVideo from './assets/logo-limpo-video.mp4';
 import { recordRecentTaskId } from './lib/recentTasks';
 import { buildSlugIndex, slugify, type SlugIndex } from './lib/slug';
-import { lazyImportWithReload, clearChunkReloadFlag } from './lib/lazyRetry';
+import { lazyImportWithReload } from './lib/lazyRetry';
+import { subscribeRecoveryNotice, dismissRecoveryNotice, type RecoveryNotice } from './lib/recoveryNotice';
 import { subscribeSlowConnection } from './lib/connectionStatus';
 import { supabase } from './lib/supabase';
 import { writeRows } from './lib/dbWrite';
@@ -41,6 +42,7 @@ import { useUsers } from './hooks/useUsers';
 import { AutomationEngine, AutomationContext, AutomationCallbacks } from './lib/AutomationEngine';
 import { startVersionCheck, formatBuildTimeShort, type UpdateNotice } from './lib/versionCheck';
 import { startBackgroundTabRecovery } from './lib/backgroundTabRecovery';
+import { queryFailed } from './lib/queryResults';
 import { NotificationBanner } from './components/ui/notification-banner';
 import { trackEnter, trackExit } from './lib/trackActivity';
 import { ssoToken, veioDoPortal } from './lib/ssoEntry';
@@ -179,13 +181,14 @@ interface NavigationScope {
 type ActiveView = 'List' | 'Kanban' | 'Calendar' | 'Gantt' | 'Table' | 'Dashboard' | 'Admin' | 'Doc' | 'Inbox' | 'Replies' | 'AssignedComments' | 'Meetings' | 'MyTasks' | 'Reminders' | 'RecentTasks' | 'Workload' | 'Goals' | 'Portfolios' | 'Forms' | 'Whiteboards' | 'Teams' | 'MindMaps' | 'Map';
 
 // --- Navegação ↔ URL ---------------------------------------------------------
-// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard) vira um
+// Cada view "de workspace" (List/Kanban/Calendar/Gantt/Table/Dashboard etc.) vira um
 // path próprio (`/gantt`, `/kanban`...); a lista/pasta/espaço ativo e o filtro
 // "Minhas Tarefas" (Atribuídas a mim) viajam como query params por cima desse
 // path — mesmo mecanismo que o `?taskId=` já usava, só que agora cobrindo view
 // e escopo também. Views "standalone" (Inbox, Reuniões etc.) e Doc não têm
 // conceito de escopo, então viram só um path fixo (Doc leva o id da página).
-const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard'];
+const WORKSPACE_VIEWS: ActiveView[] = ['List', 'Kanban', 'Calendar', 'Gantt', 'Table', 'Dashboard', 'Map', 'Workload'];
+const LIST_REQUIRED_VIEWS: ActiveView[] = ['Kanban', 'Gantt'];
 
 const VIEW_TO_SLUG: Record<ActiveView, string> = {
   Dashboard: '', // path canônico é a raiz ("/")
@@ -1070,7 +1073,8 @@ export default function App() {
   // App montou com sucesso: libera um novo reload automático caso um chunk de
   // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
   // src/lib/lazyRetry.ts — a flag sobrevive ao reload que ela mesma dispara).
-  useEffect(() => clearChunkReloadFlag(), []);
+  const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
+  useEffect(() => subscribeRecoveryNotice(setRecoveryNotice), []);
 
   // --- SSO LOGIC ---
   // "Failed to send a request to the Edge Function" é o erro que o supabase-js
@@ -1781,7 +1785,12 @@ export default function App() {
   // continuam valendo) + 1 retry automático do lote inteiro se alguma das
   // queries que definem ACESSO (spaces/folders/lists/user_access) falhou,
   // mesmo padrão de resiliência já usado em loadTasks/fetchTaskDetails.
-  const loadInitialDataRetriedRef = useRef(false);
+  const loadInitialDataAttemptsRef = useRef(0);
+  const INITIAL_LOAD_MAX_RETRIES = 3;
+  // Só o id do usuário entra nas dependências de carga: o objeto `session`
+  // troca a cada renovação de token (TOKEN_REFRESHED), e reexecutar a carga
+  // inteira a cada renovação era um dos gatilhos de recarga ao voltar para a aba.
+  const sessionUserId = session?.user?.id;
   const loadInitialData = useCallback(async () => {
     try {
       const results = await Promise.allSettled([
@@ -1805,9 +1814,9 @@ export default function App() {
         'projects', 'workspace_tags', 'user_access', 'teams', 'team_members',
         'task_status_groups', 'task_status_options',
       ];
-      const dataOf = (r: PromiseSettledResult<{ data: any }>, label: string): any => {
-        if (r.status === 'fulfilled') return r.value.data;
-        console.error(`Erro ao carregar dados iniciais (${label}):`, r.reason);
+      const dataOf = (r: PromiseSettledResult<{ data: any; error?: any }>, label: string): any => {
+        if (r.status === 'fulfilled' && !r.value.error) return r.value.data;
+        console.error(`Erro ao carregar dados iniciais (${label}):`, r.status === 'rejected' ? r.reason : r.value.error);
         return null;
       };
       const [
@@ -1818,21 +1827,23 @@ export default function App() {
 
       // Essas 4 definem o que o usuário PODE ver (ver allowedFolderIdSet) —
       // uma falha nelas não pode passar batido como "0 pastas permitidas".
-      const criticalFailed = [results[0], results[1], results[2], results[8]].some(r => r.status === 'rejected');
-      if (criticalFailed && !loadInitialDataRetriedRef.current) {
-        loadInitialDataRetriedRef.current = true;
-        setTimeout(() => { loadInitialData(); }, 1500);
+      // queryFailed também pega erro do PostgREST (resposta fulfilled com `error`),
+      // que antes passava como "0 linhas" e virava pasta vazia sem aviso.
+      const criticalFailed = [results[0], results[1], results[2], results[8]].some(queryFailed);
+      if (criticalFailed && loadInitialDataAttemptsRef.current < INITIAL_LOAD_MAX_RETRIES) {
+        loadInitialDataAttemptsRef.current += 1;
+        setTimeout(() => { loadInitialData(); }, 1500 * loadInitialDataAttemptsRef.current);
         return;
       }
       if (criticalFailed) {
         toast.error('Não foi possível carregar espaços/pastas/permissões. Tarefas podem aparecer faltando.', {
           action: {
             label: 'Tentar novamente',
-            onClick: () => { loadInitialDataRetriedRef.current = false; loadInitialData(); },
+            onClick: () => { loadInitialDataAttemptsRef.current = 0; loadInitialData(); },
           },
         });
       } else {
-        loadInitialDataRetriedRef.current = false;
+        loadInitialDataAttemptsRef.current = 0;
       }
 
       if (spacesData) {
@@ -1860,7 +1871,7 @@ export default function App() {
         // é permissiva, então o próprio carregamento do estado local precisa
         // excluir listas pessoais de outros usuários, senão qualquer lugar
         // que itere `lists` (paleta de comando, etc.) vaza pra qualquer um.
-        const myId = session?.user?.id;
+        const myId = sessionUserId;
         setLists(listsData
           .filter((l: any) => !l.owner_id || l.owner_id === myId)
           .map((l: any) => ({
@@ -1963,17 +1974,20 @@ export default function App() {
         })));
       }
 
-      setWorkspaceMetaLoaded(true);
+      // Com espaços/pastas/listas/permissões faltando NÃO se marca como carregado:
+      // isso evita a carga de tarefas tratar "lista de pastas não chegou" como
+      // "pasta realmente vazia" (ver gate de workspaceMetaLoaded em loadTasks).
+      if (!criticalFailed) setWorkspaceMetaLoaded(true);
     } catch (err) {
       console.error('Erro ao carregar dados iniciais:', err);
     }
-  }, [session]);
+  }, [sessionUserId]);
 
   useEffect(() => {
-    if (session) {
+    if (sessionUserId) {
       loadInitialData();
     }
-  }, [session, loadInitialData]);
+  }, [sessionUserId, loadInitialData]);
 
   // Realtime: atualiza userAccess + recarrega spaces/folders quando admin alterar permissões
   useEffect(() => {
@@ -2253,8 +2267,18 @@ export default function App() {
     return null;
   }, [activeListId, activeScope, lists, folders]);
 
+  // Kanban e Gantt são views por lista. Se a URL cair num espaço/pasta
+  // agregador (ex.: /suporte-t-i/ativos-eletronicos/kanban), escolha a
+  // primeira lista acessível daquele escopo em vez de deixar a tela "reiniciar"
+  // para o aviso "Selecione uma lista".
+  useEffect(() => {
+    if (activeListId || !LIST_REQUIRED_VIEWS.includes(activeView)) return;
+    const firstListId = scopedListIds?.[0];
+    if (firstListId) setActiveListId(firstListId);
+  }, [activeView, activeListId, scopedListIds]);
+
   const loadTasks = useCallback(async () => {
-    if (!session) return;
+    if (!sessionUserId) return;
     // `currentUser` ainda é o placeholder FALLBACK_USER (id 'loading') logo
     // após o login, antes do perfil real chegar — chamar fetchMyTaskRows com
     // esse id gera 400 (uuid inválido) toda vez que "Minhas Tarefas" carrega
@@ -2331,6 +2355,12 @@ export default function App() {
     // custo das leituras amplas quando o usuário só quer aquele quadro.
     const listIds = scopedListIds;
 
+    // Escopo de pasta/espaço com `lists` ainda não carregadas dá `listIds = []`,
+    // que é indistinguível de "pasta realmente vazia" para o PostgREST (200 + []).
+    // Antes do workspace estar carregado, não gravamos nada: a pasta fica em
+    // carregamento, e a chegada de `lists` (que muda `scopedListIds`) refaz a carga.
+    if (!activeListId && listIds && listIds.length === 0 && !workspaceMetaLoaded) return;
+
     // Sub-entidades NÃO são hidratadas aqui (carregadas sob demanda ao abrir a
     // tarefa) — mantém o load barato mesmo com dezenas de milhares de tarefas.
     setIsTasksLoading(true);
@@ -2396,7 +2426,7 @@ export default function App() {
         setIsTasksLoading(false);
       }
     }
-  }, [session, activeListId, activeScope, activeView, currentUser.id, scopedListIds]);
+  }, [sessionUserId, activeListId, activeScope, activeView, currentUser.id, scopedListIds, workspaceMetaLoaded]);
 
   useEffect(() => {
     loadTasks();
@@ -4262,6 +4292,20 @@ export default function App() {
 
         {/* Main Content */}
         <div className="flex-1 flex flex-col min-w-0 bg-muted">
+          {recoveryNotice && (
+            <NotificationBanner className="shrink-0" onDismiss={dismissRecoveryNotice}>
+              <span className="font-semibold">A conexão ficou instável.</span>
+              <span className="mx-2 text-gray-400">·</span>
+              Nada foi perdido nem recarregado. Termine o que está escrevendo e recarregue quando quiser.
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="ml-3 font-semibold underline hover:no-underline"
+              >
+                Recarregar agora
+              </button>
+            </NotificationBanner>
+          )}
           {updateNotice && (
             <NotificationBanner className="shrink-0" onDismiss={() => setUpdateNotice(null)}>
               <span className="font-semibold">{updateNotice.message}</span>

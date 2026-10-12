@@ -1,6 +1,7 @@
 import { createClient, processLock } from '@supabase/supabase-js';
 import { withLockTimeout, LockOperationTimeoutError } from './lockTimeout';
 import { trackRequestForSlowness } from './connectionStatus';
+import { reportRecoverableProblem } from './recoveryNotice';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
@@ -97,9 +98,9 @@ export default supabase;
 // renovação automática de token disparando num mau momento).
 export function handleUnhandledLockTimeout(event: { reason: unknown; preventDefault: () => void }): void {
     if (!(event.reason instanceof LockOperationTimeoutError)) return;
-    console.warn('supabase.ts: LockOperationTimeoutError não tratada — recarregando a página.', event.reason);
+    // Só avisa; não recarrega sozinho (ver recoveryNotice.ts).
     event.preventDefault();
-    window.location.reload();
+    reportRecoverableProblem('a trava de autenticação da aba travou (LockOperationTimeoutError)');
 }
 
 window.addEventListener('unhandledrejection', handleUnhandledLockTimeout);
@@ -288,12 +289,15 @@ export async function deleteWorkspaceTag(tagId: string): Promise<void> {
 }
 
 export async function updateTaskTags(taskId: string, tagNames: string[]): Promise<void> {
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from('tasks')
     .update({ tags: tagNames })
-    .eq('id', taskId);
+    .eq('id', taskId)
+    .select('id');
 
   if (error) throw error;
+  // 0 linhas = RLS negou / sessão perdida (PostgREST não dá erro nesse caso).
+  if (!data || data.length === 0) throw new Error('A alteração não foi gravada (sem permissão ou sessão expirada).');
 }
 
 // ── Automations ────────────────────────────────────────────
