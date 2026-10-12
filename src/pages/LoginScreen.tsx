@@ -1,10 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
+import { shouldAutoRedirectToPortal } from '@/lib/loginRedirect';
+import { logAuthEvent } from '@/lib/authEvents';
 
 interface LoginScreenProps {
     onLogin: () => void;
     /** Mensagem de erro quando o SSO do vpsistema falhou nesta visita. */
     ssoError?: string | null;
+    /** A sessão caiu com a página aberta (não foi logout manual nem primeira visita). */
+    sessionExpired?: boolean;
 }
 
 const BACKGROUND_IMAGES = [
@@ -21,7 +25,7 @@ const LOGO_URL = 'https://verticalparts.com.br/wp-content/uploads/2026/01/grp__N
 const PRODUCTION_HOST = 'vpclick.vpsistema.com';
 const PORTAL_URL = 'https://vpsistema.com';
 
-export default function LoginScreen({ onLogin, ssoError }: LoginScreenProps) {
+export default function LoginScreen({ onLogin, ssoError, sessionExpired }: LoginScreenProps) {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [loading, setLoading] = useState(false);
@@ -39,11 +43,12 @@ export default function LoginScreen({ onLogin, ssoError }: LoginScreenProps) {
     // que a manda de volta pra cá, e o vai-e-vem se repete sem nunca mostrar
     // o motivo da falha. Nesse caso paramos e explicamos o que aconteceu.
     useEffect(() => {
-        if (ssoError) return;
-        if (entradaSomentePeloPortal) {
+        if (sessionExpired) logAuthEvent('session_expired_screen');
+        if (shouldAutoRedirectToPortal({ entradaSomentePeloPortal, ssoError, sessionExpired })) {
+            logAuthEvent('redirect_to_portal', 'visita sem sessão');
             window.location.replace(PORTAL_URL);
         }
-    }, [ssoError, entradaSomentePeloPortal]);
+    }, [ssoError, entradaSomentePeloPortal, sessionExpired]);
 
     useEffect(() => {
         const interval = setInterval(() => {
@@ -138,6 +143,11 @@ export default function LoginScreen({ onLogin, ssoError }: LoginScreenProps) {
                                         continuar, avise o administrador com a mensagem acima.
                                     </p>
                                 </>
+                            ) : sessionExpired ? (
+                                <p className="text-slate-300 text-xs leading-relaxed text-center">
+                                    Sua sessão expirou. Nada foi enviado ao portal sozinho: quando
+                                    quiser, clique no botão abaixo para entrar de novo.
+                                </p>
                             ) : (
                                 <p className="text-slate-300 text-xs leading-relaxed text-center">
                                     Redirecionando para o portal VerticalParts, onde você faz o
