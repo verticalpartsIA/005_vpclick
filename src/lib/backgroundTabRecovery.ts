@@ -69,7 +69,10 @@ function reloadIfSafe(reason: string): void {
   reportRecoverableProblem(reason);
 }
 
-export function startBackgroundTabRecovery(): () => void {
+// `onResume` roda a cada volta após ausência longa, ANTES de qualquer aviso: é onde
+// o app rebusca os dados (tarefas, espaços) em silêncio, sem recarregar a página,
+// porque a aba ficou parada e o que está na tela pode estar velho ou vazio.
+export function startBackgroundTabRecovery(onResume?: () => void): () => void {
   let awaySince: number | null = null;
   let recovering = false; // evita checar 2x se visibilitychange e focus dispararem quase juntos pro mesmo retorno
 
@@ -82,6 +85,8 @@ export function startBackgroundTabRecovery(): () => void {
     const awayDurationMs = Date.now() - awaySince;
     awaySince = null;
     if (awayDurationMs < AWAY_THRESHOLD_MS) return;
+
+    try { onResume?.(); } catch (err) { console.error('backgroundTabRecovery: onResume falhou', err); }
 
     recovering = true;
     let settled = false;
