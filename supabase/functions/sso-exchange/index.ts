@@ -23,6 +23,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { identityUpdateForExistingUser, mapCentralLevelToRole } from './identity.ts';
 
 const CENTRAL_URL = 'https://ubdkoqxfwcraftesgmbw.supabase.co';
 const CENTRAL_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InViZGtvcXhmd2NyYWZ0ZXNnbWJ3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzUwNjUwMjcsImV4cCI6MjA5MDY0MTAyN30.s1A15nFQVne94gbz0511L2IYvHdTcgYeL0H8YU80iI8';
@@ -32,21 +33,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
-
-function normalizeRoleText(value: unknown): string {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .trim()
-    .toLowerCase();
-}
-
-function mapCentralLevelToRole(level: unknown): 'ADMIN' | 'GESTOR' | 'COLABORADOR' {
-  const normalized = normalizeRoleText(level);
-  if (normalized.includes('admin')) return 'ADMIN';
-  if (normalized.includes('lider') || normalized.includes('gestor')) return 'GESTOR';
-  return 'COLABORADOR';
-}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
@@ -119,7 +105,7 @@ Deno.serve(async (req) => {
       }
 
       // Cria o perfil já herdando a identidade do vpsistema; o papel inicial
-      // vem do nível de lá e pode ser ajustado depois no painel do VPClick.
+      // vem do nível de lá e é a fonte da verdade depois disso e pode ser ajustado no painel do VPClick.
       const { error: profileError } = await admin.from('profiles').upsert({
         id: targetUserId,
         name: centralName,
@@ -131,10 +117,11 @@ Deno.serve(async (req) => {
       if (profileError) console.error('sso-exchange: erro ao criar perfil herdado:', profileError);
     } else {
       targetUserId = users[0].id;
-      // Identidade e papel seguem sincronizados com a porta de entrada
-      // (vpsistema). As alçadas por espaço/pasta continuam no VP Click.
-      const identity: Record<string, string> = { name: centralName, role: mappedRole };
-      if (centralAvatar) identity.avatar = centralAvatar;
+      // Só nome e avatar seguem o vpsistema. O papel NÃO é sobrescrito: depois
+      // do primeiro acesso, o do VP Click é a fonte da verdade (ajustes do
+      // painel não são desfeitos a cada login). As alçadas por espaço/pasta
+      // também continuam no VP Click.
+      const identity = identityUpdateForExistingUser(centralName, centralAvatar);
       const { error: syncError } = await admin.from('profiles').update(identity).eq('id', targetUserId);
       if (syncError) console.error('sso-exchange: erro ao sincronizar identidade:', syncError);
     }
