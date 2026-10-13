@@ -54,6 +54,17 @@ describe('startBackgroundTabRecovery', () => {
     expect(reloadSpy).not.toHaveBeenCalled();
   });
 
+  it('refreshes the data (onResume) after a long absence, and not after a brief one', async () => {
+    getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({} as any);
+    const onResume = vi.fn();
+    stop = startBackgroundTabRecovery(onResume);
+    await awayAndBack(5_000);
+    expect(onResume).not.toHaveBeenCalled();
+    await awayAndBack(120_000);
+    expect(onResume).toHaveBeenCalledTimes(1);
+    expect(reloadSpy).not.toHaveBeenCalled();
+  });
+
   it('stays silent when the session responds fine', async () => {
     getSessionSpy = vi.spyOn(supabase.auth, 'getSession').mockResolvedValue({} as any);
     stop = startBackgroundTabRecovery();

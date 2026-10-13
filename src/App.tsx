@@ -1074,7 +1074,8 @@ export default function App() {
   // F5 manual resolvia. Em vez de esperar o usuário descobrir isso tentando
   // usar a tela, recupera sozinho assim que a aba volta a ficar visível (ver
   // src/lib/backgroundTabRecovery.ts).
-  useEffect(() => startBackgroundTabRecovery(), []);
+  const resumeRefreshRef = useRef<() => void>(() => {});
+  useEffect(() => startBackgroundTabRecovery(() => resumeRefreshRef.current()), []);
 
   // App montou com sucesso: libera um novo reload automático caso um chunk de
   // uma view lazy de um deploy FUTURO também fique stale nesta mesma aba (ver
@@ -2447,6 +2448,16 @@ export default function App() {
   // precisar recriar o canal a cada mudança de escopo.
   const loadTasksRef = useRef(loadTasks);
   useEffect(() => { loadTasksRef.current = loadTasks; }, [loadTasks]);
+  // Ao voltar para a aba depois de um tempo, rebusca espaços/pastas e tarefas em
+  // silêncio (sem reload, sem perder rascunhos). Antes só aparecia um aviso e a
+  // tela ficava com dados velhos/vazios até o usuário apertar F5.
+  useEffect(() => {
+    resumeRefreshRef.current = () => {
+      loadInitialDataAttemptsRef.current = 0;
+      loadInitialData();
+      loadTasksRef.current();
+    };
+  }, [loadInitialData]);
   const refreshTaskCountIndexRef = useRef(refreshTaskCountIndex);
   useEffect(() => { refreshTaskCountIndexRef.current = refreshTaskCountIndex; }, [refreshTaskCountIndex]);
   const loadDashboardTasksRef = useRef(loadDashboardTasks);
@@ -4305,9 +4316,9 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0 bg-muted">
           {recoveryNotice && (
             <NotificationBanner className="shrink-0" onDismiss={dismissRecoveryNotice}>
-              <span className="font-semibold">A conexão ficou instável.</span>
+              <span className="font-semibold">A sessão desta aba pode estar desatualizada.</span>
               <span className="mx-2 text-gray-400">·</span>
-              Nada foi perdido nem recarregado. Termine o que está escrevendo e recarregue quando quiser.
+              Já tentamos atualizar os dados sozinhos. Se alguma tarefa não aparecer, termine o que está escrevendo e recarregue.
               <button
                 type="button"
                 onClick={() => window.location.reload()}
