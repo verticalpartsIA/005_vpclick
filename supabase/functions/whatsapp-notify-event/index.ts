@@ -77,6 +77,7 @@ function normalize(s: string): string {
 
 async function findContactPhone(profileName: string): Promise<{ phone: string | null; matchedName: string | null; similarity: number | null }> {
   if (!CONTACTS_PROJECT_URL || !CONTACTS_SERVICE_ROLE_KEY) {
+    console.log('[whatsapp-notify-event] DEBUG: CONTACTS_PROJECT_URL ou CONTACTS_SERVICE_ROLE_KEY ausente nas secrets');
     return { phone: null, matchedName: null, similarity: null };
   }
   const contactsClient = createClient(CONTACTS_PROJECT_URL, CONTACTS_SERVICE_ROLE_KEY);
@@ -84,7 +85,11 @@ async function findContactPhone(profileName: string): Promise<{ phone: string | 
     .from('internal_contacts')
     .select('nome, phone')
     .eq('ativo', true);
-  if (error || !data) return { phone: null, matchedName: null, similarity: null };
+  if (error || !data) {
+    console.log(`[whatsapp-notify-event] DEBUG: erro ao consultar internal_contacts: ${error?.message ?? 'data nula'} (code=${(error as { code?: string })?.code ?? 'n/a'})`);
+    return { phone: null, matchedName: null, similarity: null };
+  }
+  console.log(`[whatsapp-notify-event] DEBUG: internal_contacts retornou ${data.length} contatos ativos`);
 
   const target = normalize(profileName);
   // Similaridade simples por sobreposição de palavras do nome (sem depender
