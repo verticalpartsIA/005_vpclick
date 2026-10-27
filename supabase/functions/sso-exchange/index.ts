@@ -20,9 +20,15 @@
  *
  * Deploy:
  *   supabase functions deploy sso-exchange --project-ref sfpnjwllcmentoocylow --no-verify-jwt
+ *
+ * FIX (27/10/2026): import trocado de esm.sh para npm: — o import via esm.sh
+ * causava BOOT_ERROR (function não inicializava) no Edge Runtime do Supabase,
+ * derrubando o SSO do VP Click inteiro (achado investigando um caso real de
+ * colaboradora não conseguindo entrar). npm: é o padrão já usado em todas as
+ * edge functions do vpsistema, comprovadamente estável nesse runtime.
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2';
 import { identityUpdateForExistingUser, mapCentralLevelToRole } from './identity.ts';
 
 const CENTRAL_URL = 'https://ubdkoqxfwcraftesgmbw.supabase.co';
