@@ -9,9 +9,13 @@
  *
  * Deploy:
  *   supabase functions deploy admin-user-management --project-ref sfpnjwllcmentoocylow
+ *
+ * FIX (27/10/2026): import trocado de esm.sh para npm: — mesmo padrão frágil
+ * que causou BOOT_ERROR na sso-exchange (ver PR #268); preventivo aqui, essa
+ * function não chegou a quebrar.
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',

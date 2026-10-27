@@ -10,9 +10,13 @@
  *
  * Secrets necessários (supabase secrets set):
  *   INTEGRATION_SECRET=vp-hub-integration-2026-secret
+ *
+ * FIX (27/10/2026): import trocado de esm.sh para npm: — mesmo padrão frágil
+ * que causou BOOT_ERROR na sso-exchange (ver PR #268); preventivo aqui, essa
+ * function não chegou a quebrar.
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2';
 
 // ── Constantes ────────────────────────────────────────────────
 const AUTOMACAO_USER_ID = 'fe56a4d8-e31d-4fbd-9d96-3b32cbd2a5d7'; // usuário "Automação"
